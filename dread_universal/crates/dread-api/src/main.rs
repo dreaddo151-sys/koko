@@ -1,17 +1,16 @@
 use axum::{
+    Json, Router,
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
-    Json, Router,
 };
 use dread_discovery::{discover, load_services};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
-    env,
-    fs,
+    env, fs,
     net::SocketAddr,
     path::Path as FsPath,
     sync::{Arc, Mutex},
@@ -56,15 +55,24 @@ struct ApiError {
 
 impl ApiError {
     fn bad_request(message: impl Into<String>) -> Self {
-        Self { status: StatusCode::BAD_REQUEST, message: message.into() }
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
     }
 
     fn internal(message: impl Into<String>) -> Self {
-        Self { status: StatusCode::INTERNAL_SERVER_ERROR, message: message.into() }
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+        }
     }
 
     fn not_found(message: impl Into<String>) -> Self {
-        Self { status: StatusCode::NOT_FOUND, message: message.into() }
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: message.into(),
+        }
     }
 }
 
@@ -105,7 +113,10 @@ fn open_database(path: &str) -> anyhow::Result<Connection> {
 }
 
 fn db_lock(state: &AppState) -> Result<std::sync::MutexGuard<'_, Connection>, ApiError> {
-    state.db.lock().map_err(|_| ApiError::internal("Database lock is unavailable"))
+    state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("Database lock is unavailable"))
 }
 
 async fn health() -> Json<Value> {
@@ -117,8 +128,8 @@ async fn health() -> Json<Value> {
 }
 
 async fn services() -> Result<Json<Value>, ApiError> {
-    let config_path = env::var("DREAD_SERVICES_CONFIG")
-        .unwrap_or_else(|_| "config/services.toml".to_string());
+    let config_path =
+        env::var("DREAD_SERVICES_CONFIG").unwrap_or_else(|_| "config/services.toml".to_string());
 
     let configured = match load_services(&config_path) {
         Ok(items) => items,
@@ -127,9 +138,9 @@ async fn services() -> Result<Json<Value>, ApiError> {
     };
 
     let results = discover(configured).await;
-    serde_json::to_value(results)
-        .map(Json)
-        .map_err(|error| ApiError::internal(format!("Could not serialize service results: {error}")))
+    serde_json::to_value(results).map(Json).map_err(|error| {
+        ApiError::internal(format!("Could not serialize service results: {error}"))
+    })
 }
 
 async fn list_registry(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -170,7 +181,9 @@ async fn create_registry(
         return Err(ApiError::bad_request("Both name and kind are required"));
     }
     if name.len() > 200 || kind.len() > 80 {
-        return Err(ApiError::bad_request("name or kind exceeds its maximum length"));
+        return Err(ApiError::bad_request(
+            "name or kind exceeds its maximum length",
+        ));
     }
     if let Some(endpoint) = &input.endpoint {
         if endpoint.len() > 2048 {
@@ -190,16 +203,19 @@ async fn create_registry(
     )
     .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    Ok((StatusCode::CREATED, Json(json!({
-        "item": RegistryEntry {
-            id,
-            name: name.to_string(),
-            kind: kind.to_string(),
-            endpoint: input.endpoint,
-            metadata: input.metadata,
-            created_at
-        }
-    }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "item": RegistryEntry {
+                id,
+                name: name.to_string(),
+                kind: kind.to_string(),
+                endpoint: input.endpoint,
+                metadata: input.metadata,
+                created_at
+            }
+        })),
+    ))
 }
 
 async fn get_registry_item(
@@ -268,10 +284,12 @@ async fn main() -> anyhow::Result<()> {
 
     let bind = env::var("DREAD_BIND").unwrap_or_else(|_| "127.0.0.1:8765".to_string());
     let addr: SocketAddr = bind.parse()?;
-    let db_path = env::var("DREAD_DB_PATH")
-        .unwrap_or_else(|_| "data/dread_registry.sqlite3".to_string());
+    let db_path =
+        env::var("DREAD_DB_PATH").unwrap_or_else(|_| "data/dread_registry.sqlite3".to_string());
     let db = open_database(&db_path)?;
-    let state = AppState { db: Arc::new(Mutex::new(db)) };
+    let state = AppState {
+        db: Arc::new(Mutex::new(db)),
+    };
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(address = %addr, database = %db_path, "PROJECT DREAD Universal API listening");
