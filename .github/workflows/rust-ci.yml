@@ -8,6 +8,7 @@ permissions:
   contents: read
 jobs:
   quality:
+    if: ${{ hashFiles('dread_universal/Cargo.toml') != '' }}
     runs-on: ubuntu-latest
     defaults:
       run:
