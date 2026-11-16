@@ -1,0 +1,19 @@
+# Local endpoints monitored by the DREAD Universal service-discovery API.
+# Keep these loopback-only unless you intentionally change the discovery policy.
+[[services]]
+id = "dread-hub"
+name = "PROJECT DREAD Hub"
+url = "http://127.0.0.1:8080/"
+role = "control-plane"
+
+[[services]]
+id = "comfyui"
+name = "ComfyUI"
+url = "http://127.0.0.1:8188/system_stats"
+role = "image-video-runtime"
+
+[[services]]
+id = "ollama"
+name = "Ollama"
+url = "http://127.0.0.1:11434/api/tags"
+role = "local-inference"
