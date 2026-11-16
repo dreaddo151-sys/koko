@@ -9,6 +9,9 @@ permissions:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dread_universal
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
