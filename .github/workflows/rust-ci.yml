@@ -18,19 +18,11 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Workspace availability
-        id: workspace
-        run: test -f Cargo.toml
-        continue-on-error: true
       - name: Formatting
-        if: steps.workspace.outcome == 'success'
         run: cargo fmt --all -- --check
       - name: Clippy
-        if: steps.workspace.outcome == 'success'
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
-        if: steps.workspace.outcome == 'success'
-        run: cargo test --workspace --locked
+        run: cargo test --workspace
       - name: Release build
-        if: steps.workspace.outcome == 'success'
-        run: cargo build --workspace --release --locked
+        run: cargo build --workspace --release
