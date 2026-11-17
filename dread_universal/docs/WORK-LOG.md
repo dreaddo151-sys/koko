@@ -104,3 +104,19 @@ Every handoff separates:
 - **Next action** — one concrete implementation step.
 
 Do not describe the platform as complete until Master Plan acceptance gates pass. Do not claim Codex, another model or an external agent was used unless its execution tool actually ran.
+
+
+## 11. Live continuation — 2026-11-17
+
+- Current source branch head after fixes: `0a2553bfd778424c268cb9fd8a9bb278d32f4037`.
+- PR #12 remains open and unmerged. CI run #131 (`44144854217`) validated the merge commit for PR #12:
+  - Web console build: PASS.
+  - Rust formatting: PASS.
+  - Rust Clippy with warnings denied: PASS.
+  - Rust tests: FAIL in `dread-skills::tests::loads_only_exact_catalog_ids`.
+- Failure root cause: `load_skill_context` joined a safe relative catalog path to the canonical absolute root and then rejected the resulting absolute path because its components necessarily include `RootDir`. This made every legitimate skill load fail with `UnsafePath`.
+- Corrected in commit `0a2553bfd778424c268cb9fd8a9bb278d32f4037`: validate the descriptor path while it is still relative, then re-check the joined file with `symlink_metadata`, size bound, canonical path containment and UTF-8 validation. The existing regression test covers the successful exact-ID load; symlink rejection remains covered separately.
+- New CI run #132: `44145187972`, queued at last check. Its result is not yet known.
+- OpenHands Agent Server contract was rechecked against the current upstream Agent SDK OpenAPI schema. Local API surface includes `POST /api/conversations`, `GET /api/conversations/{id}`, `POST /api/conversations/{id}/events`, event search/count, run, pause, delete and WebSocket events. Local conversation creation requires an Agent configuration and a workspace; LLM and tool definitions are part of that request.
+- Security/design gate: OpenHands `LocalWorkspace` executes tools against a host working directory. Enabling TerminalTool/FileEditorTool without a constrained workspace and explicit DREAD policy would grant direct host filesystem/command access. Also, allowing OpenHands to configure its own LLM endpoint could bypass the Python GPU Supervisor. Therefore do not mark the OpenHands adapter enabled or dispatch host-mutating tasks until the workspace isolation, confirmation policy, credentials and Supervisor-routed LLM path are proven. Health-only probes remain discovery evidence, not execution acceptance.
+- The current branch has not been installed on the workstation. No local Ubuntu acceptance, real agent task, H3 MP4 or FlashVSR artifact is claimed by this continuation.
