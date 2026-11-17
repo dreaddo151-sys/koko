@@ -3487,6 +3487,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capability_batch_import_is_atomic_idempotent_and_never_executes() {
+        let (router, server) = test_app().await;
+        let make_record = |id: &str, source_hash: &str| {
+            json!({
+                "id": id,
+                "name": format!("Capability {id}"),
+                "kind": "skill",
+                "description": "Pinned metadata only",
+                "version": "1.0.0",
+                "license": "MIT",
+                "provenance": {
+                    "source_name": "Pstack",
+                    "source_uri": "https://github.com/cursor/plugins/tree/revision/pstack",
+                    "source_version": "1.0.0",
+                    "source_revision": "revision",
+                    "imported_at": 100
+                },
+                "manifest": {
+                    "source_sha256": source_hash,
+                    "execution_performed": false,
+                    "review_state": "disabled_until_reviewed"
+                }
+            })
+        };
+        let records = vec![
+            make_record("pstack.skill.batch-one", "hash-one"),
+            make_record("pstack.skill.batch-two", "hash-two"),
+        ];
+        let payload = json!({"records": records});
+        let send_batch = |router: Router, payload: Value| async move {
+            router
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/capabilities/import-batch")
+                        .header("content-type", "application/json")
+                        .body(Body::from(payload.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        };
+
+        let response = send_batch(router.clone(), payload.clone()).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let imported: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(imported["created"], 2);
+        assert_eq!(imported["already_present"], 0);
+        assert_eq!(imported["execution_started"], false);
+
+        let response = send_batch(router.clone(), payload.clone()).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let repeated: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(repeated["created"], 0);
+        assert_eq!(repeated["already_present"], 2);
+
+        let conflict_payload = json!({
+            "records": [
+                make_record("pstack.skill.must-rollback", "hash-new"),
+                make_record("pstack.skill.batch-one", "tampered-hash")
+            ]
+        });
+        let response = send_batch(router.clone(), conflict_payload).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/capabilities/pstack.skill.must-rollback")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn capability_rejects_invalid_ids_and_missing_provenance() {
         let (router, server) = test_app().await;
         let payload = json!({
