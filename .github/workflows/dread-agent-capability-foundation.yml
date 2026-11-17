@@ -122,7 +122,6 @@ jobs:
           set -euo pipefail
           cd "$WORKSPACE"
           patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/task-websocket-stream.patch"
-          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/task-websocket-replay.patch"
           grep -q '/api/tasks/{id}/stream' crates/dread-api/src/main.rs
           cargo fmt --all
           cargo check --workspace
