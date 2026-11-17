@@ -1040,13 +1040,16 @@ async fn execute_approved_task(
         let Ok(tx) = conn.transaction() else {
             return;
         };
-        let current_status: Option<String> = match tx.query_row(
-            "SELECT status FROM tasks WHERE id = ?1",
-            params![task_id],
-            |row| row.get(0),
-        ) {
-            Ok(status) => Some(status),
-            Err(_) => None,
+        let current_status: Option<String> = match tx
+            .query_row(
+                "SELECT status FROM tasks WHERE id = ?1",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .optional()
+        {
+            Ok(status) => status,
+            Err(_) => return,
         };
         let Some(current_status) = current_status else {
             return;
