@@ -2318,6 +2318,11 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
             "UPDATE tasks SET status = 'failed', updated_at = ?2 WHERE id = ?1 AND status = 'running'",
             params![task_id, now],
         )?;
+        tx.execute(
+            "UPDATE missions SET status = 'blocked'
+             WHERE id IN (SELECT mission_id FROM mission_tasks WHERE task_id = ?1)",
+            params![task_id],
+        )?;
         let reason = "Task interrupted by API process restart; it was not automatically replayed";
         tx.execute(
             "INSERT OR REPLACE INTO task_results (task_id, result_json, error, attempts, elapsed_ms, completed_at)
@@ -2365,6 +2370,11 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
             continue;
         }
 
+        tx.execute(
+            "UPDATE missions SET status = 'blocked'
+             WHERE id IN (SELECT mission_id FROM mission_tasks WHERE task_id = ?1)",
+            params![task.id],
+        )?;
         let reason = "Queued task is not eligible for automatic recovery; explicit operator review is required";
         tx.execute(
             "UPDATE tasks SET status = 'failed', updated_at = ?2 WHERE id = ?1 AND status = 'queued'",
