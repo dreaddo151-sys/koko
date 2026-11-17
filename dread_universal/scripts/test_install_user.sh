@@ -20,13 +20,20 @@ case "$1" in
   is-active)
     [[ -f "$MOCK_SYSTEMD_STATE" && "$(cat "$MOCK_SYSTEMD_STATE")" == active ]]
     ;;
-  stop|disable)
+  is-enabled)
+    [[ -f "$MOCK_SYSTEMD_ENABLED" && "$(cat "$MOCK_SYSTEMD_ENABLED")" == enabled ]]
+    ;;
+  stop)
     printf 'stopped\n' > "$MOCK_SYSTEMD_STATE"
+    ;;
+  disable)
+    printf 'disabled\n' > "$MOCK_SYSTEMD_ENABLED"
     ;;
   start)
     printf 'active\n' > "$MOCK_SYSTEMD_STATE"
     ;;
   enable)
+    printf 'enabled\n' > "$MOCK_SYSTEMD_ENABLED"
     shift
     if [[ "${1:-}" == "--now" ]]; then
       printf 'active\n' > "$MOCK_SYSTEMD_STATE"
@@ -88,6 +95,7 @@ run_installer() {
   HOME="$HOME" \
   DREAD_INSTALL_DIR="$PREFIX" \
   MOCK_SYSTEMD_STATE="$STATE" \
+  MOCK_SYSTEMD_ENABLED="$TMP/systemd-enabled" \
   PATH="$MOCK_BIN:$PATH" \
   bash "$bundle/install-user.sh" 2>/dev/null
 }
@@ -116,13 +124,26 @@ fi
 grep -q 'keep-backup-marker' "$backup_marker"
 
 printf 'Portable update backup preserved the prior application tree.\n'
+# Force a failed update after the installer has rewritten its unit and augmented
+# an existing credential file. Rollback must restore both files byte-for-byte.
+UNIT_FILE="$HOME/.config/systemd/user/dread-universal.service"
+ENV_FILE="$HOME/.config/dread-universal/dread.env"
+printf '[Unit]\nDescription=pre-update-unit-sentinel\n' > "$UNIT_FILE"
+chmod 0600 "$UNIT_FILE"
+sed -i '/^DREAD_OPERATOR_ID=/d' "$ENV_FILE"
+cp "$UNIT_FILE" "$TMP/unit-before-failure"
+cp "$ENV_FILE" "$TMP/env-before-failure"
+
 BUNDLE3="$(make_bundle v3)"
-if HOME="$HOME" DREAD_INSTALL_DIR="$PREFIX" MOCK_SYSTEMD_STATE="$STATE" MOCK_FAIL_HEALTH=1 PATH="$MOCK_BIN:$PATH" bash "$BUNDLE3/install-user.sh" >/dev/null; then
+if HOME="$HOME" DREAD_INSTALL_DIR="$PREFIX" MOCK_SYSTEMD_STATE="$STATE" MOCK_SYSTEMD_ENABLED="$TMP/systemd-enabled" MOCK_FAIL_HEALTH=1 PATH="$MOCK_BIN:$PATH" bash "$BUNDLE3/install-user.sh" >/dev/null; then
   printf 'Expected the forced health-check failure to trigger rollback.\n' >&2
   exit 1
 fi
 [[ "$("$PREFIX/bin/dread-universal")" == v2 ]]
 [[ "$(cat "$STATE")" == active ]]
+cmp -s "$TMP/unit-before-failure" "$UNIT_FILE"
+cmp -s "$TMP/env-before-failure" "$ENV_FILE"
+[[ "$(cat "$TMP/systemd-enabled")" == enabled ]]
 failed_install="$(find "$HOME/.local/opt" -maxdepth 1 -type d -name 'dread-universal.failed.*' -print -quit)"
 if [[ -z "$failed_install" ]]; then
   printf 'Failed release tree was not retained for diagnosis.\n' >&2
@@ -130,4 +151,4 @@ if [[ -z "$failed_install" ]]; then
   exit 1
 fi
 
-printf 'Portable installer migration, permissions, backup and rollback: PASS\n'
+printf 'Portable installer migration, permissions, backup, unit/credential restoration and rollback: PASS\n'
