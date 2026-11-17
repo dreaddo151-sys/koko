@@ -5,7 +5,10 @@ use axum::{
         DefaultBodyLimit, Path, Query, Request, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
-    http::{StatusCode, Uri, header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE}},
+    http::{
+        StatusCode, Uri,
+        header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE},
+    },
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
@@ -284,10 +287,13 @@ fn read_static_asset(root: &FsPath, uri_path: &str) -> Result<(String, Vec<u8>),
     let canonical_root = root.canonicalize().map_err(|_| StatusCode::NOT_FOUND)?;
     let candidate = canonical_root.join(relative);
     let metadata = fs::symlink_metadata(&candidate).map_err(|_| StatusCode::NOT_FOUND)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 16 * 1024 * 1024 {
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 16 * 1024 * 1024
+    {
         return Err(StatusCode::NOT_FOUND);
     }
-    let canonical_file = candidate.canonicalize().map_err(|_| StatusCode::NOT_FOUND)?;
+    let canonical_file = candidate
+        .canonicalize()
+        .map_err(|_| StatusCode::NOT_FOUND)?;
     if !canonical_file.starts_with(&canonical_root) {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -3574,7 +3580,11 @@ mod tests {
     fn production_static_assets_are_served_safely() {
         let root = std::env::temp_dir().join(format!("dread-web-{}", Uuid::new_v4()));
         fs::create_dir_all(root.join("assets")).unwrap();
-        fs::write(root.join("index.html"), "<!doctype html><title>DREAD</title>").unwrap();
+        fs::write(
+            root.join("index.html"),
+            "<!doctype html><title>DREAD</title>",
+        )
+        .unwrap();
         fs::write(root.join("assets/app.js"), "console.log('dread')").unwrap();
 
         let (content_type, index) = read_static_asset(&root, "/").unwrap();
@@ -3585,8 +3595,14 @@ mod tests {
         assert_eq!(content_type, "text/javascript; charset=utf-8");
         assert!(String::from_utf8(script).unwrap().contains("console.log"));
 
-        assert_eq!(read_static_asset(&root, "/../outside.txt"), Err(StatusCode::NOT_FOUND));
-        assert_eq!(read_static_asset(&root, "/api/tasks"), Err(StatusCode::NOT_FOUND));
+        assert_eq!(
+            read_static_asset(&root, "/../outside.txt"),
+            Err(StatusCode::NOT_FOUND)
+        );
+        assert_eq!(
+            read_static_asset(&root, "/api/tasks"),
+            Err(StatusCode::NOT_FOUND)
+        );
 
         #[cfg(unix)]
         {
