@@ -56,3 +56,24 @@ Run #77 uploaded artifact `DREAD_UNIVERSAL_AGENT_DISCOVERY_FOUNDATION` (artifact
 - Frontend, GPU contention/lease handoff, installer/upgrade/rollback and dual-RTX-3090 acceptance.
 
 The existing Python GPU Supervisor remains the only GPU lease authority. Rust may use only its local gateway at `127.0.0.1:11500`; it must not contact the upstream model server directly or acquire a second GPU lock. Do not stop or modify the existing DREAD Hub, ComfyUI, Ollama or GPU Supervisor as part of Rust development.
+
+
+## Master-plan acceptance matrix (do not overstate completion)
+
+| Phase | Current evidence | Acceptance still required |
+|---|---|---|
+| 0 Baseline | Historical paths/endpoints and GPU policy documented | Confirm only changed prerequisites; current local Rust toolchain and exact Supervisor adapter contract remain unverified |
+| 1 Rust foundation | Candidate compiles, tests and release-builds in CI | Canonical source committed in repo; local non-conflicting health smoke test |
+| 2 Service adapters | Generic read-only configured agent health probing | Dedicated Hermes/OpenHands/OpenCode/Ollama/llama.cpp/ComfyUI/DREAD adapters; one read-only request each |
+| 3 Capability registry | Disabled-by-default registry plus pinned Pstack dry-run, 9 tests | Cursor manifest/agent ingestion, compatibility taxonomy, MCP/OpenAPI/CLI inventory and representative provenance checks |
+| 4 Orchestration | Task state/approval audit, event stream, bounded runner crate | Planner, worker adapter delegation, durable queue integration, result aggregation, cancellation and one delegated multi-agent test |
+| 5 GPU/resources | Existing gateway boundary documented | Python GPU Supervisor adapter, resource discovery, lease ownership and one controlled inference/handoff test |
+| 6 UI | No frontend acceptance evidence | React/TypeScript/Tailwind/shadcn production build and live API/WebSocket interaction |
+| 7 Repair | No repair executor acceptance evidence | Diagnose/plan/simulate/approve/apply/monitor/rollback with a safe reversible test |
+| 8 Release | CI candidate artifact only | Self-contained source, installer/upgrade/rollback, feature parity, workstation acceptance and explicit user-approved migration |
+
+## CI provenance limitation
+
+The workflow checks out this GitHub feature branch, downloads `DREAD_UNIVERSAL_COMPLETE_TRUE.zip` from the `dread-universal-v0.4.0-test` release, verifies a hard-coded SHA-256, applies the patch series from `audit-tools/`, then runs Rust checks and packages a derived source ZIP. The Rust workspace itself is not present as tracked `dread_universal/` files on this branch. Consequently, successful CI is evidence for that exact patched archive derivative; it is not evidence that a fresh checkout of this branch contains or builds the Rust source. Keep the original archive and patches until a canonical source branch builds directly from committed source.
+
+The next gate is source-of-truth consolidation, not adding more parallel patch layers. Preserve the baseline archive and patch provenance; build an isolated integration branch from the exact verified source candidate; run the same gates from the committed workspace; compare resulting manifests and tests. Do not merge to `main`, migrate services, or alter the local workstation during this consolidation.
