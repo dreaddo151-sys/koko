@@ -388,6 +388,7 @@ mod tests {
                     depends_on: vec!["a".into()],
                     priority: 0,
                     task_type: "x".into(),
+                    payload: Value::Null,
                 },
             ],
         };
