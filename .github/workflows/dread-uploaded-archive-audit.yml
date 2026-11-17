@@ -40,6 +40,7 @@ jobs:
           cd "$WORKSPACE"
           patch --batch --forward -p0 < "$GITHUB_WORKSPACE/audit-tools/discovery-hardening.patch"
           patch --batch --forward -p0 < "$GITHUB_WORKSPACE/audit-tools/gpu-api-hardening.patch"
+          cd "$WORKSPACE/.."
           patch --batch --forward -p0 < "$GITHUB_WORKSPACE/audit-tools/docs.patch"
           patch --batch --forward -p0 < "$GITHUB_WORKSPACE/audit-tools/pstack-pin-correction.patch"
           cp "$GITHUB_WORKSPACE/audit-tools/PROJECT_STATUS.md" "$WORKSPACE/docs/PROJECT_STATUS.md"
