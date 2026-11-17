@@ -1684,8 +1684,7 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(test)]
-use futures::StreamExt;
+    use futures::StreamExt;
     use axum::{
         body::{Body, to_bytes},
         http::Request,
