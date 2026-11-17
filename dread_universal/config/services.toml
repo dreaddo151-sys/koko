@@ -1,10 +1,12 @@
-# Local endpoints monitored by the DREAD Universal service-discovery API.
-# Keep these loopback-only unless you intentionally change the discovery policy.
+# Local endpoints monitored by DREAD Universal service discovery.
+# All endpoints remain loopback-only. Inference is served by the local
+# llama.cpp-compatible GPU gateway; Ollama is intentionally not configured.
+
 [[services]]
 id = "dread-hub"
-name = "PROJECT DREAD Hub"
+name = "PROJECT DREAD Legacy Hub"
 url = "http://127.0.0.1:8080/"
-role = "control-plane"
+role = "legacy-control-plane"
 
 [[services]]
 id = "comfyui"
@@ -13,7 +15,7 @@ url = "http://127.0.0.1:8188/system_stats"
 role = "image-video-runtime"
 
 [[services]]
-id = "ollama"
-name = "Ollama"
-url = "http://127.0.0.1:11434/api/tags"
+id = "llama-cpp-gateway"
+name = "DREAD llama.cpp GPU Gateway"
+url = "http://127.0.0.1:11500/health"
 role = "local-inference"
