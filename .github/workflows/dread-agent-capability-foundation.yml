@@ -107,6 +107,8 @@ jobs:
           grep -q "REDIRECTED" "$WORKSPACE/docs/VERIFICATION.md"
           bash -n scripts/import-pstack.sh
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p "test_import_pstack_capabilities.py" -v
+          bash scripts/import-pstack.sh
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/import_pstack_capabilities.py
 
       - name: Install stable Rust, rustfmt and Clippy
         run: |
