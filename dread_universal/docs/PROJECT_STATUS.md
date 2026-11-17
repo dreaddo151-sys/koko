@@ -11,7 +11,7 @@ The canonical-source consolidation is committed on `integration/dread-canonical-
 
 The hardened baseline passed formatting, Clippy with warnings denied, workspace tests and an optimized release build in GitHub Actions run `44002596952`.
 
-The combined task-lifecycle, read-only agent-discovery, WebSocket event-stream, pinned Pstack importer and bounded-orchestrator candidate passed the full Rust quality workflow in GitHub Actions run `44016613531` (run #77, commit `d4df1a8e85ab44264b4f86d00a624af962422689`):
+The canonical-source branch passed the direct-source quality workflow in GitHub Actions run `44023186920` (run #23): Pstack pin/tree/provenance, 11 importer tests, Rust formatting, Clippy with warnings denied, workspace tests including startup queue recovery, and optimized release build. This run includes Bearer authentication, server-derived approval identity and restart-safe queue handling.
 - `cargo fmt --all -- --check`: PASS
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: PASS
 - `cargo test --workspace --locked`: PASS — 34 Rust tests
@@ -40,7 +40,7 @@ The run applied the candidate patches to the exact uploaded baseline archive bef
   - `POST /api/tasks/{id}/cancel` cancels pending, approved, queued or running tasks and signals the active runner.
   - The runner uses the bounded `dread-orchestrator` gate (default max concurrency 2, max admitted 8, one attempt, 120-second per-attempt timeout). It performs configured loopback-only HTTP health probes; it does not execute shell commands, imported skills, plugins or agent code.
   - Results and lifecycle events are persisted. API CI verifies successful execution, result retrieval, terminal task state and success-event history.
-  - This is deliberately narrow: there is no provider/agent dispatch, capability-backed runner, priority policy or restart recovery for queued/running tasks. The approval label remains caller-supplied until authentication is implemented.
+  - This is deliberately narrow: there is no provider/agent dispatch, capability-backed runner or priority policy. Startup recovery resumes only queued approved capability-free `service_discovery` tasks; interrupted `running` tasks are marked failed and never replayed. Unsupported or capability-linked queued work is failed closed.
 - Read-only local agent health discovery at `GET /api/agents`:
   - Reads `config/agents.toml` or `DREAD_AGENTS_CONFIG`.
   - Empty configuration by default; at most 32 entries and unique IDs.
@@ -93,7 +93,7 @@ The run applied the candidate patches to the exact uploaded baseline archive bef
 6. [x] Loopback API Bearer authentication, fail-closed token configuration and server-derived approval identity (CI verified); [ ] role-based authorization, token rotation and any remote-access policy.
 7. [ ] Provider-specific adapters, enabled only after each local endpoint contract is verified.
 8. [x] Pstack pinned metadata importer and disabled-by-default dry-run validation (live API import still pending).
-9. [x] Bounded execution kernel primitive and one allowlisted read-only service-discovery runner integrated with durable task lifecycle (CI verified); [ ] durable queue recovery, priority/resource-aware policy and provider/agent adapters.
+9. [x] Bounded execution kernel primitive, one allowlisted read-only service-discovery runner, and fail-closed startup queue recovery integrated with durable task lifecycle (CI verified); [ ] priority/resource-aware policy and provider/agent adapters.
 10. [ ] React/TypeScript operator UI driven by real API and event state.
 11. [ ] Incremental legacy Python Hub workflow parity, installer/upgrade/rollback, backup/restore tests and dual-RTX-3090 workstation acceptance.
 
@@ -107,10 +107,10 @@ The master architecture plan is the target specification, not a declaration of c
 | Master-plan phase | Status | Evidence / remaining gate |
 |---|---|---|
 | 0 — Baseline | PARTIAL | Historical workstation map exists. Current local Rust/rustup installation, current service states and GPU Supervisor adapter contract have not been revalidated in this GitHub workflow. Do not repeat a full workstation audit. |
-| 1 — Rust foundation | CANONICAL SOURCE / CI PASS | The complete Rust workspace is committed at `dread_universal/`; run `44021546750` passed formatting, Clippy, 38 Rust tests and optimized release build. Loopback Bearer auth and server-derived approval identity are included. A live non-conflicting workstation health smoke test remains outstanding. |
+| 1 — Rust foundation | CANONICAL SOURCE / CI PASS | The complete Rust workspace is committed at `dread_universal/`; run `44023186920` (run #23) passed Pstack verification, 11 importer tests, formatting, Clippy, workspace tests and optimized release build. Loopback Bearer auth, server-derived approval identity and startup recovery are included. A live non-conflicting workstation health smoke test remains outstanding. |
 | 2 — Existing service adapters | NOT VERIFIED | No completed Hermes, OpenHands, OpenCode, Ollama, llama.cpp gateway, ComfyUI or DREAD Hub adapter contract and representative read-only request is evidenced by this workflow. Agent health discovery is generic configured HTTP probing, not those dedicated adapters. |
 | 3 — Capability registry | PARTIAL | Capability metadata registry and pinned Pstack dry-run/importer tests pass. Full Cursor plugin ingestion, compatibility classification, MCP/OpenAPI/CLI/service inventory and representative sample reconciliation remain outstanding. |
-| 4 — Agent orchestration | PARTIAL | Durable task lifecycle, approval audit, WebSocket stream, bounded runner and one allowlisted read-only service-discovery task pass CI. No planner, provider/agent delegation, durable queue recovery, result aggregation or multi-agent end-to-end test yet. |
+| 4 — Agent orchestration | PARTIAL | Durable task lifecycle, approval audit, WebSocket stream, bounded runner, one allowlisted read-only service-discovery task and fail-closed startup queue recovery pass CI. No planner, provider/agent delegation, priority scheduling, result aggregation or multi-agent end-to-end test yet. |
 | 5 — GPU/resource coordination | NOT VERIFIED | The documented GPU gateway boundary exists, but no Rust adapter to the existing Python GPU Supervisor, resource inventory, lease/handoff test or controlled inference verification is evidenced here. Do not create a second scheduler. |
 | 6 — Modern interface | NOT STARTED / NOT VERIFIED | No React/TypeScript/Tailwind/shadcn frontend or production UI build is evidenced. |
 | 7 — Diagnostics and controlled repair | NOT STARTED | No diagnosis/repair workflow, simulation, approval-gated patch application, backup/rollback executor or reversible repair test is evidenced. |

@@ -41,7 +41,7 @@ The historical run #77 workflow applied candidate patches to the exact uploaded 
 - Explicit `POST /api/tasks/{id}/run` dispatches only approved, capability-free `service_discovery` tasks. Unsupported task types and capability-backed tasks return conflict.
 - The built-in runner performs only configured loopback HTTP service probes through the existing discovery client; no shell, plugin, skill or agent code is executed.
 - Execution uses the bounded gate (2 concurrent, 8 admitted by default, 1 attempt, 120-second timeout); results are persisted at `GET /api/tasks/{id}/result`.
-- Running-task cancellation sends a watch-channel signal; queued/running work is not yet recovered after API process restart.
+- Startup recovery resumes only queued, approved, capability-free service-discovery tasks. Interrupted running tasks are marked failed and not replayed; unsupported or capability-linked queued tasks fail closed. This behavior is covered by the recovery test.
 - `DREAD_API_TOKEN` must be configured and at least 32 characters; missing server token configuration fails closed with 503, and missing/invalid request credentials return 401.
 - Approval identity is derived from server-side `DREAD_OPERATOR_ID`; request-supplied approver names are not trusted.
 - Authentication is single-operator bearer-token authentication. Role-based authorization, token rotation and remote-access policy are not implemented; API binding remains loopback-only.
@@ -86,7 +86,7 @@ The existing Python GPU Supervisor remains the only GPU lease authority. Rust ma
 | 1 Rust foundation | Canonical source committed in `dread_universal/`; run `44021546750` passes fmt, Clippy, 38 tests and release build; loopback Bearer auth verified | Live non-conflicting workstation health smoke test |
 | 2 Service adapters | Generic read-only configured agent health probing | Dedicated Hermes/OpenHands/OpenCode/Ollama/llama.cpp/ComfyUI/DREAD adapters; one read-only request each |
 | 3 Capability registry | Disabled-by-default registry plus pinned Pstack dry-run, 9 tests | Cursor manifest/agent ingestion, compatibility taxonomy, MCP/OpenAPI/CLI inventory and representative provenance checks |
-| 4 Orchestration | Task state/approval audit, event stream, bounded runner integrated with one allowlisted service-discovery task; 36 Rust tests pass | Planner, provider/agent delegation, restart-recoverable queue, result aggregation, provider cancellation and multi-agent end-to-end test |
+| 4 Orchestration | Task state/approval audit, event stream, bounded runner integrated with one allowlisted service-discovery task; fail-closed startup queue recovery is CI verified | Planner, provider/agent delegation, priority scheduling, result aggregation, provider cancellation and multi-agent end-to-end test |
 | 5 GPU/resources | Existing gateway boundary documented | Python GPU Supervisor adapter, resource discovery, lease ownership and one controlled inference/handoff test |
 | 6 UI | No frontend acceptance evidence | React/TypeScript/Tailwind/shadcn production build and live API/WebSocket interaction |
 | 7 Repair | No repair executor acceptance evidence | Diagnose/plan/simulate/approve/apply/monitor/rollback with a safe reversible test |
