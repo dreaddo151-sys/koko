@@ -16,6 +16,8 @@ use std::{
 };
 
 const MAX_INPUT_BYTES: usize = 1_048_576;
+const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_EVENT_STREAM_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct HermesApiAdapter {
@@ -283,7 +285,18 @@ impl AgentAdapter for HermesApiAdapter {
             if !response.status().is_success() {
                 return Err(http_error(response.status(), "Hermes run events request failed"));
             }
-            let body = response.text().await.map_err(|error| adapter_error("stream_error", error.to_string(), true))?;
+            if response.content_length().is_some_and(|length| length > MAX_EVENT_STREAM_BYTES as u64) {
+                return Err(adapter_error("event_stream_too_large", "Hermes event stream exceeded the 8 MiB adapter limit".into(), false));
+            }
+            let mut response = response;
+            let mut body = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(|error| adapter_error("stream_error", error.to_string(), true))? {
+                if body.len().saturating_add(chunk.len()) > MAX_EVENT_STREAM_BYTES {
+                    return Err(adapter_error("event_stream_too_large", "Hermes event stream exceeded the 8 MiB adapter limit".into(), false));
+                }
+                body.extend_from_slice(&chunk);
+            }
+            let body = String::from_utf8_lossy(&body);
             Ok(parse_sse_events(task_id, &body, after_sequence))
         })
     }
@@ -315,7 +328,16 @@ async fn parse_json_response(response: reqwest::Response) -> Result<Value, Agent
     if !status.is_success() {
         return Err(http_error(status, "Hermes API request failed"));
     }
-    response.json::<Value>().await.map_err(|error| {
+    if response.content_length().is_some_and(|length| length > MAX_RESPONSE_BYTES as u64) {
+        return Err(adapter_error("response_too_large", "Hermes JSON response exceeded the 2 MiB adapter limit".into(), false));
+    }
+    let bytes = response.bytes().await.map_err(|error| {
+        adapter_error("transport_error", error.to_string(), error.is_timeout())
+    })?;
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        return Err(adapter_error("response_too_large", "Hermes JSON response exceeded the 2 MiB adapter limit".into(), false));
+    }
+    serde_json::from_slice::<Value>(&bytes).map_err(|error| {
         adapter_error("invalid_provider_response", error.to_string(), false)
     })
 }
