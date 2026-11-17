@@ -2525,35 +2525,48 @@ mod tests {
 
     #[tokio::test]
     async fn gpu_chat_rejects_unsafe_payload_fields_and_values() {
-        assert!(validate_gpu_chat_payload(&json!({
-            "model": "missing",
-            "messages": [{"role": "user", "content": "hello"}],
-            "tools": [{"type": "function"}]
-        }))
-        .is_err());
-        assert!(validate_gpu_chat_payload(&json!({
-            "model": "missing",
-            "messages": [{"role": "tool", "content": "hello"}]
-        }))
-        .is_err());
-        assert!(validate_gpu_chat_payload(&json!({
-            "model": "missing",
-            "messages": [{"role": "user", "content": "hello"}],
-            "temperature": 3.0
-        }))
-        .is_err());
-        assert!(validate_gpu_chat_payload(&json!({
-            "model": "missing",
-            "messages": [{"role": "user", "content": "hello"}]
-        }))
-        .is_ok());
+        assert!(
+            validate_gpu_chat_payload(&json!({
+                "model": "missing",
+                "messages": [{"role": "user", "content": "hello"}],
+                "tools": [{"type": "function"}]
+            }))
+            .is_err()
+        );
+        assert!(
+            validate_gpu_chat_payload(&json!({
+                "model": "missing",
+                "messages": [{"role": "tool", "content": "hello"}]
+            }))
+            .is_err()
+        );
+        assert!(
+            validate_gpu_chat_payload(&json!({
+                "model": "missing",
+                "messages": [{"role": "user", "content": "hello"}],
+                "temperature": 3.0
+            }))
+            .is_err()
+        );
+        assert!(
+            validate_gpu_chat_payload(&json!({
+                "model": "missing",
+                "messages": [{"role": "user", "content": "hello"}]
+            }))
+            .is_ok()
+        );
     }
 
     #[tokio::test]
     async fn gpu_chat_refuses_models_not_advertised_by_gateway() {
-        let mock = Router::new().route("/v1/models", get(|| async {
-            Json(json!({"object": "list", "data": [{"id": "allowed-model", "object": "model"}]}))
-        }));
+        let mock = Router::new().route(
+            "/v1/models",
+            get(|| async {
+                Json(
+                    json!({"object": "list", "data": [{"id": "allowed-model", "object": "model"}]}),
+                )
+            }),
+        );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
