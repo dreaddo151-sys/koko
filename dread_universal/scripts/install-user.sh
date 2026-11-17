@@ -8,7 +8,7 @@ DATA_DIR="$HOME/.local/share/dread-universal"
 UNIT_DIR="$HOME/.config/systemd/user"
 ENV_FILE="$CONFIG_DIR/dread.env"
 SERVICE="dread-universal.service"
-STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+STAMP="$(date -u +%Y%m%dT%H%M%S%N)"
 BACKUP=""
 
 for command in systemctl openssl curl install; do
