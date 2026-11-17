@@ -7,7 +7,7 @@
 
 ## Verified source and CI results
 
-The canonical-source consolidation is now committed on `integration/dread-canonical-source-run81`. GitHub Actions run `44019266094` passed against that committed workspace: Pstack provenance and dry-run, nine importer tests, Rust formatting, Clippy with warnings denied, all workspace tests, and optimized release build. The branch contains `dread_universal/` as a normal tracked workspace, `legacy-reference/`, historical Cargo manifest backups, and `SOURCE_PROVENANCE_RUN81.md`. Draft integration PR: [#3](https://github.com/dreaddo151-sys/koko/pull/3). This closes the earlier external-archive-only source-of-truth gap; it does not make the platform workstation-ready.
+The canonical-source consolidation is committed on `integration/dread-canonical-source-run81`. GitHub Actions run `44019266094` passed against that committed workspace. The subsequent task-kernel integration also passed the full direct-source quality workflow in run `44020353017`: Pstack provenance/dry-run, nine importer tests, Rust formatting, Clippy with warnings denied, 36 Rust tests, and optimized release build. The branch contains `dread_universal/` as a normal tracked workspace, `legacy-reference/`, historical Cargo manifest backups, and `SOURCE_PROVENANCE_RUN81.md`. Draft integration PR: [#3](https://github.com/dreaddo151-sys/koko/pull/3). This closes the earlier external-archive-only source-of-truth gap; it does not make the platform workstation-ready.
 
 The hardened baseline passed formatting, Clippy with warnings denied, workspace tests and an optimized release build in GitHub Actions run `44002596952`.
 
@@ -34,9 +34,13 @@ The run applied the candidate patches to the exact uploaded baseline archive bef
 - Durable SQLite task records and ordered task-event audit history:
   - `POST /api/tasks` creates a task in `pending_approval`.
   - `GET /api/tasks`, `GET /api/tasks/{id}` and `GET /api/tasks/{id}/events` read task state/history.
-  - `POST /api/tasks/{id}/approve` records an approver label and reason and allows a single transition to `approved`.
-  - `POST /api/tasks/{id}/cancel` records cancellation.
-  - Approval does **not** execute a task; the response reports `execution_started: false`. No task executor or provider dispatch is present.
+  - `POST /api/tasks/{id}/approve` records an approver label and reason and allows a single transition to `approved`; approval alone never starts execution.
+  - `POST /api/tasks/{id}/run` explicitly queues only the reviewed built-in `service_discovery` runner, and only for approved tasks without a capability ID.
+  - `GET /api/tasks/{id}/result` reads persisted execution results.
+  - `POST /api/tasks/{id}/cancel` cancels pending, approved, queued or running tasks and signals the active runner.
+  - The runner uses the bounded `dread-orchestrator` gate (default max concurrency 2, max admitted 8, one attempt, 120-second per-attempt timeout). It performs configured loopback-only HTTP health probes; it does not execute shell commands, imported skills, plugins or agent code.
+  - Results and lifecycle events are persisted. API CI verifies successful execution, result retrieval, terminal task state and success-event history.
+  - This is deliberately narrow: there is no provider/agent dispatch, capability-backed runner, priority policy or restart recovery for queued/running tasks. The approval label remains caller-supplied until authentication is implemented.
 - Read-only local agent health discovery at `GET /api/agents`:
   - Reads `config/agents.toml` or `DREAD_AGENTS_CONFIG`.
   - Empty configuration by default; at most 32 entries and unique IDs.
@@ -57,12 +61,14 @@ The run applied the candidate patches to the exact uploaded baseline archive bef
   - `scripts/import-pstack.sh` verifies the pinned commit/tree and manifest before writing a provenance marker with per-file SHA-256 values.
   - `scripts/import_pstack_capabilities.py` defaults to dry-run; `--apply` is required to POST metadata to the explicit-port loopback API. It refuses missing/mismatched markers, changed files, unsafe paths, redirects and existing capabilities not confirmed disabled.
   - Run #77 passed nine importer tests, fetched the pinned remote source and completed the dry-run. Canonical-source run `44019266094` independently passed the same nine tests and dry-run against the committed workspace; it also verified the pinned version, commit, tree and 60 `files_sha256` entries. Imported metadata starts disabled. No skills, agents, scripts or hooks are executed. The live API `--apply` operation has not been run.
-- Bounded execution kernel (`dread-orchestrator`, CI verified in run #77):
-  - Provides a bounded execution gate for explicitly supplied runner functions.
-  - Enforces a maximum number of active runners and a separate cap on admitted work (running plus waiting).
-  - Applies per-attempt timeouts, a configured maximum retry count and watch-channel cancellation; cancellation drops the active runner future and reports the active attempt count.
-  - Six orchestrator unit tests passed, covering concurrency, admission overflow, retry bounds, active cancellation and timeout.
-  - This is an execution primitive only: it has no provider discovery, task database integration, priority scheduler, durable queue, process launcher or provider dispatch. It does not acquire GPU leases or bypass the Python GPU Supervisor.
+- Bounded execution kernel (`dread-orchestrator`) is now wired to the durable task API for one safe built-in runner:
+  - Enforces a maximum of two active runners and eight admitted tasks by default.
+  - Applies a 120-second per-attempt timeout, one attempt by default, and watch-channel cancellation.
+  - The API queues and runs only `service_discovery` tasks after explicit approval; tasks linked to a capability or using any other task type are rejected.
+  - Execution results are stored in SQLite; task queued/started/succeeded/failed/cancelled events are appended transactionally and broadcast after commit.
+  - Cancellation can signal a running task. The worker queue itself is not yet recovered after a process restart.
+  - Orchestrator unit tests cover concurrency, admission overflow, retry bounds, active cancellation and timeout. API tests cover the allowlisted dispatch, persisted result and rejection of unsupported task types.
+  - No provider/agent dispatch, process launcher, priority scheduling, capability execution or GPU lease ownership is present. It does not bypass the Python GPU Supervisor.
 
 ## Runtime safety boundaries
 
@@ -85,7 +91,7 @@ The run applied the candidate patches to the exact uploaded baseline archive bef
 6. [ ] Authentication/authorization before any network exposure or trusted approval identity.
 7. [ ] Provider-specific adapters, enabled only after each local endpoint contract is verified.
 8. [x] Pstack pinned metadata importer and disabled-by-default dry-run validation (live API import still pending).
-9. [x] Bounded execution kernel primitive (unit/CI verified); [ ] integration with durable task lifecycle and priority/resource-aware queue policy.
+9. [x] Bounded execution kernel primitive and one allowlisted read-only service-discovery runner integrated with durable task lifecycle (CI verified); [ ] durable queue recovery, priority/resource-aware policy and provider/agent adapters.
 10. [ ] React/TypeScript operator UI driven by real API and event state.
 11. [ ] Incremental legacy Python Hub workflow parity, installer/upgrade/rollback, backup/restore tests and dual-RTX-3090 workstation acceptance.
 
@@ -102,7 +108,7 @@ The master architecture plan is the target specification, not a declaration of c
 | 1 — Rust foundation | CANONICAL SOURCE / CI PASS | The complete Rust workspace is committed at `dread_universal/` on `integration/dread-canonical-source-run81`; canonical-source run `44019266094` passed formatting, Clippy, workspace tests and optimized release build directly from that branch. A live non-conflicting workstation health smoke test remains outstanding. |
 | 2 — Existing service adapters | NOT VERIFIED | No completed Hermes, OpenHands, OpenCode, Ollama, llama.cpp gateway, ComfyUI or DREAD Hub adapter contract and representative read-only request is evidenced by this workflow. Agent health discovery is generic configured HTTP probing, not those dedicated adapters. |
 | 3 — Capability registry | PARTIAL | Capability metadata registry and pinned Pstack dry-run/importer tests pass. Full Cursor plugin ingestion, compatibility classification, MCP/OpenAPI/CLI/service inventory and representative sample reconciliation remain outstanding. |
-| 4 — Agent orchestration | PARTIAL | Durable task lifecycle, approval audit, WebSocket event stream and bounded runner kernel pass CI. There is no planner, worker delegation, adapter-backed execution, result aggregation, task-kernel integration or multi-agent end-to-end test. |
+| 4 — Agent orchestration | PARTIAL | Durable task lifecycle, approval audit, WebSocket stream, bounded runner and one allowlisted read-only service-discovery task pass CI. No planner, provider/agent delegation, durable queue recovery, result aggregation or multi-agent end-to-end test yet. |
 | 5 — GPU/resource coordination | NOT VERIFIED | The documented GPU gateway boundary exists, but no Rust adapter to the existing Python GPU Supervisor, resource inventory, lease/handoff test or controlled inference verification is evidenced here. Do not create a second scheduler. |
 | 6 — Modern interface | NOT STARTED / NOT VERIFIED | No React/TypeScript/Tailwind/shadcn frontend or production UI build is evidenced. |
 | 7 — Diagnostics and controlled repair | NOT STARTED | No diagnosis/repair workflow, simulation, approval-gated patch application, backup/rollback executor or reversible repair test is evidenced. |
