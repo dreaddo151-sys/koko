@@ -42,7 +42,7 @@ jobs:
         run: bash -n scripts/install-user.sh scripts/configure-user.sh scripts/package-ubuntu.sh
       - name: Assemble tarball, deb and SHA-256 manifest
         working-directory: dread_universal
-        run: scripts/package-ubuntu.sh
+        run: bash scripts/package-ubuntu.sh
       - name: Verify release package contents
         working-directory: dread_universal
         run: |
