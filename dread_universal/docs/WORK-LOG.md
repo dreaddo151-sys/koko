@@ -337,3 +337,14 @@ Do not repeat basic GPU enumeration, generic API health or standalone llama.cpp 
 - Added integration coverage proving priority ordering of independent roots and automatic dispatch of all approved roots, in addition to the existing dependency and late-approval tests.
 - Run #520 (`44197777681`) passed all three CI jobs on code candidate `c41ea4b4424c30f1da536305dc0fef7e8f3f4129`: formatting, strict Clippy, Rust tests, release build, installer/migration/rollback tests, Python bridge/importer regressions, GPU single-owner guard, React build and disposable Ubuntu 24.04 package/API/UI/auth/host-profile smoke tests.
 - Still incomplete in mission orchestration: resource-class-aware scheduling, retry/backoff, per-node timeout and provider cancellation propagation, mission-level aggregation policy, and interrupted mission recovery.
+
+
+## Latest PR-head CI verification — 2026-11-18
+
+- Verified PR #12 head `5a494c87592d14cd057cc37d2df4642c92d85e7c` against GitHub Actions run #527 (`44198019930`).
+- All three jobs passed: Rust / Ubuntu 24.04, Web console / Ubuntu 24.04, and Ubuntu packages / smoke test.
+- Rust checks included formatting, strict Clippy, workspace tests, release build, installer validation, migration/rollback, Python bridge/importer regressions and GPU single-owner guard.
+- Web checks included lockfile validation and production build.
+- Package checks included assembly, checksums/content, disposable Ubuntu 24.04 installation, API health, production UI, unauthenticated 401 and authenticated host-profile smoke test.
+- Run #527 validates the latest PR documentation head. The mission scheduler implementation remains the Run #520 candidate `c41ea4b4424c30f1da536305dc0fef7e8f3f4129`; its scheduler-specific tests passed in that run.
+- No live workstation installation, service restart, GPU workload, media generation or reboot acceptance is implied. PR #12 remains open and unmerged.
