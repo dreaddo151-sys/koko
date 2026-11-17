@@ -1,10 +1,13 @@
 # PROJECT DREAD UNIVERSAL — Engineering Status
 
 **Project version:** 0.4.0  
-**Development branch:** `feature/agent-capability-foundation-2026-11-17`  
+**Canonical integration branch:** `integration/dread-canonical-source-run81`  
+**Working feature branch:** `feature/agent-capability-foundation-2026-11-17`  
 **Integration policy:** additive development alongside the existing Python Hub; no merge to `main` or workstation service migration is implied.
 
 ## Verified source and CI results
+
+The canonical-source consolidation is now committed on `integration/dread-canonical-source-run81`. GitHub Actions run `44019266094` passed against that committed workspace: Pstack provenance and dry-run, nine importer tests, Rust formatting, Clippy with warnings denied, all workspace tests, and optimized release build. The branch contains `dread_universal/` as a normal tracked workspace, `legacy-reference/`, historical Cargo manifest backups, and `SOURCE_PROVENANCE_RUN81.md`. Draft integration PR: [#3](https://github.com/dreaddo151-sys/koko/pull/3). This closes the earlier external-archive-only source-of-truth gap; it does not make the platform workstation-ready.
 
 The hardened baseline passed formatting, Clippy with warnings denied, workspace tests and an optimized release build in GitHub Actions run `44002596952`.
 
@@ -50,10 +53,10 @@ The run applied the candidate patches to the exact uploaded baseline archive bef
   - Formatting, Clippy, compilation and the committed-event subscriber unit test pass in run #77. A full browser/client WebSocket handshake and reconnect test remains outstanding.
 - Pstack capability importer:
   - Catalog pins Pstack `0.15.43`, commit `2f87c854fe3e2fcda44ca86b46ede35aad3c46b7`, subtree `71d8e1d1d718e2149dc43b2535618064f29cba6b`, MIT; inventory is 58 skills and 2 agents.
-  - The bundled `integrations/pstack-upstream` snapshot reports `0.15.42`; it is intentionally not imported as `0.15.43`.
+  - The active pinned source is `integrations/pstack/upstream/` at `0.15.43`, verified against the commit/tree and all 60 provenance hashes. The separate `integrations/pstack-upstream/` directory is a retained older `0.15.42` snapshot; it is not the importer source and has not been relabelled or overwritten.
   - `scripts/import-pstack.sh` verifies the pinned commit/tree and manifest before writing a provenance marker with per-file SHA-256 values.
   - `scripts/import_pstack_capabilities.py` defaults to dry-run; `--apply` is required to POST metadata to the explicit-port loopback API. It refuses missing/mismatched markers, changed files, unsafe paths, redirects and existing capabilities not confirmed disabled.
-  - Run #77 passed nine importer tests, fetched the pinned remote source and completed the dry-run. Imported metadata starts disabled. No skills, agents, scripts or hooks are executed. The live API `--apply` operation has not been run.
+  - Run #77 passed nine importer tests, fetched the pinned remote source and completed the dry-run. Canonical-source run `44019266094` independently passed the same nine tests and dry-run against the committed workspace; it also verified the pinned version, commit, tree and 60 `files_sha256` entries. Imported metadata starts disabled. No skills, agents, scripts or hooks are executed. The live API `--apply` operation has not been run.
 - Bounded execution kernel (`dread-orchestrator`, CI verified in run #77):
   - Provides a bounded execution gate for explicitly supplied runner functions.
   - Enforces a maximum number of active runners and a separate cap on admitted work (running plus waiting).
@@ -69,7 +72,7 @@ The run applied the candidate patches to the exact uploaded baseline archive bef
 - The Rust API is loopback-only and currently has no authentication. Do not expose it to a LAN or public network.
 - The `approved_by` value is a caller-supplied audit label, not a verified identity. Approval is not an authorization boundary until authentication is added.
 - Agent discovery is read-only. Provider endpoints remain unconfigured until verified on the workstation.
-- OpenCode is intentionally excluded from the current integration direction.
+- OpenCode remains in the master plan as an external system; its dedicated adapter and read-only contract are not yet implemented or verified.
 - No destructive repair, credential change, live service migration or GitHub `main` merge is authorized by this work.
 
 ## Remaining blueprint
@@ -96,7 +99,7 @@ The master architecture plan is the target specification, not a declaration of c
 | Master-plan phase | Status | Evidence / remaining gate |
 |---|---|---|
 | 0 — Baseline | PARTIAL | Historical workstation map exists. Current local Rust/rustup installation, current service states and GPU Supervisor adapter contract have not been revalidated in this GitHub workflow. Do not repeat a full workstation audit. |
-| 1 — Rust foundation | PARTIAL / CI PASS | Rust API, SQLite task/capability records, health/service routes and CI release build exist in the candidate source. A clean, reproducible build from the repository itself and live non-conflicting workstation health smoke test remain outstanding. |
+| 1 — Rust foundation | CANONICAL SOURCE / CI PASS | The complete Rust workspace is committed at `dread_universal/` on `integration/dread-canonical-source-run81`; canonical-source run `44019266094` passed formatting, Clippy, workspace tests and optimized release build directly from that branch. A live non-conflicting workstation health smoke test remains outstanding. |
 | 2 — Existing service adapters | NOT VERIFIED | No completed Hermes, OpenHands, OpenCode, Ollama, llama.cpp gateway, ComfyUI or DREAD Hub adapter contract and representative read-only request is evidenced by this workflow. Agent health discovery is generic configured HTTP probing, not those dedicated adapters. |
 | 3 — Capability registry | PARTIAL | Capability metadata registry and pinned Pstack dry-run/importer tests pass. Full Cursor plugin ingestion, compatibility classification, MCP/OpenAPI/CLI/service inventory and representative sample reconciliation remain outstanding. |
 | 4 — Agent orchestration | PARTIAL | Durable task lifecycle, approval audit, WebSocket event stream and bounded runner kernel pass CI. There is no planner, worker delegation, adapter-backed execution, result aggregation, task-kernel integration or multi-agent end-to-end test. |
@@ -105,13 +108,20 @@ The master architecture plan is the target specification, not a declaration of c
 | 7 — Diagnostics and controlled repair | NOT STARTED | No diagnosis/repair workflow, simulation, approval-gated patch application, backup/rollback executor or reversible repair test is evidenced. |
 | 8 — Migration and release | NOT READY | CI source candidate is not a workstation release or migration. Feature parity, install/upgrade/rollback, live acceptance and user-approved cutover remain outstanding. |
 
-### Source-of-truth and CI reproducibility gap
+### Source-of-truth consolidation — completed on integration branch
 
-The current GitHub feature branch stores workflow files, audit documentation and patch files; it does **not** store the Rust workspace at `dread_universal/`. The workflow downloads the external GitHub release asset `DREAD_UNIVERSAL_COMPLETE_TRUE.zip` from tag `dread-universal-v0.4.0-test`, verifies its pinned SHA-256, applies patches from this branch, then builds and packages the result.
+The earlier feature branch used a fixed external release archive plus a patch series. That made its CI candidate reproducible only as a derived artifact, not as a fresh checkout of committed Rust source.
 
-Therefore run #77/#79 verifies a patched derivative of that fixed external baseline archive, not a Rust source tree committed at the feature-branch commit. The artifact is useful CI evidence, but the branch alone is not a self-contained, reproducible source checkout. The baseline archive is also immutable-by-convention only: changing it requires deliberately updating the URL and checksum together with provenance.
+This gap is now closed on the dedicated branch `integration/dread-canonical-source-run81`:
 
-**Required next engineering milestone:** establish one canonical, version-controlled source-of-truth for the Rust workspace. Safely import the verified baseline and applied changes into a dedicated integration branch, preserving source history/provenance and all backups; then make CI build that committed workspace directly. Do not delete the external archive or patch history until the replacement build is independently verified. Do not merge to `main` or alter the workstation as part of this step.
+- `dread_universal/` is the complete tracked Rust workspace.
+- `legacy-reference/` preserves the historical Python service/GPU reference files.
+- `SOURCE_PROVENANCE_RUN81.md` records the exact run #81 artifact ID and outer/inner SHA-256 digests.
+- The old archive, patch series, older Pstack snapshot and source backups remain preserved.
+- Canonical-source CI run `44019266094` passed Pstack verification/dry-run, 9 importer tests, `cargo fmt`, Clippy with warnings denied, `cargo test --workspace --locked`, and `cargo build --workspace --release --locked` directly from the committed workspace.
+- Draft PR #3 proposes integration into the feature branch; it has not been merged. No change to `main` or the workstation is implied.
+
+The original archive/patch workflow remains historical provenance. New Rust development should target the canonical integration branch and build the committed workspace directly. The source-consolidation milestone is complete; remaining milestones are service integration, orchestration, authentication, UI, repair and workstation acceptance.
 
 ### Architecture constraints carried forward
 
