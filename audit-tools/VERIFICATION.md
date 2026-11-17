@@ -30,7 +30,11 @@ The workflow applies the candidate patches to the exact uploaded baseline archiv
 
 ## Pstack importer candidate (CI pending)
 
-The new Python metadata importer has nine standard-library unit tests covering pinned marker requirements, commit/version mismatches, per-file hash tampering, path traversal, loopback-only API URLs, disabled-existing-record enforcement and redirect refusal. The test suite is wired into CI. The pinned upstream fetch and live API `--apply` have not been run; the bundled `0.15.42` snapshot must not be represented as the catalog's pinned `0.15.43`.
+The new Python metadata importer has nine standard-library unit tests covering pinned marker requirements, commit/version mismatches, per-file hash tampering, path traversal, loopback-only API URLs, disabled-existing-record enforcement and redirect refusal. The test suite is wired into CI. Run `44014112205` passed the nine importer tests, fetched the exact pinned upstream commit/tree and completed the 58-skill/2-agent dry-run. The live API `--apply` operation remains unverified; the bundled `0.15.42` snapshot must not be represented as the catalog's pinned `0.15.43`.
+
+## Bounded execution kernel candidate (CI pending)
+
+The new `dread-orchestrator` crate is a generic execution gate for caller-supplied runners. It bounds admitted work and concurrent runner futures, limits attempts, applies per-attempt timeouts and observes watch-channel cancellation. Its tests cover concurrency, admission overflow, retry limits, cancellation and timeout. It is not yet wired to the SQLite task API or any provider adapter; it has no durable queue, priority policy, process launch or GPU ownership. The Python GPU Supervisor remains authoritative.
 
 ## Not yet verified
 
