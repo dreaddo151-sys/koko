@@ -622,10 +622,13 @@ mod tests {
                     calls.fetch_add(1, Ordering::SeqCst);
                     Err("retryable transport failure".to_string())
                 }
-            }).await
+            })
+            .await
         });
         for _ in 0..50 {
-            if calls.load(Ordering::SeqCst) == 1 { break; }
+            if calls.load(Ordering::SeqCst) == 1 {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
         cancel.send(true).unwrap();

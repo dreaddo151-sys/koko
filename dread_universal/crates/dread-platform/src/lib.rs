@@ -514,7 +514,7 @@ fn mounted_storage_devices() -> Vec<StorageDevice> {
     };
     let Some(output) = run_probe(
         &binary,
-        &["-B1", "-P", "--output=source,fstype,size,used,avail,target"],
+        &["-B1", "--output=source,fstype,size,used,avail,target"],
     ) else {
         return Vec::new();
     };
@@ -764,6 +764,15 @@ mod tests {
         assert!(!profile.architecture.is_empty());
         assert!(profile.cpu_threads >= 1);
         assert_eq!(profile.inference_backend, "llama.cpp");
+    }
+
+    #[test]
+    fn mounted_storage_probe_uses_supported_gnu_df_output_format() {
+        let mounts = mounted_storage_devices();
+        assert!(
+            mounts.iter().any(|mount| mount.mount_point == "/"),
+            "the live GNU df probe should report the root filesystem"
+        );
     }
 
     #[test]
