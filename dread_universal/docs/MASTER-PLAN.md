@@ -439,3 +439,20 @@ Phase 3 now has a tested approval-gated DAG auto-advance path: after an operator
 GitHub Actions PR run #509 (`44197296018`) passed all three jobs on this code candidate: Rust formatting, strict Clippy, workspace tests including both mission auto-advance/late-approval integration cases, optimized release build, installer syntax, portable migration/rollback, Python bridge/importer regressions, GPU single-owner guard, React production build, package checksums/content, disposable Ubuntu 24.04 package installation, API/UI/authentication/host-profile smoke tests.
 
 This remains CI evidence, not physical workstation acceptance. Existing legacy Hub/ComfyUI/Supervisor preservation boundaries remain unchanged. Release remains blocked on the outstanding phases and live Ubuntu acceptance.
+
+
+## Priority-ordered DAG scheduler acceptance — 2026-11-18, PR run #520
+
+**Validated code candidate:** `c41ea4b4424c30f1da536305dc0fef7e8f3f4129`.
+
+The approval-gated mission scheduler now:
+- Requires operator approval per task and an explicit operator start of an approved root.
+- Immediately dispatches other approved dependency-free roots in deterministic graph priority order, bounded by the shared execution semaphore.
+- After successful completion, dispatches all newly ready approved dependent nodes.
+- Dispatches a node approved after its prerequisites have already completed.
+- Holds pending-approval nodes and blocks further dispatch after task failure/cancellation.
+- Exposes per-node result, error, attempt and timing metadata through the mission read API.
+
+Run #520 (`44197777681`) passed all three jobs on this candidate: Rust formatting, strict Clippy, workspace tests including priority-root, dependency, auto-advance and late-approval regressions, release build, installer syntax, portable migration/rollback, Python bridge/importer regressions, GPU single-owner guard, React production build, package checksum/content validation, disposable Ubuntu 24.04 package install, API/UI/authentication and host-profile smoke tests.
+
+**Still open in phase 3:** resource-class-aware scheduling, retry/backoff, explicit per-node timeout and provider cancellation propagation, mission-level aggregation policy, and interrupted mission recovery. Release remains blocked by the other outstanding phases and live Ubuntu acceptance.
