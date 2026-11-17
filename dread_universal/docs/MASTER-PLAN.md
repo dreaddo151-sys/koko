@@ -300,3 +300,12 @@ This dated addendum supersedes stale candidate counts and run numbers elsewhere 
 | 11 Release | Not accepted | All gates above plus dual-3090 workstation report, SBOM/license inventory and verified release artifacts |
 
 Release remains blocked. Do not merge or install merely because the current CI run becomes green; workstation and end-to-end acceptance remain mandatory.
+
+
+## CI evidence refresh — 2026-11-18
+
+GitHub Actions run #316 (`44169900862`) for candidate HEAD `116406e7eb99dc89c3da90985e6bf9b1248b9960` completed successfully. The Rust, web, and Ubuntu package/smoke-test jobs all passed. This supersedes the older #306 pending status and previous statements that the expanded package smoke test or npm lockfile validation were not yet complete.
+
+The passing CI evidence covers source formatting, strict Clippy, Rust tests and release build; Python bridge/importer tests; the GPU single-owner static guard; installer syntax and portable migration/rollback tests; locked web dependency installation and production build; package checksum/archive verification; disposable Ubuntu 24.04 `.deb` installation; API health; production static UI; and API authentication rejection/acceptance.
+
+This is not live workstation acceptance. Agent execution, mission orchestration, Hub parity, transactional signed extension management, real dual-3090 concurrent inference, ComfyUI image/video pipelines, MiniMax H3/FlashVSR output, complete repair/security policy, signed updater, and install/upgrade/reboot preservation remain open. PR #12 must remain unmerged until those gates are met on the Ubuntu workstation.

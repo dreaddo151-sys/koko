@@ -219,3 +219,16 @@ Reviewed the controlling master plan, agent contract, skills importer, host disc
 - No Ubuntu workstation commands were run and no live services or user data were changed.
 
 Next safe engineering sequence: wait for run #306 and repair any concrete CI failure; then implement a single bounded provider adapter against a verified local agent API contract, with mocked contract tests and an opt-in live test. In parallel, design Hub integration around the existing Python route inventory rather than replacing it. Do not fabricate agent endpoints or enable imported Pstack code.
+
+
+### CI evidence refresh — 2026-11-18
+
+- Candidate HEAD `116406e7eb99dc89c3da90985e6bf9b1248b9960` was checked against GitHub Actions run #316 (`44169900862`).
+- **All three jobs completed successfully:** Web console / Ubuntu 24.04; Rust / Ubuntu 24.04; Ubuntu packages / smoke test.
+- Rust job passed formatting, strict Clippy, workspace tests, optimized release build, installer shell syntax, portable migration/rollback tests, Python bridge/importer regression tests, and the single-owner GPU boundary check.
+- Web job passed committed npm lockfile verification, `npm ci`, and production console build.
+- Package job assembled the `.deb` and portable archive, verified checksums and archive contents, installed the package in a disposable Ubuntu 24.04 runner, started the packaged API, checked the production UI, verified unauthenticated API rejection (401), and verified authenticated host-profile access.
+- This supersedes earlier statements in this log and the master-plan addendum that run #306 or expanded packaging/installer checks were still pending. Earlier historical run notes remain historical.
+- **Scope of evidence:** this is GitHub-hosted Ubuntu CI only. It does not prove installation, upgrade, reboot persistence, preservation of live DREAD/ComfyUI/Supervisor services, dual-RTX-3090 operation, real inference, agent task execution, image/video output, or workstation rollback.
+- Remaining product gaps are unchanged: live Python Hub parity/integration, concrete provider task adapters, mission DAG/delegation, transactional signed extensions, full inventory, live GPU concurrency, ComfyUI/H3/FlashVSR artifacts, complete permission/sandbox/self-repair lifecycle, signed updater and workstation acceptance.
+- PR #12 remains open and unmerged. No Ubuntu workstation services or user data were touched by this GitHub-only evidence refresh.
