@@ -100,9 +100,14 @@ mod tests {
     use serde_json::{Value, json};
     use tokio::net::TcpListener;
 
-    async fn completion(headers: HeaderMap, Json(payload): Json<Value>) -> (StatusCode, Json<Value>) {
+    async fn completion(
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> (StatusCode, Json<Value>) {
         assert_eq!(
-            headers.get(AUTHORIZATION).and_then(|value| value.to_str().ok()),
+            headers
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
             Some("Bearer test-supervisor-token-that-is-long-enough")
         );
         (StatusCode::OK, Json(json!({"received": payload})))
