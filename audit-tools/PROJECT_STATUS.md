@@ -4,26 +4,34 @@
 **Baseline SHA-256:** `87a9f53911599a06d1501ed1c4ae5751f523be95184932fe3a446f7cd8927305`  
 **Project version in Cargo manifests:** `0.4.0`
 
-## Verified in the hosted Rust runner
+## Verified in GitHub Actions
 
-The exact uploaded archive was downloaded from the GitHub release and its SHA-256 was checked before compilation.
+The exact uploaded archive was downloaded from the GitHub release and its SHA-256 was checked before compilation. Rust 1.100.0 was used.
 
-Baseline checks on Rust 1.100.0:
-
+Baseline source:
 - `cargo fmt --all -- --check`: PASS
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: PASS
 - `cargo test --workspace --locked`: PASS — 13 tests (6 API, 3 discovery, 4 GPU)
 - `cargo build --workspace --release --locked`: PASS
 
-The hardening candidate adds strict local URL validation, disabled redirects, loopback-only API binding, an explicit 32 MiB JSON body ceiling, and 5 KB / 10 KB / 20 KB payload round-trip tests. See the current CI run before treating the hardening candidate as verified.
+Hardened candidate (GitHub Actions run `44001336976`):
+- Rust formatting: PASS
+- Clippy with warnings denied: PASS
+- Workspace tests: PASS — 16 tests (8 API, 4 discovery, 4 GPU)
+- Optimized release build: PASS
+
+The hardened candidate adds strict local URL validation, redirects disabled, loopback-only API binding, a 32 MiB JSON body ceiling, and exact-value round-trip tests for 5 KB / 10 KB / 20 KB payloads.
 
 ## Implemented in this bundle
 
 - Rust API foundation using Axum and SQLite.
 - Local service discovery for configured loopback endpoints.
 - GPU gateway client for health, model discovery, and OpenAI-compatible inference/SSE forwarding.
+- Strict local URL validation and no-follow redirect policy for discovery and GPU gateway HTTP clients.
+- API startup rejects non-loopback bind addresses until authentication exists.
+- JSON request body limit of 32 MiB.
 - Existing Python Hub, ComfyUI and GPU Supervisor retained as separate reference/runtime components.
-- Pstack and Cursor plugin source inventories, with Pstack marked disabled until reviewed.
+- Pstack and Cursor plugin source inventories, with Pstack disabled until reviewed.
 
 ## Not yet a complete Universal Hub
 
@@ -48,10 +56,9 @@ The following capabilities are not implemented as complete Rust product features
 
 ## Recommended implementation sequence
 
-1. Finish and verify the Rust API security and message-integrity hardening.
-2. Add structured capability and agent-adapter contracts, then implement read-only discovery for verified local agents.
-3. Add durable tasks, approval gates, event streaming and bounded orchestration.
-4. Implement the Pstack/Cursor importer and capability review registry with pinned provenance and disabled-by-default execution.
-5. Build the React operator UI against the real API and WebSocket events.
-6. Port legacy Hub workflows incrementally behind adapters, verifying parity without interrupting existing services.
-7. Run end-to-end acceptance on the user's workstation before calling the platform complete.
+1. Add structured capability and agent-adapter contracts, then implement read-only discovery for verified local agents.
+2. Add durable tasks, approval gates, event streaming and bounded orchestration.
+3. Implement the Pstack/Cursor importer and capability review registry with pinned provenance and disabled-by-default execution.
+4. Build the React operator UI against the real API and WebSocket events.
+5. Port legacy Hub workflows incrementally behind adapters, verifying parity without interrupting existing services.
+6. Run end-to-end acceptance on the user's workstation before calling the platform complete.
