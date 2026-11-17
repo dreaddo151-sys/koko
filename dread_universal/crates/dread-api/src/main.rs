@@ -882,13 +882,18 @@ async fn run_task(
     if task.capability_id.is_some() {
         return Err(ApiError {
             status: StatusCode::CONFLICT,
-            message: "Capability-backed tasks remain disabled until a reviewed adapter is registered".into(),
+            message:
+                "Capability-backed tasks remain disabled until a reviewed adapter is registered"
+                    .into(),
         });
     }
     if task.task_type != "service_discovery" {
         return Err(ApiError {
             status: StatusCode::CONFLICT,
-            message: format!("No reviewed built-in runner is registered for task type '{}'", task.task_type),
+            message: format!(
+                "No reviewed built-in runner is registered for task type '{}'",
+                task.task_type
+            ),
         });
     }
 
