@@ -90,12 +90,11 @@ def append_incident(state_path: Path, incident: dict) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--apply", action="store_true", help="perform the allowlisted user-service restart")
-    parser.add_argument("--health-url", default=HEALTH_URL)
     parser.add_argument("--state-file", type=Path, default=Path.home() / ".local/state/dread/watchdog.json")
     args = parser.parse_args()
 
     now = time.time()
-    if is_healthy(args.health_url):
+    if is_healthy():
         append_incident(args.state_file, {"at_unix": now, "health": "ok", "action": "none"})
         print("DREAD API healthy; no action")
         return 0
