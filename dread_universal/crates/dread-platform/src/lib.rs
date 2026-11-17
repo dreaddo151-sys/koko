@@ -585,7 +585,12 @@ fn physical_storage_devices() -> Vec<PhysicalStorageDevice> {
     };
     let Some(output) = run_probe(
         &binary,
-        &["--json", "--bytes", "--output", "NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS,MODEL,TRAN"],
+        &[
+            "--json",
+            "--bytes",
+            "--output",
+            "NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS,MODEL,TRAN",
+        ],
     ) else {
         return Vec::new();
     };
