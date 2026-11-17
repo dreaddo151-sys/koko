@@ -158,7 +158,7 @@
 +
 +        let _permit = loop {
 +            if *cancellation.borrow() {
-+                return Err(ExecutionError::Cancelled { attempts: 0 });
++                return Err(ExecutionError::Cancelled { attempts: 1 });
 +            }
 +            tokio::select! {
 +                permit = Arc::clone(&self.semaphore).acquire_owned() => {
@@ -188,7 +188,7 @@
 +                    }
 +                    changed = cancellation.changed() => {
 +                        if changed.is_err() || *cancellation.borrow() {
-+                            return Err(ExecutionError::Cancelled { attempts: attempts - 1 });
++                            return Err(ExecutionError::Cancelled { attempts });
 +                        }
 +                    }
 +                }
