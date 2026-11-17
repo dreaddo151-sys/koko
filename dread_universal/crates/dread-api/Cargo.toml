@@ -28,3 +28,4 @@ uuid.workspace = true
 
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }
+tokio-tungstenite.workspace = true

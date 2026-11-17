@@ -1828,6 +1828,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn websocket_handshake_replays_events_and_reconnects_from_sequence_cursor() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let (router, gpu_server) = test_app_with_auth().await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let api_server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let base = format!("http://{address}");
+        let client = reqwest::Client::new();
+
+        let created = client
+            .post(format!("{base}/api/tasks"))
+            .bearer_auth("test-token")
+            .json(&json!({
+                "title": "WebSocket replay integration test",
+                "task_type": "service_discovery",
+                "payload": {}
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created: Value = created.json().await.unwrap();
+        let task_id = created["item"]["id"].as_str().unwrap().to_string();
+
+        let approved = client
+            .post(format!("{base}/api/tasks/{task_id}/approve"))
+            .bearer_auth("test-token")
+            .json(&json!({"reason": "WebSocket integration test approval"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(approved.status(), StatusCode::OK);
+
+        let mut request =
+            format!("ws://{address}/api/tasks/{task_id}/stream?after_sequence=1")
+                .into_client_request()
+                .unwrap();
+        request.headers_mut().insert(
+            AUTHORIZATION,
+            "Bearer test-token".parse().unwrap(),
+        );
+        let (mut socket, response) =
+            tokio_tungstenite::connect_async(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+
+        let replayed = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            socket.next(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let replayed: Value =
+            serde_json::from_str(&replayed.into_text().unwrap()).unwrap();
+        assert_eq!(replayed["event_type"], "task_approved");
+        assert_eq!(replayed["sequence"], 2);
+
+        let cancelled = client
+            .post(format!("{base}/api/tasks/{task_id}/cancel"))
+            .bearer_auth("test-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::OK);
+
+        let live = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            socket.next(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let live: Value = serde_json::from_str(&live.into_text().unwrap()).unwrap();
+        assert_eq!(live["event_type"], "task_cancelled");
+        assert_eq!(live["sequence"], 3);
+        drop(socket);
+
+        let mut reconnect =
+            format!("ws://{address}/api/tasks/{task_id}/stream?after_sequence=2")
+                .into_client_request()
+                .unwrap();
+        reconnect.headers_mut().insert(
+            AUTHORIZATION,
+            "Bearer test-token".parse().unwrap(),
+        );
+        let (mut resumed, response) =
+            tokio_tungstenite::connect_async(reconnect).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        let resumed_event = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            resumed.next(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let resumed_event: Value =
+            serde_json::from_str(&resumed_event.into_text().unwrap()).unwrap();
+        assert_eq!(resumed_event["event_type"], "task_cancelled");
+        assert_eq!(resumed_event["sequence"], 3);
+
+        drop(resumed);
+        api_server.abort();
+        gpu_server.abort();
+    }
+
+    #[tokio::test]
     async fn task_creation_publishes_committed_event_to_stream_subscribers() {
         let (router, mut receiver, server) = test_app_with_events().await;
         let payload = json!({"title":"Stream event", "task_type":"test", "payload":{}});
