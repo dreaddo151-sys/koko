@@ -72,7 +72,7 @@ Run #77 uploaded artifact `DREAD_UNIVERSAL_AGENT_DISCOVERY_FOUNDATION` (artifact
 - Hermes/OpenHands/other agent endpoint contracts and provider-specific adapters.
 - Live Pstack API `--apply`, registration persistence and post-import reconciliation.
 - Role-based authorization, token rotation and any future remote-access security review.
-- Durable queue recovery after process restart, cancellation of a live provider task and resource-aware scheduling.
+- Priority/resource-aware scheduling, cancellation of a live provider task and provider-specific execution adapters. Startup queue recovery is implemented and covered by the current canonical CI run.
 - Frontend, GPU contention/lease handoff, installer/upgrade/rollback and dual-RTX-3090 acceptance.
 
 The existing Python GPU Supervisor remains the only GPU lease authority. Rust may use only its local gateway at `127.0.0.1:11500`; it must not contact the upstream model server directly or acquire a second GPU lock. Do not stop or modify the existing DREAD Hub, ComfyUI, Ollama or GPU Supervisor as part of Rust development.

@@ -25,7 +25,7 @@ The run applied the candidate patches to the exact uploaded baseline archive bef
 ## Implemented
 
 - Axum Rust API foundation with SQLite persistence.
-- Strict loopback-only API binding until authentication and authorization are implemented.
+- All `/api/*` routes require a configured Bearer token and the API remains strictly loopback-only. Authentication does not authorize LAN/public exposure; role-based authorization and token rotation remain future work.
 - 32 MiB JSON request-body ceiling; large-message exact-value round-trip tests for 5 KB, 10 KB and 20 KB.
 - Local service discovery for explicitly configured loopback HTTP endpoints.
 - GPU gateway client for health, model discovery and OpenAI-compatible inference/SSE forwarding.
@@ -66,7 +66,7 @@ The run applied the candidate patches to the exact uploaded baseline archive bef
   - Applies a 120-second per-attempt timeout, one attempt by default, and watch-channel cancellation.
   - The API queues and runs only `service_discovery` tasks after explicit approval; tasks linked to a capability or using any other task type are rejected.
   - Execution results are stored in SQLite; task queued/started/succeeded/failed/cancelled events are appended transactionally and broadcast after commit.
-  - Cancellation can signal a running task. The worker queue itself is not yet recovered after a process restart.
+  - Cancellation can signal a running task. Startup recovery resumes only queued approved capability-free `service_discovery` tasks; interrupted running tasks are marked failed and not replayed. Unsupported or capability-linked queued tasks fail closed.
   - Orchestrator unit tests cover concurrency, admission overflow, retry bounds, active cancellation and timeout. API tests cover the allowlisted dispatch, persisted result and rejection of unsupported task types.
   - No provider/agent dispatch, process launcher, priority scheduling, capability execution or GPU lease ownership is present. It does not bypass the Python GPU Supervisor.
 
@@ -135,7 +135,7 @@ The original archive/patch workflow remains historical provenance. New Rust deve
 
 - Existing Python DREAD Hub, ComfyUI, Ollama, GPU Supervisor, Hermes, OpenHands and OpenCode remain external systems to discover and adapt; do not replace them.
 - The Python GPU Supervisor remains the single GPU lease authority. Rust must use a defined adapter and must not independently start/stop GPU workloads or acquire another GPU lock.
-- Rust API remains loopback-only until authentication and authorization are implemented.
+- Rust API remains loopback-only even with Bearer authentication; remote exposure is not authorized.
 - Capability ingestion is metadata-only and disabled by default; unknown code/hooks are not executed.
 - Approval currently records task state only; it is not authenticated identity and does not start execution.
 - A bounded runner primitive is not yet a main orchestrator.
