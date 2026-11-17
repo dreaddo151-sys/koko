@@ -1,5 +1,6 @@
 # Rust build output
 /target/
+/dist/
 
 # Web build output and dependencies
 /web/node_modules/
