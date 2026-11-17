@@ -1,38 +1,44 @@
 # PROJECT DREAD UNIVERSAL
 
-Local-first Rust control plane for model discovery, task approval, local agent endpoint discovery, capability management and GPU inference through a single configured llama.cpp gateway.
+**Target:** Ubuntu 24.04 LTS and later Ubuntu releases only.  
+**Product:** A local-first autonomous AI engineering Master Hub.  
+**Controlling specification:** [docs/MASTER-PLAN.md](docs/MASTER-PLAN.md).  
+**Workstation and engineering handoff:** [docs/WORK-LOG.md](docs/WORK-LOG.md).
 
-## Current implementation
+DREAD is intended to provide one coherent operator environment for autonomous engineering missions, models, agents, skills, tools, GPU inference, ComfyUI image/video workflows, diagnostics, safe repair and transactional upgrades.
 
-- Rust workspace with API, service discovery, agent contracts, GPU gateway client, bounded task orchestration, Pstack context loader and portable host discovery.
-- Host profile: OS, architecture, CPU threads, NVIDIA/AMD/Apple GPU metadata when supported diagnostic utilities are installed, and local `llama-server` executable discovery.
-- Local model discovery through the configured llama.cpp OpenAI-compatible gateway. Ollama is not an active backend.
-- Read-only local agent health discovery for explicitly configured endpoints plus allowlisted OpenHands and LangGraph loopback endpoints.
-- Pstack skills and Markdown agent prompt profiles can be discovered, imported disabled, previewed, explicitly approved, disabled and selected as bounded model context.
-- Imported Markdown is untrusted reference material. It never executes scripts, hooks, MCP tools or shell commands.
-- GPU inference remains behind the authenticated Python GPU Supervisor bridge. Rust does not acquire GPU leases or launch a second inference server.
-- Native Linux, Windows and macOS Rust builds are configured in CI. The current GPU Supervisor implementation is the Linux workstation adapter; cross-platform GPU runtime adapters and installers are not yet complete.
+## Non-negotiable integration rules
 
-## Requirements
+- The existing `dread_web_hub.py` remains the Master Hub while the Rust core is integrated incrementally. Do not replace it with a disconnected second product.
+- Preserve ComfyUI, the Python GPU Supervisor, authenticated bridge, model files, databases, configuration and user data.
+- llama.cpp is the active inference backend. Ollama is not started or used as the active model server.
+- The Python GPU Supervisor remains the only GPU lease and process-lifecycle authority. Rust must not launch a competing llama-server or bypass the authenticated bridge.
+- Imported skills and agent prompt profiles start disabled and are untrusted reference content. Discovery/import does not execute code.
+- Changes must be backed up, reversible and verified against real postconditions.
 
-- Rust stable with Rust 2024 Edition support.
-- Node.js 22+ and npm for the web console.
-- A local llama.cpp OpenAI-compatible gateway.
-- For GPU tasks, the authenticated DREAD Python GPU Supervisor bridge.
-- Optional: `nvidia-smi`, `rocm-smi`, `xpu-smi` or macOS `system_profiler` for richer host discovery.
+## Current Rust foundation
 
-## Build and verify
+The workspace includes an Axum API, SQLite-backed registry/task state, authentication and approval boundaries, bounded task orchestration, task event streaming, a local llama.cpp gateway client, Supervisor bridge integration, read-only host/agent discovery, Pstack skill/profile import controls and a React/TypeScript console.
 
-From this directory:
+This is a foundation, not the completed Universal Hub. Read [docs/WORK-LOG.md](docs/WORK-LOG.md) for dated evidence and known limitations.
+
+## Ubuntu build and test
+
+Requirements: Ubuntu 24.04+, stable Rust with rustfmt/Clippy, Node.js 22+ and npm for the web console.
+
+From `dread_universal/`:
 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 cargo build --workspace --release --locked
+cd web
+npm ci
+npm run build
 ```
 
-Run the API:
+## Development run
 
 ```bash
 export DREAD_API_TOKEN="$(openssl rand -hex 32)"
@@ -40,83 +46,68 @@ export DREAD_OPERATOR_ID="local-operator"
 cargo run -p dread-api
 ```
 
-Run the web console in another terminal:
+In another terminal:
 
 ```bash
 cd web
-npm install
 npm run dev
 ```
 
-Open `http://127.0.0.1:5173` and enter the API token. Vite proxies API requests to `127.0.0.1:8765`. The token stays in page memory and is not persisted to browser storage.
+Open `http://127.0.0.1:5173`; Vite proxies API calls to `127.0.0.1:8765`. The token stays in page memory. Production installation must serve compiled assets without requiring Vite; that gate is not yet complete.
 
 ## Runtime configuration
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DREAD_BIND` | `127.0.0.1:8765` | API listen address; non-loopback binding is rejected |
-| `DREAD_DB_PATH` | `data/dread_registry.sqlite3` | SQLite database |
-| `DREAD_API_TOKEN` | required | Bearer token for protected API routes; at least 32 characters |
-| `DREAD_OPERATOR_ID` | `local-operator` | Server-side identity recorded for approvals |
-| `DREAD_GPU_GATEWAY_URL` | `http://127.0.0.1:11500` | Local llama.cpp gateway; must be loopback HTTP with an explicit port |
-| `DREAD_GPU_SUPERVISOR_URL` | unset | Optional authenticated Supervisor bridge URL |
-| `DREAD_GPU_SUPERVISOR_TOKEN` | unset | Supervisor bridge token; configure together with its URL |
+| `DREAD_BIND` | `127.0.0.1:8765` | API bind address; loopback only |
+| `DREAD_DB_PATH` | `data/dread_registry.sqlite3` | SQLite registry |
+| `DREAD_API_TOKEN` | required | Bearer token for protected routes |
+| `DREAD_OPERATOR_ID` | `local-operator` | Server-side approval identity |
+| `DREAD_GPU_GATEWAY_URL` | `http://127.0.0.1:11500` | Local llama.cpp gateway |
+| `DREAD_GPU_SUPERVISOR_URL` | unset | Authenticated Supervisor bridge URL |
+| `DREAD_GPU_SUPERVISOR_TOKEN` | unset | Supervisor bridge token |
 | `DREAD_SERVICES_CONFIG` | `config/services.toml` | Local service discovery |
 | `DREAD_AGENTS_CONFIG` | `config/agents.toml` | Explicit agent health endpoints |
-| `DREAD_SKILLS_ROOT` | local catalog candidates | Pstack root containing `skills/` and optionally `agents/` |
-| `DREAD_PSTACK_VERSION` | `0.15.43` | Imported catalog version metadata |
-| `DREAD_PSTACK_REVISION` | `unverified-local-copy` | Source revision metadata; set to a verified commit when available |
-| `DREAD_LLM_SERVER` | PATH discovery | Optional explicit path to `llama-server` for host discovery |
+| `DREAD_SKILLS_ROOT` | catalog candidates | Pstack source root |
+| `DREAD_PSTACK_VERSION` | `0.15.43` | Pstack catalog version |
+| `DREAD_PSTACK_REVISION` | unverified local copy | Verified source revision |
+| `DREAD_LLM_SERVER` | PATH discovery | Optional llama-server path |
 
-Never commit API or Supervisor tokens. Store them outside the repository with restrictive permissions. If the API token is missing, protected routes fail closed. `/health` remains unauthenticated for liveness checks. Bearer authentication does not authorize LAN/public exposure.
+Never commit API or Supervisor tokens. Store them outside the repository with restrictive permissions. Bearer authentication does not authorize LAN/public exposure.
 
 ## API surface
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/health` | API health/version |
-| GET | `/api/system/profile` | Cached read-only host and runtime discovery |
-| GET | `/api/services` | Local service probes, including configured llama.cpp gateway |
-| GET | `/api/agents` | Configured agents plus allowlisted OpenHands/LangGraph health probes |
-| GET/POST | `/api/capabilities` | List or register capability metadata; new imports remain disabled |
-| GET | `/api/capabilities/discover` | Discover local Pstack skills and agent profiles |
-| POST | `/api/capabilities/import` | Import discovered profiles as disabled records |
-| GET | `/api/capabilities/{id}/preview` | Preview exact imported Markdown source |
-| POST | `/api/capabilities/{id}/enable` | Explicit operator approval of a reviewed context profile |
-| POST | `/api/capabilities/{id}/disable` | Disable a context profile |
-| GET/POST | `/api/tasks` | List tasks / create a pending-approval task |
-| POST | `/api/tasks/{id}/approve` | Record operator approval; does not execute |
-| POST | `/api/tasks/{id}/run` | Queue an approved supported task |
-| GET | `/api/gpu/models` | List models advertised by the configured llama.cpp gateway |
-| POST | `/api/gpu/v1/chat/completions` | Supervisor-managed direct inference; no skill context |
+| GET | `/health` | API liveness/version |
+| GET | `/api/system/profile` | Read-only host discovery |
+| GET | `/api/services` | Configured local service health |
+| GET | `/api/agents` | Read-only configured/known endpoint probes |
+| GET | `/api/capabilities/discover` | Discover local Pstack skills/profiles |
+| POST | `/api/capabilities/import` | Register discovered profiles disabled |
+| GET | `/api/capabilities/{id}/preview` | Preview source |
+| POST | `/api/capabilities/{id}/enable` | Explicit operator approval |
+| POST | `/api/capabilities/{id}/disable` | Disable profile |
+| GET/POST | `/api/tasks` | List/create tasks |
+| POST | `/api/tasks/{id}/approve` | Record approval; does not itself execute |
+| POST | `/api/tasks/{id}/run` | Queue supported approved task |
+| GET | `/api/gpu/models` | Models advertised by llama.cpp gateway |
+| POST | `/api/gpu/v1/chat/completions` | Supervisor-managed inference |
 
-## Agent discovery boundaries
+## Agent and extension boundaries
 
-DREAD probes only explicit loopback health URLs and a small known-endpoint allowlist:
-- OpenHands Agent Server: `http://127.0.0.1:8000/health`
-- LangGraph Agent Server: `http://127.0.0.1:2024/ok`
+Current OpenHands and LangGraph probes are read-only health checks. A healthy endpoint is not a live task adapter. Hermes, OpenHands and DeerFlow task execution require separately tested AgentAdapter implementations. Pstack `agents/*.md` files are prompt profiles, not running agents.
 
-The probes use GET, short timeouts and no redirects. They do not scan arbitrary ports, contact LAN hosts, launch agents or prove that a task lifecycle adapter is installed. A healthy endpoint still needs a reviewed `AgentAdapter` implementation before it can execute tasks.
+Pstack pin: 0.15.43, commit `2f87c854fe3e2fcda44ca86b46ede35aad3c46b7`, subtree `71d8e1d1d718e2149dc43b2535618064f29cba6b`, MIT; 58 skills and 2 prompt profiles. Use cryptographic SHA-256 provenance for production extension/update integrity.
 
-A Pstack `agents/<name>.md` file is a prompt profile, not a live agent process. It can be imported as untrusted context; it is not represented as a remote AgentAdapter.
+## Ubuntu-only CI and release
 
-## Pstack extension workflow
+GitHub Actions targets Ubuntu 24.04 only. The release workflow creates an Ubuntu x86_64 build bundle and SHA-256 manifest. A production `.deb`, systemd-integrated installer, signed updater, atomic activation and rollback remain required before calling the package an installer or updater complete.
 
-Set `DREAD_SKILLS_ROOT` to the local Pstack root. DREAD discovers:
-- `skills/<name>/SKILL.md`
-- `agents/<name>.md`
+## GPU ownership
 
-The console provides one-click discovery/import, source preview, explicit approval and disable. Imports are disabled by default. Content is bounded, local paths are checked, and the stored FNV-1a fingerprint is rechecked before approval/use. This fingerprint is a change detector, not a cryptographic signature.
+The Python GPU Supervisor is the sole authority for GPU leases and process lifecycle. Rust discovers models through the local gateway and sends approved inference through the authenticated bridge. Never call the tensor upstream directly from Rust or start a second llama-server. Do not stop ComfyUI as part of DREAD development, installation, update or repair.
 
-Enabled profiles can be selected for an approved `gpu_chat` task. Their Markdown is injected as untrusted user reference context beneath a separate DREAD policy message. Direct GPU inference cannot attach profiles. No imported scripts, hooks, shell commands, MCP tools or other code are executed.
+## Completion criteria
 
-## GPU ownership contract
-
-The Python GPU Supervisor remains the sole GPU lease and process-lifecycle authority for the current workstation. Rust uses the configured gateway for model discovery and the authenticated bridge for inference. It must not start another llama-server while the Supervisor owns GPU execution. ComfyUI remains independently managed and must not be stopped by DREAD installation or update operations.
-
-## Portable releases
-
-- `.github/workflows/dread-universal-ci.yml` runs formatting, Clippy, tests and release builds on Linux, Windows and macOS, plus the web build.
-- `.github/workflows/dread-universal-release.yml` builds native binaries and web assets for version tags and publishes SHA-256 checksums.
-
-A successful native compile does not mean GPU inference is supported on that OS. Windows/macOS GPU Supervisor adapters, signed installers, automatic dependency installation, transactional upgrades and rollback remain future acceptance gates.
+See [docs/MASTER-PLAN.md](docs/MASTER-PLAN.md) for clean Ubuntu installation, real model/agent discovery and task execution, dual-3090 lease safety, valid image/video artifacts, legacy Hub regression coverage, self-repair/rollback drills and workstation acceptance.
