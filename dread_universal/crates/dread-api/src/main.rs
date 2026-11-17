@@ -1087,9 +1087,7 @@ async fn create_mission(
             .map(|encoded| encoded.len())
             .unwrap_or(usize::MAX);
         if payload_size > 1_048_576 {
-            return Err(ApiError::bad_request(
-                "mission node payload exceeds 1 MiB",
-            ));
+            return Err(ApiError::bad_request("mission node payload exceeds 1 MiB"));
         }
     }
     let execution_order = graph
@@ -1137,7 +1135,9 @@ async fn instantiate_mission(
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     if id.trim().is_empty() || id.len() > 160 {
-        return Err(ApiError::bad_request("mission id must contain 1 to 160 characters"));
+        return Err(ApiError::bad_request(
+            "mission id must contain 1 to 160 characters",
+        ));
     }
     let now = now_epoch();
     let mut conn = db_lock(&state)?;
@@ -1160,9 +1160,9 @@ async fn instantiate_mission(
     }
     let graph: MissionGraph = serde_json::from_str(&stored.0)
         .map_err(|error| ApiError::internal(format!("Stored mission graph is invalid: {error}")))?;
-    let order = graph
-        .execution_order()
-        .map_err(|error| ApiError::internal(format!("Stored mission graph is invalid: {error:?}")))?;
+    let order = graph.execution_order().map_err(|error| {
+        ApiError::internal(format!("Stored mission graph is invalid: {error:?}"))
+    })?;
     let nodes = graph
         .nodes
         .iter()
@@ -1178,7 +1178,10 @@ async fn instantiate_mission(
         match node.task_type.as_str() {
             "service_discovery" => {
                 if !node.payload.is_null()
-                    && !node.payload.as_object().is_some_and(|object| object.is_empty())
+                    && !node
+                        .payload
+                        .as_object()
+                        .is_some_and(|object| object.is_empty())
                 {
                     return Err(ApiError::bad_request(
                         "service_discovery mission nodes accept only an empty payload",
@@ -1204,10 +1207,12 @@ async fn instantiate_mission(
 
         let task_id = Uuid::new_v4().to_string();
         let title = format!("Mission node {}", node.id);
-        let payload_json = serde_json::to_string(&node.payload)
-            .map_err(|error| ApiError::bad_request(format!("Invalid mission node payload: {error}")))?;
-        let dependencies_json = serde_json::to_string(&node.depends_on)
-            .map_err(|error| ApiError::internal(format!("Could not encode mission dependencies: {error}")))?;
+        let payload_json = serde_json::to_string(&node.payload).map_err(|error| {
+            ApiError::bad_request(format!("Invalid mission node payload: {error}"))
+        })?;
+        let dependencies_json = serde_json::to_string(&node.depends_on).map_err(|error| {
+            ApiError::internal(format!("Could not encode mission dependencies: {error}"))
+        })?;
         tx.execute(
             "INSERT INTO tasks (id, title, task_type, capability_id, payload_json, status, approval_required, created_at, updated_at)
              VALUES (?1, ?2, ?3, NULL, ?4, 'pending_approval', 1, ?5, ?5)",
@@ -1246,7 +1251,8 @@ async fn instantiate_mission(
         params![id],
     )
     .map_err(|error| ApiError::internal(error.to_string()))?;
-    tx.commit().map_err(|error| ApiError::internal(error.to_string()))?;
+    tx.commit()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     for event in emitted_events {
         let _ = state.events.send(event);
     }
@@ -1311,8 +1317,10 @@ async fn get_mission(
     for row in rows {
         let (node_id, task_id, dependencies_json, status) =
             row.map_err(|error| ApiError::internal(error.to_string()))?;
-        let depends_on: Vec<String> = serde_json::from_str(&dependencies_json)
-            .map_err(|error| ApiError::internal(format!("Stored mission dependencies are invalid: {error}")))?;
+        let depends_on: Vec<String> =
+            serde_json::from_str(&dependencies_json).map_err(|error| {
+                ApiError::internal(format!("Stored mission dependencies are invalid: {error}"))
+            })?;
         tasks.push(json!({
             "node_id": node_id,
             "task_id": task_id,
@@ -1712,12 +1720,12 @@ async fn run_task(
             )
             .map_err(|error| ApiError::internal(error.to_string()))?;
         if !matches!(mission_status.as_str(), "awaiting_approval" | "running") {
-            return Err(ApiError::conflict(
-                "Mission is not in an executable state",
-            ));
+            return Err(ApiError::conflict("Mission is not in an executable state"));
         }
-        let dependencies: Vec<String> = serde_json::from_str(&dependencies_json)
-            .map_err(|error| ApiError::internal(format!("Stored mission dependencies are invalid: {error}")))?;
+        let dependencies: Vec<String> =
+            serde_json::from_str(&dependencies_json).map_err(|error| {
+                ApiError::internal(format!("Stored mission dependencies are invalid: {error}"))
+            })?;
         for dependency in dependencies {
             let dependency_status: Option<String> = tx
                 .query_row(
@@ -2253,17 +2261,22 @@ async fn execute_approved_task(
                     Err(_) => return,
                 };
                 if incomplete == 0
-                    && tx.execute(
-                        "UPDATE missions SET status = 'completed' WHERE id = ?1",
-                        params![mission_id],
-                    ).is_err()
+                    && tx
+                        .execute(
+                            "UPDATE missions SET status = 'completed' WHERE id = ?1",
+                            params![mission_id],
+                        )
+                        .is_err()
                 {
                     return;
                 }
-            } else if tx.execute(
-                "UPDATE missions SET status = 'blocked' WHERE id = ?1",
-                params![mission_id],
-            ).is_err() {
+            } else if tx
+                .execute(
+                    "UPDATE missions SET status = 'blocked' WHERE id = ?1",
+                    params![mission_id],
+                )
+                .is_err()
+            {
                 return;
             }
         }
