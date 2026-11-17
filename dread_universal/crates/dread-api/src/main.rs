@@ -105,6 +105,14 @@ struct TaskRecord {
     updated_at: u64,
 }
 
+struct QueuedTaskRecovery {
+    id: String,
+    task_type: String,
+    capability_id: Option<String>,
+    approval_required: bool,
+    approved_by: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateTask {
     title: String,
@@ -1150,48 +1158,48 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
         );
     }
 
-    let queued: Vec<(String, String, Option<String>, bool, Option<String>)> = {
+    let queued: Vec<QueuedTaskRecovery> = {
         let mut statement = tx.prepare(
             "SELECT id, task_type, capability_id, approval_required, approved_by
              FROM tasks WHERE status = 'queued'",
         )?;
         let rows = statement.query_map([], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get::<_, i64>(3)? != 0,
-                row.get(4)?,
-            ))
+            Ok(QueuedTaskRecovery {
+                id: row.get(0)?,
+                task_type: row.get(1)?,
+                capability_id: row.get(2)?,
+                approval_required: row.get::<_, i64>(3)? != 0,
+                approved_by: row.get(4)?,
+            })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
 
     let mut resumable = Vec::new();
-    for (task_id, task_type, capability_id, approval_required, approved_by) in queued {
-        if task_type == "service_discovery"
-            && capability_id.is_none()
-            && approval_required
-            && approved_by.is_some()
+    for task in queued {
+        if task.task_type == "service_discovery"
+            && task.capability_id.is_none()
+            && task.approval_required
+            && task.approved_by.is_some()
         {
-            resumable.push((task_id, task_type));
+            resumable.push((task.id, task.task_type));
             continue;
         }
 
         let reason = "Queued task is not eligible for automatic recovery; explicit operator review is required";
         tx.execute(
             "UPDATE tasks SET status = 'failed', updated_at = ?2 WHERE id = ?1 AND status = 'queued'",
-            params![task_id, now],
+            params![task.id, now],
         )?;
         tx.execute(
             "INSERT OR REPLACE INTO task_results (task_id, result_json, error, attempts, elapsed_ms, completed_at)
              VALUES (?1, NULL, ?2, 0, 0, ?3)",
-            params![task_id, reason, now],
+            params![task.id, reason, now],
         )?;
         emitted.push(
             append_task_event(
                 &tx,
-                &task_id,
+                &task.id,
                 "task_recovery_rejected",
                 &json!({"status": "failed", "reason": reason}),
                 "recovery",
