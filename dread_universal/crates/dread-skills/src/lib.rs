@@ -73,13 +73,13 @@ impl std::fmt::Display for SkillError {
 impl std::error::Error for SkillError {}
 
 fn fingerprint(bytes: &[u8]) -> String {
-    // Non-cryptographic change detector only; never use this as a trust signature.
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("fnv1a64:{hash:016x}")
+    let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
+    let hex = digest
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{hex}")
 }
 
 fn safe_id(id: &str) -> bool {
@@ -429,6 +429,11 @@ mod tests {
     }
 
     #[test]
+    fn fingerprint_matches_sha256_known_vector() {
+        assert_eq!(fingerprint(b"abc"), "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    #[test]
     fn discovers_metadata_without_executing_markdown() {
         let temp = Temp::new();
         fs::write(
@@ -442,7 +447,8 @@ mod tests {
         assert_eq!(items[0].id, "pstack.skill.example");
         assert_eq!(items[0].name, "Example Skill");
         assert_eq!(items[0].description, "Safe metadata");
-        assert!(items[0].fingerprint.starts_with("fnv1a64:"));
+        assert!(items[0].fingerprint.starts_with("sha256:"));
+        assert_eq!(items[0].fingerprint.len(), "sha256:".len() + 64);
     }
 
     #[test]
