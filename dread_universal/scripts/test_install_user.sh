@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+set -x
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
@@ -117,7 +118,7 @@ grep -q 'keep-backup-marker' "$backup_marker"
 
 printf 'Portable update backup preserved the prior application tree.\n'
 BUNDLE3="$(make_bundle v3)"
-if HOME="$HOME" DREAD_INSTALL_DIR="$PREFIX" MOCK_SYSTEMD_STATE="$STATE" MOCK_FAIL_HEALTH=1 PATH="$MOCK_BIN:$PATH" bash "$BUNDLE3/install-user.sh" >/dev/null 2>&1; then
+if HOME="$HOME" DREAD_INSTALL_DIR="$PREFIX" MOCK_SYSTEMD_STATE="$STATE" MOCK_FAIL_HEALTH=1 PATH="$MOCK_BIN:$PATH" bash "$BUNDLE3/install-user.sh" >/dev/null; then
   printf 'Expected the forced health-check failure to trigger rollback.\n' >&2
   exit 1
 fi
