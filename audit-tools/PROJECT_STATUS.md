@@ -87,3 +87,37 @@ The run applied the candidate patches to the exact uploaded baseline archive bef
 11. [ ] Incremental legacy Python Hub workflow parity, installer/upgrade/rollback, backup/restore tests and dual-RTX-3090 workstation acceptance.
 
 The Python Hub, ComfyUI, Ollama and GPU Supervisor remain separate runtime/reference components. Full Universal Hub parity has not been achieved.
+
+
+## Master-plan alignment — explicit phase ledger
+
+The master architecture plan is the target specification, not a declaration of completed functionality. Current status is:
+
+| Master-plan phase | Status | Evidence / remaining gate |
+|---|---|---|
+| 0 — Baseline | PARTIAL | Historical workstation map exists. Current local Rust/rustup installation, current service states and GPU Supervisor adapter contract have not been revalidated in this GitHub workflow. Do not repeat a full workstation audit. |
+| 1 — Rust foundation | PARTIAL / CI PASS | Rust API, SQLite task/capability records, health/service routes and CI release build exist in the candidate source. A clean, reproducible build from the repository itself and live non-conflicting workstation health smoke test remain outstanding. |
+| 2 — Existing service adapters | NOT VERIFIED | No completed Hermes, OpenHands, OpenCode, Ollama, llama.cpp gateway, ComfyUI or DREAD Hub adapter contract and representative read-only request is evidenced by this workflow. Agent health discovery is generic configured HTTP probing, not those dedicated adapters. |
+| 3 — Capability registry | PARTIAL | Capability metadata registry and pinned Pstack dry-run/importer tests pass. Full Cursor plugin ingestion, compatibility classification, MCP/OpenAPI/CLI/service inventory and representative sample reconciliation remain outstanding. |
+| 4 — Agent orchestration | PARTIAL | Durable task lifecycle, approval audit, WebSocket event stream and bounded runner kernel pass CI. There is no planner, worker delegation, adapter-backed execution, result aggregation, task-kernel integration or multi-agent end-to-end test. |
+| 5 — GPU/resource coordination | NOT VERIFIED | The documented GPU gateway boundary exists, but no Rust adapter to the existing Python GPU Supervisor, resource inventory, lease/handoff test or controlled inference verification is evidenced here. Do not create a second scheduler. |
+| 6 — Modern interface | NOT STARTED / NOT VERIFIED | No React/TypeScript/Tailwind/shadcn frontend or production UI build is evidenced. |
+| 7 — Diagnostics and controlled repair | NOT STARTED | No diagnosis/repair workflow, simulation, approval-gated patch application, backup/rollback executor or reversible repair test is evidenced. |
+| 8 — Migration and release | NOT READY | CI source candidate is not a workstation release or migration. Feature parity, install/upgrade/rollback, live acceptance and user-approved cutover remain outstanding. |
+
+### Source-of-truth and CI reproducibility gap
+
+The current GitHub feature branch stores workflow files, audit documentation and patch files; it does **not** store the Rust workspace at `dread_universal/`. The workflow downloads the external GitHub release asset `DREAD_UNIVERSAL_COMPLETE_TRUE.zip` from tag `dread-universal-v0.4.0-test`, verifies its pinned SHA-256, applies patches from this branch, then builds and packages the result.
+
+Therefore run #77/#79 verifies a patched derivative of that fixed external baseline archive, not a Rust source tree committed at the feature-branch commit. The artifact is useful CI evidence, but the branch alone is not a self-contained, reproducible source checkout. The baseline archive is also immutable-by-convention only: changing it requires deliberately updating the URL and checksum together with provenance.
+
+**Required next engineering milestone:** establish one canonical, version-controlled source-of-truth for the Rust workspace. Safely import the verified baseline and applied changes into a dedicated integration branch, preserving source history/provenance and all backups; then make CI build that committed workspace directly. Do not delete the external archive or patch history until the replacement build is independently verified. Do not merge to `main` or alter the workstation as part of this step.
+
+### Architecture constraints carried forward
+
+- Existing Python DREAD Hub, ComfyUI, Ollama, GPU Supervisor, Hermes, OpenHands and OpenCode remain external systems to discover and adapt; do not replace them.
+- The Python GPU Supervisor remains the single GPU lease authority. Rust must use a defined adapter and must not independently start/stop GPU workloads or acquire another GPU lock.
+- Rust API remains loopback-only until authentication and authorization are implemented.
+- Capability ingestion is metadata-only and disabled by default; unknown code/hooks are not executed.
+- Approval currently records task state only; it is not authenticated identity and does not start execution.
+- A bounded runner primitive is not yet a main orchestrator.
