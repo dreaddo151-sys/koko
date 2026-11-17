@@ -2524,45 +2524,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gpu_chat_rejects_unavailable_models_and_unsafe_payload_fields() {
-        assert!(
-            validate_gpu_chat_payload(
-                &json!({
-                    "model": "missing",
-                    "messages": [{"role": "user", "content": "hello"}],
-                    "tools": [{"type": "function"}]
-                })
-            )
-            .is_err()
-        );
-        assert!(
-            validate_gpu_chat_payload(
-                &json!({
-                    "model": "missing",
-                    "messages": [{"role": "tool", "content": "hello"}]
-                })
-            )
-            .is_err()
-        );
-        assert!(
-            validate_gpu_chat_payload(
-                &json!({
-                    "model": "missing",
-                    "messages": [{"role": "user", "content": "hello"}],
-                    "temperature": 3.0
-                })
-            )
-            .is_err()
-        );
-        assert!(
-            validate_gpu_chat_payload(
-                &json!({
-                    "model": "missing",
-                    "messages": [{"role": "user", "content": "hello"}]
-                })
-            )
-            .is_ok()
-        );
+    async fn gpu_chat_rejects_unsafe_payload_fields_and_values() {
+        assert!(validate_gpu_chat_payload(&json!({
+            "model": "missing",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{"type": "function"}]
+        }))
+        .is_err());
+        assert!(validate_gpu_chat_payload(&json!({
+            "model": "missing",
+            "messages": [{"role": "tool", "content": "hello"}]
+        }))
+        .is_err());
+        assert!(validate_gpu_chat_payload(&json!({
+            "model": "missing",
+            "messages": [{"role": "user", "content": "hello"}],
+            "temperature": 3.0
+        }))
+        .is_err());
+        assert!(validate_gpu_chat_payload(&json!({
+            "model": "missing",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .is_ok());
+    }
+
+    #[tokio::test]
+    async fn gpu_chat_refuses_models_not_advertised_by_gateway() {
+        let mock = Router::new().route("/v1/models", get(|| async {
+            Json(json!({"object": "list", "data": [{"id": "allowed-model", "object": "model"}]}))
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, mock).await.unwrap();
+        });
+        let gpu = GpuGatewayClient::new(format!("http://{address}")).unwrap();
+        let error = execute_gpu_chat(
+            &gpu,
+            &json!({
+                "model": "not-allowed",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("not exposed by the local GPU gateway"));
+        server.abort();
     }
 
     #[tokio::test]
