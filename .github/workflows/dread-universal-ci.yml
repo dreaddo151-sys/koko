@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: dread-universal-ubuntu-ci
+  group: dread-universal-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
