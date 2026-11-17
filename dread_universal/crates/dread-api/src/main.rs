@@ -2705,7 +2705,7 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         assert_eq!(
             serde_json::from_slice::<Value>(&body).unwrap(),
-            json!({"status": "ok", "gpu": "on-demand"})
+            json!({"status": "ok", "gpu": "on-demand", "supervisor_configured": true})
         );
 
         server.abort();
