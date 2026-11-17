@@ -86,6 +86,11 @@ jobs:
           mkdir -p "$RUNNER_TEMP/dread-final"
           cp -a "$RUNNER_TEMP/dread-source/tmp/dread_zip_check/DREAD-UNIVERSAL" "$RUNNER_TEMP/dread-final/"
           cp -a "$RUNNER_TEMP/dread-source/tmp/dread_zip_check/legacy-reference" "$RUNNER_TEMP/dread-final/"
+          rm -rf "$RUNNER_TEMP/dread-final/DREAD-UNIVERSAL/dread_universal/target"
+          if find "$RUNNER_TEMP/dread-final" -type d -name target -print -quit | grep -q .; then
+            echo "Refusing to package a build target directory" >&2
+            exit 1
+          fi
           cd "$RUNNER_TEMP/dread-final"
           zip -qr "$RUNNER_TEMP/DREAD_UNIVERSAL_HARDENED.zip" DREAD-UNIVERSAL legacy-reference
           sha256sum "$RUNNER_TEMP/DREAD_UNIVERSAL_HARDENED.zip"
