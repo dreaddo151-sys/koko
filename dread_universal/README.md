@@ -100,7 +100,11 @@ Never commit API or Supervisor tokens. Store them outside the repository with re
 
 Current OpenHands and LangGraph probes are read-only health checks. A healthy endpoint is not a live task adapter. Hermes, OpenHands and DeerFlow task execution require separately tested AgentAdapter implementations. Pstack `agents/*.md` files are prompt profiles, not running agents.
 
-Pstack pin: 0.15.43, commit `2f87c854fe3e2fcda44ca86b46ede35aad3c46b7`, subtree `71d8e1d1d718e2149dc43b2535618064f29cba6b`, MIT; 58 skills and 2 prompt profiles. Use cryptographic SHA-256 provenance for production extension/update integrity.
+The repository's reviewed Pstack snapshot is 0.15.43 at commit `2f87c854fe3e2fcda44ca86b46ede35aad3c46b7`, subtree `71d8e1d1d718e2149dc43b2535618064f29cba6b`, MIT; 58 skills and 2 prompt profiles. This repository snapshot pin is not proof that an arbitrary runtime local directory matches that revision. Runtime local imports are explicitly labelled `unverified_local_copy`, omit an upstream URL and invented version/revision, and treat Markdown only as untrusted context. Use cryptographic SHA-256 plus signed source provenance for production extension/update integrity.
+
+## Hermes API adapter (library-only; not yet registered)
+
+The `dread-agents` crate includes an explicit `HermesApiAdapter` for the documented Hermes Runs API: authenticated run submission, status/result retrieval, SSE event replay and cooperative stop. Construction requires a numeric loopback HTTP endpoint, an API server bearer key, and an explicit caller-supplied display name. Requests and event streams have size limits; run IDs and idempotency keys are validated. The adapter is not auto-discovered or registered in the Rust API, and it does not itself authorize a task. Do not expose the Hermes API server beyond loopback or submit work until DREAD approval, sandboxing and the provider's own tool policy are enforced by the calling integration.
 
 ## Ubuntu-only CI and release
 
@@ -144,7 +148,7 @@ sudo dpkg -i dist/release/dread-universal_*.deb
 /usr/share/dread-universal/configure-user.sh
 ```
 
-Both installers create a per-user API token file at `~/.config/dread-universal/dread.env`; keep it private and enter its token in the console. Existing user configuration and database files are preserved. The portable installer backs up the previous application directory and performs a health check before accepting the update; a failed update restores the previous application files. Neither installer stops or replaces the legacy Python Master Hub, ComfyUI or the Python GPU Supervisor.
+Both installers create a per-user API token file at `~/.config/dread-universal/dread.env`; keep it private and enter its token in the console. Existing user configuration and database files are preserved. The portable installer backs up the previous application directory, credential file and systemd unit, records the prior enabled/active service state, and performs a health check before accepting the update. A failed upgrade restores the previous application, credentials, unit and service state; a failed first install removes the newly created unit and application tree. Neither installer stops or replaces the legacy Python Master Hub, ComfyUI or the Python GPU Supervisor.
 
 The packaged API listens only on `127.0.0.1:8765`. GPU inference remains disabled until the already-running authenticated Supervisor bridge URL and token are configured in the private environment file. Do not copy the bridge token into Git or browser storage.
 
