@@ -448,6 +448,16 @@ mod tests {
     use super::{classify_agent_http_status, classify_http_status, validate_local_service_url};
 
     #[test]
+    fn known_agent_catalog_is_loopback_only_and_bounded() {
+        let agents = super::known_agent_endpoints();
+        assert_eq!(agents.len(), 2);
+        assert!(agents.iter().all(|agent| agent.enabled));
+        assert!(agents.iter().all(|agent| {
+            agent.health_url.starts_with("http://127.0.0.1:")
+        }));
+    }
+
+    #[test]
     fn service_config_rejects_duplicate_ids_and_too_many_endpoints() {
         let service = super::Service {
             id: "ollama".into(),
