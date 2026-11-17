@@ -1684,13 +1684,13 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(test)]
     use futures::StreamExt;
     use axum::{
         body::{Body, to_bytes},
         http::Request,
         routing::post,
     };
+    use futures::StreamExt;
     use serde_json::json;
     use tokio::net::TcpListener;
     use tower::ServiceExt;

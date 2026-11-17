@@ -49,7 +49,7 @@ impl GpuSupervisorClient {
             body.len() <= 1_048_576,
             "GPU chat request exceeds the 1 MiB Supervisor bridge limit"
         );
-        let response = self
+        let mut response = self
             .http
             .post(format!("{}/v1/chat/completions", self.base_url))
             .bearer_auth(&self.token)
@@ -66,14 +66,18 @@ impl GpuSupervisorClient {
         {
             anyhow::bail!("GPU Supervisor response exceeds the 1 MiB result limit");
         }
-        let response_body = response
-            .bytes()
+        let mut response_body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .context("Could not read GPU Supervisor response")?;
-        ensure!(
-            response_body.len() <= 1_048_576,
-            "GPU Supervisor response exceeds the 1 MiB result limit"
-        );
+            .context("Could not read GPU Supervisor response")?
+        {
+            ensure!(
+                response_body.len().saturating_add(chunk.len()) <= 1_048_576,
+                "GPU Supervisor response exceeds the 1 MiB result limit"
+            );
+            response_body.extend_from_slice(&chunk);
+        }
         if !status.is_success() {
             anyhow::bail!(
                 "GPU Supervisor returned HTTP {}: {}",
@@ -96,14 +100,9 @@ mod tests {
     use serde_json::{Value, json};
     use tokio::net::TcpListener;
 
-    async fn completion(
-        headers: HeaderMap,
-        Json(payload): Json<Value>,
-    ) -> (StatusCode, Json<Value>) {
+    async fn completion(headers: HeaderMap, Json(payload): Json<Value>) -> (StatusCode, Json<Value>) {
         assert_eq!(
-            headers
-                .get(AUTHORIZATION)
-                .and_then(|value| value.to_str().ok()),
+            headers.get(AUTHORIZATION).and_then(|value| value.to_str().ok()),
             Some("Bearer test-supervisor-token-that-is-long-enough")
         );
         (StatusCode::OK, Json(json!({"received": payload})))
