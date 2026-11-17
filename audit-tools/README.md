@@ -86,3 +86,7 @@ The Python GPU Supervisor remains the only GPU ownership, VRAM lease and process
 This is a tested Rust foundation, not the complete Universal Hub. WebSocket event streaming, bounded task execution, provider-specific adapters, reviewed Pstack/Cursor import, authentication, React operator UI, legacy Hub parity, installer/upgrade/rollback and live dual-RTX-3090 acceptance remain future milestones.
 
 See [project status](docs/PROJECT_STATUS.md) and [verification gates](docs/VERIFICATION.md).
+
+## Bounded orchestration kernel
+
+The `dread-orchestrator` crate supplies a bounded execution gate for a caller-selected runner: max concurrent operations, max admitted work, retry count, per-attempt timeout and watch-channel cancellation. It is a foundation, not yet connected to the durable task API or a provider adapter. It has no persistent queue, priority scheduling, process launching or GPU lease ownership. The Python GPU Supervisor remains the only GPU owner. Do not treat approval as execution; the task API still records approval only.
