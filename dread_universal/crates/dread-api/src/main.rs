@@ -4699,7 +4699,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(instantiated.status(), StatusCode::ACCEPTED);
-        let body = to_bytes(instantiated.into_body(), usize::MAX).await.unwrap();
+        let body = to_bytes(instantiated.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let result: Value = serde_json::from_slice(&body).unwrap();
         let first_id = result["item"]["tasks"][0]["task_id"]
             .as_str()
@@ -4737,30 +4739,31 @@ mod tests {
             .unwrap();
         assert_eq!(started.status(), StatusCode::ACCEPTED);
 
-        let waiting_for_approval = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-            loop {
-                let fetched = router
-                    .clone()
-                    .oneshot(
-                        Request::builder()
-                            .uri("/api/missions/late-approval-mission")
-                            .body(Body::empty())
-                            .unwrap(),
-                    )
-                    .await
-                    .unwrap();
-                let body = to_bytes(fetched.into_body(), usize::MAX).await.unwrap();
-                let stored: Value = serde_json::from_slice(&body).unwrap();
-                if stored["item"]["tasks"][0]["status"] == "completed"
-                    && stored["item"]["tasks"][1]["status"] == "pending_approval"
-                {
-                    break stored;
+        let waiting_for_approval =
+            tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                loop {
+                    let fetched = router
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .uri("/api/missions/late-approval-mission")
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    let body = to_bytes(fetched.into_body(), usize::MAX).await.unwrap();
+                    let stored: Value = serde_json::from_slice(&body).unwrap();
+                    if stored["item"]["tasks"][0]["status"] == "completed"
+                        && stored["item"]["tasks"][1]["status"] == "pending_approval"
+                    {
+                        break stored;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .expect("first mission node should complete while the dependent awaits approval");
+            })
+            .await
+            .expect("first mission node should complete while the dependent awaits approval");
         assert_eq!(waiting_for_approval["item"]["status"], "running");
 
         let approved = router
@@ -4770,7 +4773,9 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/tasks/{second_id}/approve"))
                     .header("content-type", "application/json")
-                    .body(Body::from(json!({"reason":"approve dependent after review"}).to_string()))
+                    .body(Body::from(
+                        json!({"reason":"approve dependent after review"}).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
