@@ -3,6 +3,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -98,16 +99,28 @@ class PstackCapabilityImportTests(unittest.TestCase):
         with self.assertRaises(importer.ImportErrorSafe):
             importer.validate_loopback_api_url("http://127.0.0.1/api")
 
-    def test_existing_capability_must_be_disabled_and_match_provenance(self):
-        record = {"id": "pstack.skill.example", "provenance": {"source_name": "Pstack", "source_revision": "a" * 40}}
-        existing = {"item": {"status": "disabled", "provenance": {"source_name": "Pstack", "source_revision": "a" * 40}}}
-        importer._require_disabled_existing(existing, record)
-        enabled = {"item": {"status": "enabled", "provenance": existing["item"]["provenance"]}}
-        with self.assertRaises(importer.ImportErrorSafe):
-            importer._require_disabled_existing(enabled, record)
-        stale = {"item": {"status": "disabled", "provenance": {"source_name": "Pstack", "source_revision": "b" * 40}}}
-        with self.assertRaises(importer.ImportErrorSafe):
-            importer._require_disabled_existing(stale, record)
+    def test_apply_records_uses_one_atomic_authenticated_batch_request(self):
+        records = [{"id": "pstack.skill.one"}, {"id": "pstack.agent.two"}]
+        response = {"created": 1, "already_present": 1, "execution_started": False}
+        with patch.object(importer, "_request", return_value=(201, response)) as request:
+            self.assertEqual(
+                importer.apply_records(records, "http://127.0.0.1:8765", "x" * 32),
+                (1, 1),
+            )
+        args = request.call_args.args
+        self.assertEqual(args[1], "http://127.0.0.1:8765/api/capabilities/import-batch")
+        self.assertEqual(args[2], "POST")
+        self.assertEqual(args[4], {"records": records})
+
+    def test_apply_records_rejects_partial_or_execution_started_response(self):
+        records = [{"id": "pstack.skill.one"}, {"id": "pstack.agent.two"}]
+        with patch.object(
+            importer,
+            "_request",
+            return_value=(201, {"created": 1, "already_present": 0, "execution_started": False}),
+        ):
+            with self.assertRaises(importer.ImportErrorSafe):
+                importer.apply_records(records, "http://127.0.0.1:8765", "x" * 32)
 
     def test_api_requests_require_bearer_token_of_minimum_length(self):
         with self.assertRaises(importer.ImportErrorSafe):
