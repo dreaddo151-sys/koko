@@ -69,6 +69,25 @@ jobs:
           import sys
           path = Path(sys.argv[1])
           source = path.read_text()
+          handler_marker = "async fn list_registry(State(state): State<AppState>)"
+          if "async fn agents()" not in source:
+              position = source.index(handler_marker)
+              handler = '''async fn agents() -> Result<Json<Value>, ApiError> {
+              let config_path = env::var("DREAD_AGENTS_CONFIG")
+                  .unwrap_or_else(|_| "config/agents.toml".to_string());
+              let configured = match load_agents(&config_path) {
+                  Ok(items) => items,
+                  Err(_) if !FsPath::new(&config_path).exists() => Vec::new(),
+                  Err(error) => return Err(ApiError::bad_request(error)),
+              };
+              let results = discover_agents(configured).await;
+              serde_json::to_value(results).map(Json).map_err(|error| {
+                  ApiError::internal(format!("Could not serialize agent discovery results: {error}"))
+              })
+          }
+
+          '''
+              source = source[:position] + handler + source[position:]
           marker = "fn app(state: AppState) -> Router {"
           start = source.index(marker)
           route = '        .route("/api/services", get(services))'
