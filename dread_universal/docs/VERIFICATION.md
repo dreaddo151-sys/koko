@@ -46,13 +46,14 @@ The historical run #77 workflow applied candidate patches to the exact uploaded 
 - Approval identity is derived from server-side `DREAD_OPERATOR_ID`; request-supplied approver names are not trusted.
 - Authentication is single-operator bearer-token authentication. Role-based authorization, token rotation and remote-access policy are not implemented; API binding remains loopback-only.
 - Capability imports/records remain disabled by default; no imported code or hooks execute.
+- Pstack importer dry-run needs no API token. Live `--apply` requires `DREAD_API_TOKEN` and sends `Authorization: Bearer` on every lookup/create request.
 - WebSocket task events are emitted only after the corresponding SQLite transaction commits.
 - WebSocket replay uses `after_sequence`, bounded 1,000-event pages, and SQLite recovery after broadcast-channel lag.
 - A unit test verifies committed task events reach broadcast subscribers; a full network/browser WebSocket handshake and reconnect integration test remains outstanding.
 
 ## Pstack importer (CI verified; live API apply pending)
 
-Run #77 passed all nine standard-library importer unit tests, fetched the exact catalog-pinned upstream commit/tree and completed the 58-skill/2-agent dry-run. The pinned catalog is Pstack `0.15.43`, commit `2f87c854fe3e2fcda44ca86b46ede35aad3c46b7`, subtree `71d8e1d1d718e2149dc43b2535618064f29cba6b`, MIT. The active importer reads `integrations/pstack/upstream/` at `0.15.43`; the separate `integrations/pstack-upstream/` snapshot remains `0.15.42` and is retained as historical/reference content. The live Rust API `--apply` operation, persisted registration and post-import reconciliation remain unverified.
+Run #77 passed all nine standard-library importer unit tests, fetched the exact catalog-pinned upstream commit/tree and completed the 58-skill/2-agent dry-run. The pinned catalog is Pstack `0.15.43`, commit `2f87c854fe3e2fcda44ca86b46ede35aad3c46b7`, subtree `71d8e1d1d718e2149dc43b2535618064f29cba6b`, MIT. The active importer reads `integrations/pstack/upstream/` at `0.15.43`; the separate `integrations/pstack-upstream/` snapshot remains `0.15.42` and is retained as historical/reference content. The live Rust API `--apply` operation, persisted registration and post-import reconciliation remain unverified. The importer now requires `DREAD_API_TOKEN` for `--apply`; dry-run remains offline and token-free.
 
 ## Bounded execution kernel (CI verified; integration pending)
 

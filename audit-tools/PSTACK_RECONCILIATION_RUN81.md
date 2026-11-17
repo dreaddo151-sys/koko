@@ -37,7 +37,7 @@ The old sibling snapshot is potentially confusing. Keep it unchanged until a sep
 
 ## Remaining Pstack gates
 
-1. Run the live API `--apply` only against the intended loopback Rust API after confirming it is the correct instance and the capability registry is empty or safely reconciled.
+1. Run the live API `--apply` only against the intended loopback Rust API with `DREAD_API_TOKEN` configured after confirming it is the correct instance and the capability registry is empty or safely reconciled.
 2. Verify persisted records by reading them back and confirming every imported record is disabled with matching source revision.
 3. Keep compatibility review and adapter implementation separate from ingestion. No capability is activated by this import.
 4. Add an automated CI assertion that the catalog, active import manifest, provenance marker, inventory, and per-file hashes agree, and that the retained legacy snapshot is never used as the import source.
