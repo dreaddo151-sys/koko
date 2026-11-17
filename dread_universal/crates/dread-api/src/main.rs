@@ -898,15 +898,22 @@ async fn run_task(
                     .into(),
         });
     }
-    if task.task_type != "service_discovery" {
-        return Err(ApiError {
-            status: StatusCode::CONFLICT,
-            message: format!(
-                "No reviewed built-in runner is registered for task type '{}'",
-                task.task_type
-            ),
-        });
-    }
+    let runner_name = match task.task_type.as_str() {
+        "service_discovery" => "builtin.service_discovery",
+        "gpu_chat" => {
+            validate_gpu_chat_payload(&task.payload).map_err(ApiError::bad_request)?;
+            "builtin.gpu_chat"
+        }
+        _ => {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                message: format!(
+                    "No reviewed built-in runner is registered for task type '{}'",
+                    task.task_type
+                ),
+            });
+        }
+    };
 
     let changed = tx
         .execute(
@@ -924,7 +931,7 @@ async fn run_task(
         &tx,
         &id,
         "task_queued",
-        &json!({"status": "queued", "runner": "builtin.service_discovery"}),
+        &json!({"status": "queued", "runner": runner_name}),
         "operator",
         now,
     )?;
@@ -946,10 +953,12 @@ async fn run_task(
         .map_err(|_| ApiError::internal("Task cancellation registry is unavailable"))?
         .insert(id.clone(), cancel_sender);
     let runner_type = task.task_type.clone();
+    let runner_payload = task.payload.clone();
     tokio::spawn(execute_approved_task(
         state.clone(),
         id,
         runner_type,
+        runner_payload,
         cancel_receiver,
     ));
 
@@ -959,10 +968,72 @@ async fn run_task(
     ))
 }
 
+fn validate_gpu_chat_payload(payload: &Value) -> Result<(), String> {
+    let object = payload.as_object().ok_or_else(|| "gpu_chat payload must be a JSON object".to_string())?;
+    if object.keys().any(|key| !matches!(key.as_str(), "model" | "messages" | "temperature" | "max_tokens")) {
+        return Err("gpu_chat payload contains unsupported fields".to_string());
+    }
+    let model = object.get("model").and_then(Value::as_str).map(str::trim)
+        .filter(|model| !model.is_empty() && model.len() <= 200)
+        .ok_or_else(|| "gpu_chat requires a non-empty model id (max 200 characters)".to_string())?;
+    let _ = model;
+    let messages = object.get("messages").and_then(Value::as_array)
+        .filter(|messages| !messages.is_empty() && messages.len() <= 128)
+        .ok_or_else(|| "gpu_chat requires 1 to 128 messages".to_string())?;
+    let mut total_content_bytes = 0usize;
+    for message in messages {
+        let message = message.as_object().ok_or_else(|| "each gpu_chat message must be an object".to_string())?;
+        if message.keys().any(|key| !matches!(key.as_str(), "role" | "content")) {
+            return Err("gpu_chat messages support only role and content".to_string());
+        }
+        let role = message.get("role").and_then(Value::as_str)
+            .ok_or_else(|| "each gpu_chat message requires a role".to_string())?;
+        if !matches!(role, "system" | "user" | "assistant") {
+            return Err("gpu_chat message role must be system, user or assistant".to_string());
+        }
+        let content = message.get("content").and_then(Value::as_str)
+            .ok_or_else(|| "gpu_chat message content must be text".to_string())?;
+        if content.len() > 65_536 { return Err("gpu_chat message content exceeds 65536 bytes".to_string()); }
+        total_content_bytes = total_content_bytes.saturating_add(content.len());
+    }
+    if total_content_bytes > 1_048_576 { return Err("gpu_chat total message content exceeds 1 MiB".to_string()); }
+    if let Some(temperature) = object.get("temperature") {
+        temperature.as_f64().filter(|value| value.is_finite() && (0.0..=2.0).contains(value))
+            .ok_or_else(|| "gpu_chat temperature must be between 0 and 2".to_string())?;
+    }
+    if let Some(max_tokens) = object.get("max_tokens") {
+        max_tokens.as_u64().filter(|value| (1..=32_768).contains(value))
+            .ok_or_else(|| "gpu_chat max_tokens must be between 1 and 32768".to_string())?;
+    }
+    Ok(())
+}
+
+async fn execute_gpu_chat(gpu: &GpuGatewayClient, payload: &Value) -> Result<Value, String> {
+    validate_gpu_chat_payload(payload)?;
+    let model = payload["model"].as_str().unwrap_or_default();
+    let available = gpu.models().await.map_err(|error| format!("GPU model discovery failed: {error}"))?;
+    if !available.data.iter().any(|item| item.id == model) {
+        return Err(format!("Requested model '{model}' is not exposed by the local GPU gateway"));
+    }
+    let mut request = json!({"model": model, "messages": payload["messages"], "stream": false});
+    if let Some(temperature) = payload.get("temperature") { request["temperature"] = temperature.clone(); }
+    if let Some(max_tokens) = payload.get("max_tokens") { request["max_tokens"] = max_tokens.clone(); }
+    let response = gpu.post_v1("/v1/chat/completions", &request).await
+        .map_err(|error| format!("GPU inference request failed: {error}"))?;
+    let status = response.status();
+    let body = response.bytes().await.map_err(|error| format!("Could not read GPU inference response: {error}"))?;
+    if body.len() > 1_048_576 { return Err("GPU inference response exceeds the 1 MiB task-result limit".to_string()); }
+    if !status.is_success() {
+        return Err(format!("GPU gateway returned HTTP {}: {}", status.as_u16(), String::from_utf8_lossy(&body)));
+    }
+    serde_json::from_slice(&body).map_err(|error| format!("GPU gateway returned invalid JSON: {error}"))
+}
+
 async fn execute_approved_task(
     state: AppState,
     task_id: String,
     task_type: String,
+    payload: Value,
     cancellation: watch::Receiver<bool>,
 ) {
     let started_at = now_epoch();
@@ -986,7 +1057,7 @@ async fn execute_approved_task(
             &tx,
             &task_id,
             "task_started",
-            &json!({"runner": "builtin.service_discovery"}),
+            &json!({"runner": if task_type == "gpu_chat" { "builtin.gpu_chat" } else { "builtin.service_discovery" }}),
             "executor",
             started_at,
         ) else {
@@ -1000,10 +1071,14 @@ async fn execute_approved_task(
     let _ = state.events.send(started_event);
 
     let runner_type = task_type.clone();
+    let runner_payload = payload.clone();
+    let runner_gpu = state.gpu.clone();
     let execution = state
         .execution
         .run(task_id.clone(), cancellation, move |_, cancellation| {
             let runner_type = runner_type.clone();
+            let runner_payload = runner_payload.clone();
+            let runner_gpu = runner_gpu.clone();
             async move {
                 if *cancellation.borrow() {
                     return Err("Task cancelled before runner start".to_string());
@@ -1013,6 +1088,7 @@ async fn execute_approved_task(
                         let Json(result) = services().await.map_err(|error| error.message)?;
                         Ok(result)
                     }
+                    "gpu_chat" => execute_gpu_chat(&runner_gpu, &runner_payload).await,
                     _ => Err(format!("No reviewed runner for task type '{runner_type}'")),
                 }
             }
@@ -1225,6 +1301,7 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
             state.clone(),
             task_id.clone(),
             task_type.clone(),
+            json!({}),
             cancel_receiver,
         ));
     }
@@ -1585,17 +1662,14 @@ mod tests {
         }))
     }
 
-    async fn mock_completion(Json(_payload): Json<Value>) -> Response {
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "text/event-stream")
-            .header("cache-control", "no-cache")
-            .header("x-accel-buffering", "no")
-            .body(Body::from(
-                "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n\
-                 data: [DONE]\n\n",
-            ))
-            .unwrap()
+    async fn mock_completion(Json(payload): Json<Value>) -> Response {
+        if payload.get("stream") == Some(&Value::Bool(false)) {
+            return Response::builder().status(StatusCode::OK).header("content-type", "application/json")
+                .body(Body::from(json!({"id":"chatcmpl-test","choices":[{"message":{"role":"assistant","content":"hello"}}]}).to_string())).unwrap();
+        }
+        Response::builder().status(StatusCode::OK).header("content-type", "text/event-stream")
+            .header("cache-control", "no-cache").header("x-accel-buffering", "no")
+            .body(Body::from("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")).unwrap()
     }
 
     async fn test_app_with_events() -> (
@@ -2273,6 +2347,53 @@ mod tests {
                 .any(|event| event["event_type"] == "task_succeeded")
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn approved_gpu_chat_task_uses_only_gateway_allowlisted_model_and_persists_result() {
+        let (router, gpu_server) = test_app_with_auth().await;
+        let created = router.clone().oneshot(Request::builder()
+            .method("POST").uri("/api/tasks").header(AUTHORIZATION, "Bearer test-token")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"title":"Local GPU chat","task_type":"gpu_chat","payload":{
+                "model":"qwen3.8:27b","messages":[{"role":"user","content":"Say hello"}],"max_tokens":32
+            }}).to_string())).unwrap()).await.unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created: Value = serde_json::from_slice(&to_bytes(created.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let task_id = created["item"]["id"].as_str().unwrap();
+
+        let approved = router.clone().oneshot(Request::builder().method("POST")
+            .uri(format!("/api/tasks/{task_id}/approve")).header(AUTHORIZATION, "Bearer test-token")
+            .header("content-type", "application/json").body(Body::from(json!({"reason":"test"}).to_string())).unwrap())
+            .await.unwrap();
+        assert_eq!(approved.status(), StatusCode::OK);
+
+        let queued = router.clone().oneshot(Request::builder().method("POST")
+            .uri(format!("/api/tasks/{task_id}/run")).header(AUTHORIZATION, "Bearer test-token")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(queued.status(), StatusCode::ACCEPTED);
+
+        let mut result = Value::Null;
+        for _ in 0..40 {
+            let response = router.clone().oneshot(Request::builder()
+                .uri(format!("/api/tasks/{task_id}/result")).header(AUTHORIZATION, "Bearer test-token")
+                .body(Body::empty()).unwrap()).await.unwrap();
+            if response.status() == StatusCode::OK {
+                result = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+                if result["result"]["choices"][0]["message"]["content"] == "hello" { break; }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(result["result"]["choices"][0]["message"]["content"], "hello");
+        gpu_server.abort();
+    }
+
+    #[tokio::test]
+    async fn gpu_chat_rejects_unavailable_models_and_unsafe_payload_fields() {
+        assert!(validate_gpu_chat_payload(&json!({"model":"missing","messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function"}]})).is_err());
+        assert!(validate_gpu_chat_payload(&json!({"model":"missing","messages":[{"role":"tool","content":"hello"}]})).is_err());
+        assert!(validate_gpu_chat_payload(&json!({"model":"missing","messages":[{"role":"user","content":"hello"}],"temperature":3.0})).is_err());
+        assert!(validate_gpu_chat_payload(&json!({"model":"missing","messages":[{"role":"user","content":"hello"}]})).is_ok());
     }
 
     #[tokio::test]
