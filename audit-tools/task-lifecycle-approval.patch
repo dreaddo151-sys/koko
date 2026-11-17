@@ -262,18 +262,13 @@
  async fn gpu_health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
      let health = state.gpu.health().await.map_err(|e| ApiError {
          status: StatusCode::SERVICE_UNAVAILABLE,
-@@ -471,6 +703,11 @@
-         .route("/api/gpu/models", get(gpu_models))
-         .route("/api/gpu/{*path}", axum::routing::post(gpu_inference))
+@@ -471,1 +703,6 @@
          .route("/api/services", get(services))
 +        .route("/api/tasks", get(list_tasks).post(create_task))
 +        .route("/api/tasks/{id}", get(get_task))
 +        .route("/api/tasks/{id}/events", get(task_events))
 +        .route("/api/tasks/{id}/approve", axum::routing::post(approve_task))
 +        .route("/api/tasks/{id}/cancel", axum::routing::post(cancel_task))
-         .route(
-             "/api/capabilities",
-             get(list_capabilities).post(create_capability),
 @@ -670,6 +907,77 @@
          assert_eq!(response.status(), StatusCode::BAD_REQUEST);
          server.abort();
@@ -352,21 +347,3 @@
  
      #[tokio::test]
      async fn gpu_health_route_uses_gateway() {
---- a/docs/PROJECT_STATUS.md
-+++ b/docs/PROJECT_STATUS.md
-@@ -75,3 +75,16 @@
- 
- This candidate is pending remote cargo fmt, Clippy, workspace tests and release
- build. Do not treat it as verified until the matching CI run passes.
-+
-+## Durable task and approval foundation — candidate implementation
-+
-+The API now persists task records and append-only task events in SQLite. New tasks
-+enter pending_approval; approval requires an operator identity and reason, and
-+records an audit event. Approval does **not** execute the task. Cancellation is
-+limited to pending/approved/queued tasks and is recorded in the event history.
-+Task list/detail/event endpoints expose the durable state. There is no worker,
-+provider dispatch, WebSocket stream, or autonomous execution in this slice.
-+
-+Candidate verification must pass formatting, Clippy, workspace tests and release
-+build in the isolated GitHub Actions branch before this slice is treated as verified.
