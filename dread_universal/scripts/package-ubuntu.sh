@@ -31,10 +31,12 @@ esac
 
 API_BIN="$ROOT/target/release/dread-universal"
 WEB_ROOT="$ROOT/web/dist"
-if [[ ! -x "$API_BIN" || ! -s "$WEB_ROOT/index.html" ]]; then
+if [[ ! -f "$API_BIN" || ! -s "$WEB_ROOT/index.html" ]]; then
   printf 'Build prerequisites missing. Run cargo build --release --locked and npm run build first.\n' >&2
   exit 1
 fi
+# GitHub Actions artifact restore may not preserve executable mode; restore it explicitly.
+chmod 0755 "$API_BIN"
 
 OUT_DIR="${DREAD_RELEASE_DIR:-$ROOT/dist/release}"
 mkdir -p "$OUT_DIR"
