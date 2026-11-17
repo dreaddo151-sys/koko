@@ -106,6 +106,8 @@ The repository's reviewed Pstack snapshot is 0.15.43 at commit `2f87c854fe3e2fcd
 
 The `dread-agents` crate includes an explicit `HermesApiAdapter` for the documented Hermes Runs API: authenticated run submission, status/result retrieval, SSE event replay and cooperative stop. Construction requires a numeric loopback HTTP endpoint, an API server bearer key, and an explicit caller-supplied display name. Requests and event streams have size limits; run IDs and idempotency keys are validated. The adapter is not auto-discovered or registered in the Rust API, and it does not itself authorize a task. Do not expose the Hermes API server beyond loopback or submit work until DREAD approval, sandboxing and the provider's own tool policy are enforced by the calling integration.
 
+The read-only host profile also enumerates persistent and network-mounted filesystems using GNU `df` with bounded execution. It reports source, filesystem type, mount point, total, used and available MiB, while excluding common pseudo-filesystems (for example `tmpfs`, `proc`, `sysfs` and `overlay`). The overview console renders the discovered mounts. This is mount-level capacity discovery, not physical-disk topology, SMART health or RAID status.
+
 ## Ubuntu-only CI and release
 
 GitHub Actions targets Ubuntu 24.04 only. The release workflow creates an Ubuntu x86_64 build bundle and SHA-256 manifest. A production `.deb`, systemd-integrated installer, signed updater, atomic activation and rollback remain required before calling the package an installer or updater complete.
