@@ -4618,22 +4618,50 @@ mod tests {
             .unwrap();
         assert_eq!(duplicate.status(), StatusCode::CONFLICT);
 
-        let fetched = router
+        let first_run = router
+            .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/missions/dependency-mission")
+                    .method("POST")
+                    .uri(format!("/api/tasks/{first_id}/run"))
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        let body = to_bytes(fetched.into_body(), usize::MAX).await.unwrap();
-        let stored: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(stored["item"]["status"], "awaiting_approval");
-        assert_eq!(stored["item"]["tasks"].as_array().unwrap().len(), 2);
-        assert_eq!(stored["item"]["tasks"][0]["result"], Value::Null);
-        assert_eq!(stored["item"]["tasks"][0]["attempts"], 0);
-        assert_eq!(stored["item"]["tasks"][0]["error"], Value::Null);
+        assert_eq!(first_run.status(), StatusCode::ACCEPTED);
+
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let fetched = router
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri("/api/missions/dependency-mission")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let body = to_bytes(fetched.into_body(), usize::MAX).await.unwrap();
+                let stored: Value = serde_json::from_slice(&body).unwrap();
+                if stored["item"]["status"] == "completed" {
+                    break stored;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("approved mission DAG should auto-advance after its prerequisite completes");
+
+        assert_eq!(completed["item"]["execution_started"], true);
+        assert_eq!(completed["item"]["tasks"].as_array().unwrap().len(), 2);
+        assert_eq!(completed["item"]["tasks"][0]["status"], "completed");
+        assert_eq!(completed["item"]["tasks"][1]["status"], "completed");
+        assert_ne!(completed["item"]["tasks"][0]["result"], Value::Null);
+        assert_ne!(completed["item"]["tasks"][1]["result"], Value::Null);
+        assert!(completed["item"]["tasks"][0]["attempts"].as_u64().unwrap() > 0);
+        assert!(completed["item"]["tasks"][1]["attempts"].as_u64().unwrap() > 0);
         server.abort();
     }
 
