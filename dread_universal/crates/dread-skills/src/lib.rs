@@ -246,7 +246,8 @@ pub fn discover_agent_profiles(
             continue;
         }
 
-        let Some(stem) = entry.path().file_stem().and_then(|value| value.to_str()) else {
+        let entry_path = entry.path();
+        let Some(stem) = entry_path.file_stem().and_then(|value| value.to_str()) else {
             continue;
         };
         if !safe_id(stem) {
