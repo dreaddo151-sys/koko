@@ -4831,6 +4831,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mission_dispatches_all_approved_ready_roots_in_priority_order() {
+        let (router, server) = test_app().await;
+        let graph = json!({
+            "mission_id":"priority-roots-mission",
+            "nodes":[
+                {"id":"low","depends_on":[],"priority":1,"task_type":"service_discovery"},
+                {"id":"high","depends_on":[],"priority":9,"task_type":"service_discovery"}
+            ]
+        });
+        let created = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/missions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(graph.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let instantiated = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/missions/priority-roots-mission/instantiate")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(instantiated.status(), StatusCode::ACCEPTED);
+        let body = to_bytes(instantiated.into_body(), usize::MAX).await.unwrap();
+        let result: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(result["item"]["tasks"][0]["node_id"], "high");
+        let first_id = result["item"]["tasks"][0]["task_id"].as_str().unwrap();
+
+        for task in result["item"]["tasks"].as_array().unwrap() {
+            let task_id = task["task_id"].as_str().unwrap();
+            let approved = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/tasks/{task_id}/approve"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(json!({"reason":"approve priority mission"}).to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(approved.status(), StatusCode::OK);
+        }
+
+        let started = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/tasks/{first_id}/run"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(started.status(), StatusCode::ACCEPTED);
+
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let fetched = router
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri("/api/missions/priority-roots-mission")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let body = to_bytes(fetched.into_body(), usize::MAX).await.unwrap();
+                let stored: Value = serde_json::from_slice(&body).unwrap();
+                if stored["item"]["status"] == "completed" {
+                    break stored;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("all approved independent mission roots should be dispatched");
+        assert_eq!(completed["item"]["tasks"][0]["status"], "completed");
+        assert_eq!(completed["item"]["tasks"][1]["status"], "completed");
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn mission_instantiation_rejects_unreviewed_runner_without_partial_tasks() {
         let (router, server) = test_app().await;
         let graph = json!({
