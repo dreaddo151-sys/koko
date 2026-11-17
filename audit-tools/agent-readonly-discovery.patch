@@ -161,14 +161,9 @@
  async fn list_registry(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
      let conn = db_lock(&state)?;
      let mut stmt = conn
-@@ -805,6 +821,7 @@
-         .route("/api/tasks/{id}/cancel", axum::routing::post(cancel_task))
-         .route("/api/gpu/{*path}", axum::routing::post(gpu_inference))
+@@ -805,1 +821,2 @@
          .route("/api/services", get(services))
 +        .route("/api/agents", get(agents))
-         .route(
-             "/api/capabilities",
-             get(list_capabilities).post(create_capability),
 --- /dev/null
 +++ b/config/agents.toml
 @@ -0,0 +1,12 @@
