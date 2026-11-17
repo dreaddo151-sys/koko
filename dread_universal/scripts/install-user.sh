@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ ! -r /etc/os-release ]]; then
+  printf 'PROJECT DREAD supports Ubuntu 24.04 LTS and later only.\n' >&2
+  exit 1
+fi
+# shellcheck disable=SC1091
+. /etc/os-release
+if [[ "${ID:-}" != ubuntu ]] || ! dpkg --compare-versions "${VERSION_ID:-0}" ge 24.04; then
+  printf 'Unsupported operating system: %s %s (requires Ubuntu 24.04 or later).\n' "${PRETTY_NAME:-unknown}" "${VERSION_ID:-unknown}" >&2
+  exit 1
+fi
+
 BUNDLE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${DREAD_INSTALL_DIR:-$HOME/.local/opt/dread-universal}"
 CONFIG_DIR="$HOME/.config/dread-universal"
@@ -11,7 +22,7 @@ SERVICE="dread-universal.service"
 STAMP="$(date -u +%Y%m%dT%H%M%S%N)"
 BACKUP=""
 
-for command in systemctl openssl curl install; do
+for command in systemctl openssl curl install dpkg; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'Missing required command: %s\n' "$command" >&2
     exit 1
