@@ -2,7 +2,12 @@ import json
 import unittest
 from contextlib import contextmanager
 
-from dread_gpu_supervisor_bridge import SupervisorBridge, validate_payload, validate_bind
+from dread_gpu_supervisor_bridge import (
+    TENSOR_UPSTREAM_URL,
+    SupervisorBridge,
+    validate_bind,
+    validate_payload,
+)
 
 
 class SupervisorBridgeTests(unittest.TestCase):
@@ -12,25 +17,17 @@ class SupervisorBridgeTests(unittest.TestCase):
             "messages": [{"role": "user", "content": "hello"}],
         })
         self.assertIs(normalized["stream"], False)
-        with self.assertRaises(ValueError):
-            validate_payload({
-                "model": "local-model",
-                "messages": [{"role": "user", "content": "hello"}],
-                "tools": [{"type": "function"}],
-            })
-        with self.assertRaises(ValueError):
-            validate_payload({
-                "model": "local-model",
-                "messages": [{"role": "tool", "content": "hello"}],
-            })
-        with self.assertRaises(ValueError):
-            validate_payload({
-                "model": "local-model",
-                "messages": [{"role": "user", "content": "hello"}],
-                "stream": True,
-            })
+        for payload in (
+            {"model": "local-model", "messages": [{"role": "user", "content": "hello"}],
+             "tools": [{"type": "function"}]},
+            {"model": "local-model", "messages": [{"role": "tool", "content": "hello"}]},
+            {"model": "local-model", "messages": [{"role": "user", "content": "hello"}],
+             "stream": True},
+        ):
+            with self.assertRaises(ValueError):
+                validate_payload(payload)
 
-    def test_bridge_holds_supervisor_lease_for_the_entire_inference(self):
+    def test_bridge_holds_one_lease_and_calls_managed_upstream_directly(self):
         events = []
 
         @contextmanager
@@ -49,8 +46,8 @@ class SupervisorBridgeTests(unittest.TestCase):
                 events.append(("response-read", None))
                 return json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
 
-        def fake_open(_request, timeout):
-            events.append(("gateway", timeout))
+        def fake_open(request, timeout):
+            events.append(("upstream", request.full_url, timeout))
             return FakeResponse()
 
         bridge = SupervisorBridge(fake_lease, fake_open)
@@ -61,10 +58,15 @@ class SupervisorBridgeTests(unittest.TestCase):
         })
         self.assertEqual(status, 200)
         self.assertEqual(result["choices"][0]["message"]["content"], "ok")
-        self.assertEqual([event[0] for event in events], ["enter", "gateway", "response-read", "exit"])
-        self.assertEqual(events[0][1], "tensor")
+        self.assertEqual(events[0], ("enter", "tensor"))
+        self.assertEqual(events[1][0], "upstream")
+        self.assertEqual(events[1][1], TENSOR_UPSTREAM_URL)
+        self.assertEqual(events[2][0], "response-read")
+        self.assertEqual(events[3], ("exit", "tensor"))
+        self.assertEqual(TENSOR_UPSTREAM_URL, "http://127.0.0.1:11501/v1/chat/completions")
+        self.assertNotIn("11500", TENSOR_UPSTREAM_URL)
 
-    def test_bridge_releases_supervisor_lease_when_gateway_fails(self):
+    def test_bridge_releases_supervisor_lease_when_upstream_fails(self):
         events = []
 
         @contextmanager
@@ -76,7 +78,7 @@ class SupervisorBridgeTests(unittest.TestCase):
                 events.append("exit")
 
         def fail_open(_request, timeout):
-            raise OSError("mock gateway offline")
+            raise OSError("mock tensor upstream offline")
 
         bridge = SupervisorBridge(fake_lease, fail_open)
         status, result = bridge.execute({
@@ -84,7 +86,7 @@ class SupervisorBridgeTests(unittest.TestCase):
             "messages": [{"role": "user", "content": "hello"}],
         })
         self.assertEqual(status, 503)
-        self.assertIn("mock gateway offline", result["error"])
+        self.assertIn("mock tensor upstream offline", result["error"])
         self.assertEqual(events, ["enter", "exit"])
 
     def test_bind_is_loopback_only(self):
