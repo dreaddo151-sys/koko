@@ -9,7 +9,7 @@ Canonical-source workflow run `44068498087` (run #35) validated the tracked work
 3. Pstack importer dry-run — PASS, 58 skills and 2 agents, all disabled
 4. `cargo fmt --all -- --check` — PASS
 5. `cargo clippy --workspace --all-targets --locked -- -D warnings` — PASS
-6. `cargo test --workspace --locked` — PASS — 43 Rust tests, including GPU-chat gateway dispatch/result, unsafe-payload/model-allowlist rejection, bearer authentication, WebSocket handshake/replay/reconnect and startup-recovery tests
+6. `cargo test --workspace --locked` — PASS — 47 Rust tests, including Ollama/ComfyUI adapter metadata parsing and service-config validation, GPU-chat gateway dispatch/result, unsafe-payload/model-allowlist rejection, bearer authentication, WebSocket handshake/replay/reconnect and startup-recovery tests
 7. `cargo build --workspace --release --locked` — PASS
 8. React/TypeScript operator console: `npm install --no-audit --no-fund --package-lock=false` and `npm run build` — PASS (Vite production bundle).
 9. Authenticated API integration — PASS: unauthenticated capability request returned 401; 58 skills + 2 agents imported; 60 records read back with `disabled` status; second import created 0 and found 60 already present.

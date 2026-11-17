@@ -40,6 +40,8 @@ cargo run -p dread-api
 
 Never commit the token to Git. Every `/api/*` route requires `Authorization: Bearer $DREAD_API_TOKEN`. If the token is missing, API routes fail closed with HTTP 503; an invalid or missing request token returns HTTP 401. `/health` remains unauthenticated for basic liveness checks. The API still rejects non-loopback bind addresses; bearer authentication does not authorize LAN/public exposure. JSON request bodies are limited to 32 MiB.
 
+`config/services.toml` currently configures loopback-only probes for the Python DREAD Hub, ComfyUI and Ollama. The `image-video-runtime` adapter parses ComfyUI `/system_stats` into a version/device summary; `local-inference` parses Ollama `/api/tags` into a model summary. These two adapters read at most 128 KiB and mark malformed metadata as `DEGRADED`. Other roles receive generic HTTP reachability checks. Service definitions are capped at 32 unique IDs; discovery follows no redirects, uses GET only and never scans ports or launches processes. This is read-only inventory, not a GPU Supervisor or provider execution adapter.
+
 ## HTTP API
 
 | Method | Path | Purpose |
@@ -82,6 +84,10 @@ Agent health states distinguish 2xx ONLINE, 3xx REDIRECTED, 4xx REACHABLE, 5xx D
 ### Task approval and event-stream boundary
 
 Creating a task creates a durable `pending_approval` record. Approval accepts a reason and records the server-configured `DREAD_OPERATOR_ID`; caller-supplied approver names are ignored. Approval alone does not start execution. The explicit `POST /api/tasks/{id}/run` endpoint currently accepts only approved tasks with no capability ID and task type `service_discovery` or `gpu_chat`. Service discovery performs configured loopback-only HTTP health probes. `gpu_chat` accepts bounded text-only messages, checks the requested model against the local gateway's advertised model list, forces non-streaming inference through `127.0.0.1:11500`, and stores a bounded JSON response. Both runners use the bounded execution gate (2 concurrent, 8 admitted by default, one attempt, 120-second timeout) and persist results for `GET /api/tasks/{id}/result`. Running tasks can be cancelled through the cancellation watch channel. The GPU runner never acquires GPU leases or contacts upstream model servers directly. No shell commands, Pstack skills, plugins, imported agents or arbitrary capabilities are executed. Unsupported task types are rejected. The API uses a configured Bearer token and records the server-configured operator identity; it remains loopback-only. Startup recovery resumes only queued, approved, capability-free `service_discovery` tasks. GPU inference is not automatically replayed after a restart; queued `gpu_chat` tasks are failed closed to avoid duplicate compute. Tasks found in `running` state after a crash are marked failed with an interruption result and are never replayed. The WebSocket stream emits committed task events, replays persisted history using `after_sequence`, bounds replay pages and recovers missed notifications from SQLite when a subscriber falls behind. An authenticated network-level WebSocket test verifies the 101 handshake, replay after a sequence cursor, live committed-event delivery and reconnect replay. CI run `44025427057` passed the WebSocket test.
+
+## Service adapters
+
+The service inventory is explicitly defined in `config/services.toml`; every URL must be explicit-port loopback HTTP. The current dedicated response parsers cover Ollama model tags and ComfyUI system/device metadata. The DREAD Python Hub remains a generic control-plane reachability probe. Hermes, OpenHands, OpenCode and llama.cpp do not yet have verified dedicated contracts. The parsers return short summaries rather than raw response bodies and fail closed when their expected JSON shape is absent.
 
 ## Pstack catalog import
 
