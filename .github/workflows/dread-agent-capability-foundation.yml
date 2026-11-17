@@ -63,6 +63,17 @@ jobs:
           patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/task-lifecycle-approval.patch"
           grep -q 'api/tasks' crates/dread-api/src/main.rs
           grep -q 'task_events' crates/dread-api/src/main.rs
+          cat >> "$WORKSPACE/docs/PROJECT_STATUS.md" <<'EOF'
+
+## Durable task and approval foundation — candidate implementation
+
+The API persists task records and append-only task events in SQLite. New tasks
+enter pending_approval; approval requires an operator identity and reason, and
+records an audit event. Approval does not execute the task. Cancellation is
+limited to pending/approved/queued tasks and is recorded in the event history.
+Task list/detail/event endpoints expose durable state. There is no worker,
+provider dispatch, WebSocket stream, or autonomous execution in this slice.
+EOF
 
       - name: Install stable Rust, rustfmt and Clippy
         run: |
