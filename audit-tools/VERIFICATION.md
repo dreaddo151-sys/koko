@@ -28,6 +28,10 @@ The workflow applies the candidate patches to the exact uploaded baseline archiv
 - WebSocket replay uses `after_sequence`, bounded 1,000-event pages, and SQLite recovery after broadcast-channel lag.
 - A unit test verifies committed task events reach broadcast subscribers; a full network/browser WebSocket handshake and reconnect integration test remains outstanding.
 
+## Pstack importer candidate (CI pending)
+
+The new Python metadata importer has nine standard-library unit tests covering pinned marker requirements, commit/version mismatches, per-file hash tampering, path traversal, loopback-only API URLs, disabled-existing-record enforcement and redirect refusal. The test suite is wired into CI. The pinned upstream fetch and live API `--apply` have not been run; the bundled `0.15.42` snapshot must not be represented as the catalog's pinned `0.15.43`.
+
 ## Not yet verified
 
 - Live API smoke test and integration against the operator's actual local services.
