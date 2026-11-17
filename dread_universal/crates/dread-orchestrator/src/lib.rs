@@ -195,12 +195,155 @@ impl ExecutionGate {
     }
 }
 
+
+/// A dependency-aware mission plan. This model validates and orders work only;
+/// execution and external side effects remain the responsibility of reviewed runners.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MissionNode {
+    pub id: String,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    /// Higher values are scheduled first when multiple nodes are ready.
+    #[serde(default)]
+    pub priority: u8,
+    pub task_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MissionGraph {
+    pub mission_id: String,
+    pub nodes: Vec<MissionNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MissionGraphError {
+    EmptyMissionId,
+    EmptyNodeId,
+    DuplicateNodeId(String),
+    EmptyTaskType(String),
+    MissingDependency { node: String, dependency: String },
+    SelfDependency(String),
+    DependencyCycle(Vec<String>),
+}
+
+impl MissionGraph {
+    /// Validate dependencies and return a deterministic priority-aware execution order.
+    pub fn execution_order(&self) -> Result<Vec<String>, MissionGraphError> {
+        use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+        use std::cmp::Reverse;
+
+        if self.mission_id.trim().is_empty() {
+            return Err(MissionGraphError::EmptyMissionId);
+        }
+
+        let mut nodes = BTreeMap::new();
+        for node in &self.nodes {
+            if node.id.trim().is_empty() {
+                return Err(MissionGraphError::EmptyNodeId);
+            }
+            if node.task_type.trim().is_empty() {
+                return Err(MissionGraphError::EmptyTaskType(node.id.clone()));
+            }
+            if nodes.insert(node.id.as_str(), node).is_some() {
+                return Err(MissionGraphError::DuplicateNodeId(node.id.clone()));
+            }
+        }
+
+        let mut indegree = BTreeMap::<&str, usize>::new();
+        let mut dependents = BTreeMap::<&str, Vec<&str>>::new();
+        for node in &self.nodes {
+            let mut unique = BTreeSet::new();
+            for dependency in &node.depends_on {
+                if dependency == &node.id {
+                    return Err(MissionGraphError::SelfDependency(node.id.clone()));
+                }
+                if !nodes.contains_key(dependency.as_str()) {
+                    return Err(MissionGraphError::MissingDependency {
+                        node: node.id.clone(),
+                        dependency: dependency.clone(),
+                    });
+                }
+                if unique.insert(dependency.as_str()) {
+                    *indegree.entry(node.id.as_str()).or_default() += 1;
+                    dependents.entry(dependency.as_str()).or_default().push(node.id.as_str());
+                }
+            }
+            indegree.entry(node.id.as_str()).or_default();
+        }
+
+        // Reverse ordering makes BinaryHeap pop highest priority, then lexical ID.
+        let mut ready = BinaryHeap::new();
+        for node in &self.nodes {
+            if indegree[node.id.as_str()] == 0 {
+                ready.push((node.priority, Reverse(node.id.as_str())));
+            }
+        }
+
+        let mut ordered = Vec::with_capacity(self.nodes.len());
+        while let Some((_priority, Reverse(id))) = ready.pop() {
+            ordered.push(id.to_string());
+            if let Some(children) = dependents.get(id) {
+                for child in children {
+                    let remaining = indegree.get_mut(child).expect("known dependent");
+                    *remaining -= 1;
+                    if *remaining == 0 {
+                        let node = nodes[child];
+                        ready.push((node.priority, Reverse(node.id.as_str())));
+                    }
+                }
+            }
+        }
+
+        if ordered.len() != self.nodes.len() {
+            let mut cycle_nodes = indegree
+                .into_iter()
+                .filter_map(|(id, degree)| (degree > 0).then(|| id.to_string()))
+                .collect::<Vec<_>>();
+            cycle_nodes.sort();
+            return Err(MissionGraphError::DependencyCycle(cycle_nodes));
+        }
+        Ok(ordered)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::{Notify, oneshot};
+
+
+    #[test]
+    fn mission_graph_orders_dependencies_before_priority() {
+        let graph = MissionGraph {
+            mission_id: "mission-1".into(),
+            nodes: vec![
+                MissionNode { id: "report".into(), depends_on: vec!["build".into()], priority: 250, task_type: "report".into() },
+                MissionNode { id: "audit".into(), depends_on: vec![], priority: 20, task_type: "audit".into() },
+                MissionNode { id: "build".into(), depends_on: vec![], priority: 1, task_type: "build".into() },
+            ],
+        };
+        assert_eq!(graph.execution_order().unwrap(), vec!["audit", "build", "report"]);
+    }
+
+    #[test]
+    fn mission_graph_rejects_missing_dependencies_and_cycles() {
+        let missing = MissionGraph {
+            mission_id: "m".into(),
+            nodes: vec![MissionNode { id: "a".into(), depends_on: vec!["absent".into()], priority: 0, task_type: "x".into() }],
+        };
+        assert_eq!(missing.execution_order(), Err(MissionGraphError::MissingDependency { node: "a".into(), dependency: "absent".into() }));
+
+        let cycle = MissionGraph {
+            mission_id: "m".into(),
+            nodes: vec![
+                MissionNode { id: "a".into(), depends_on: vec!["b".into()], priority: 0, task_type: "x".into() },
+                MissionNode { id: "b".into(), depends_on: vec!["a".into()], priority: 0, task_type: "x".into() },
+            ],
+        };
+        assert_eq!(cycle.execution_order(), Err(MissionGraphError::DependencyCycle(vec!["a".into(), "b".into()])));
+    }
 
     fn config(max_concurrency: usize, max_admitted: usize) -> ExecutionConfig {
         ExecutionConfig {
