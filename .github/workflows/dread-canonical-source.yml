@@ -7,6 +7,9 @@ on:
       - integration/dread-canonical-source-run81
     paths:
       - .github/workflows/dread-canonical-source.yml
+      - dread_universal/**
+      - legacy-reference/**
+      - SOURCE_PROVENANCE_RUN81.md
   workflow_dispatch:
 
 permissions:
