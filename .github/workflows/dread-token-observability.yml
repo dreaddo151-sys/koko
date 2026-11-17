@@ -1,0 +1,89 @@
+name: DREAD llama.cpp token and prompt validation
+
+on:
+  push:
+    branches:
+      - work/dread-token-observability-llamacpp-2026-11-17
+    paths:
+      - .github/workflows/dread-token-observability.yml
+      - dread_universal/Cargo.toml
+      - dread_universal/Cargo.lock
+      - dread_universal/crates/**
+      - dread_universal/config/**
+      - dread_universal/scripts/**
+      - dread_universal/web/**
+      - dread_universal/docs/**
+  pull_request:
+    branches:
+      - integration/dread-canonical-source-run81
+    paths:
+      - .github/workflows/dread-token-observability.yml
+      - dread_universal/Cargo.toml
+      - dread_universal/Cargo.lock
+      - dread_universal/crates/**
+      - dread_universal/config/**
+      - dread_universal/scripts/**
+      - dread_universal/web/**
+      - dread_universal/docs/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dread-token-observability-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Install stable Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Rust formatting
+        working-directory: dread_universal
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        working-directory: dread_universal
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Rust workspace tests
+        working-directory: dread_universal
+        run: cargo test --workspace --locked
+
+      - name: Rust release build
+        working-directory: dread_universal
+        run: cargo build --workspace --release --locked
+
+      - name: Install Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dread_universal/web/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: dread_universal/web
+        run: npm ci --no-audit --no-fund
+
+      - name: Build operator console
+        working-directory: dread_universal/web
+        run: npm run build
+
+      - name: Test Python Supervisor bridge
+        working-directory: dread_universal
+        run: python3 -m unittest discover -s scripts -p 'test_gpu_supervisor_bridge.py' -v
+
+      - name: Verify single-owner GPU boundary
+        working-directory: dread_universal
+        run: python3 scripts/check_gpu_ownership_boundary.py
