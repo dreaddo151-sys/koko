@@ -426,3 +426,16 @@ GitHub Actions PR run #472 (`44195876703`) passed all three jobs:
 - **Release:** signed updater/SBOM/license inventory and physical Ubuntu install/upgrade/reboot/preservation/rollback acceptance.
 
 CI run #472 is repository and disposable-runner evidence only. It does not certify a live workstation deployment. Keep PR #12 open and unmerged; preserve the existing Python Hub, ComfyUI and Python GPU Supervisor until a controlled workstation acceptance session is available.
+
+
+## Mission scheduler acceptance refresh — 2026-11-18, PR run #509
+
+**Validated code candidate:** `8c19a5b904fc32c0e811c55ed0d96bb5cd15cc1a`.
+
+Phase 3 now has a tested approval-gated DAG auto-advance path: after an operator starts an approved root task, successful completion dispatches all newly ready nodes that already have explicit approval. A dependent node approved after its prerequisites complete is also dispatched. Pending-approval nodes remain held; task failure/cancellation blocks further dispatch. Dispatch uses the existing task queue and shared execution gate, and conditional state transitions protect against duplicate scheduler races. Mission GET returns per-node result/error/attempt/timing metadata.
+
+**Still open in phase 3:** priority/resource-aware scheduling, explicit retry/backoff policy, timeout/cancel propagation to all child tasks, mission-level aggregation policy, and recovery/reconciliation of interrupted DAGs.
+
+GitHub Actions PR run #509 (`44197296018`) passed all three jobs on this code candidate: Rust formatting, strict Clippy, workspace tests including both mission auto-advance/late-approval integration cases, optimized release build, installer syntax, portable migration/rollback, Python bridge/importer regressions, GPU single-owner guard, React production build, package checksums/content, disposable Ubuntu 24.04 package installation, API/UI/authentication/host-profile smoke tests.
+
+This remains CI evidence, not physical workstation acceptance. Existing legacy Hub/ComfyUI/Supervisor preservation boundaries remain unchanged. Release remains blocked on the outstanding phases and live Ubuntu acceptance.
