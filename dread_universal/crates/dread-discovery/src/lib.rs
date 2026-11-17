@@ -225,7 +225,8 @@ pub async fn discover_agents(agents: Vec<AgentEndpoint>) -> Vec<AgentProbeResult
 
 pub fn classify_http_status(code: u16) -> &'static str {
     match code {
-        200..=399 => "ONLINE",
+        200..=299 => "ONLINE",
+        300..=399 => "REDIRECTED",
         400..=499 => "REACHABLE",
         500..=599 => "DEGRADED",
         _ => "UNKNOWN",
@@ -254,7 +255,8 @@ fn agent_status_detail(code: u16) -> &'static str {
 
 fn status_detail(code: u16) -> &'static str {
     match code {
-        200..=399 => "HTTP endpoint responded successfully",
+        200..=299 => "HTTP endpoint responded successfully",
+        300..=399 => "Endpoint redirected; redirects are not followed",
         400..=499 => "Host is reachable, but this path or request is not accepted",
         500..=599 => "Host is reachable, but the service returned a server error",
         _ => "HTTP response received; health classification is unknown",
@@ -496,9 +498,12 @@ mod tests {
     }
 
     #[test]
-    fn successful_responses_are_online() {
+    fn only_successful_responses_are_online() {
         assert_eq!(classify_http_status(200), "ONLINE");
-        assert_eq!(classify_http_status(302), "ONLINE");
+        assert_eq!(classify_http_status(204), "ONLINE");
+        assert_eq!(classify_http_status(301), "REDIRECTED");
+        assert_eq!(classify_http_status(302), "REDIRECTED");
+        assert_eq!(classify_http_status(399), "REDIRECTED");
     }
 
     #[test]
