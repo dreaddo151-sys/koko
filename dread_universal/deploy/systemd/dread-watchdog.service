@@ -1,0 +1,11 @@
+[Unit]
+Description=PROJECT DREAD bounded API watchdog
+After=default.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/dread_rust_redesign/dread_universal/scripts/dread_watchdog.py --apply
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
