@@ -120,7 +120,7 @@ After building the API and console:
 ```bash
 cargo build --release --locked --bin dread-universal
 cd web
-npm install --ignore-scripts --no-audit --no-fund
+npm ci --ignore-scripts --no-audit --no-fund
 npm run build
 cd ..
 bash scripts/package-ubuntu.sh
