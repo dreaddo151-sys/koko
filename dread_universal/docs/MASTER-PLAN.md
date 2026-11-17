@@ -263,3 +263,40 @@ Retest each before declaring fixed.
 - Report: verified complete, implemented/unverified, blocked, next concrete action.
 
 **Controlling outcome:** one complete, installable, maintainable PROJECT DREAD Master Hub for Ubuntu 24.04+, with real discovery, agent/model orchestration, GPU-safe inference, media workflows, secure self-repair and transactional upgrades.
+
+## Current audit addendum — 2026-11-17 (PR #12)
+
+This dated addendum supersedes stale candidate counts and run numbers elsewhere in this document. It does not change the product scope or mark any phase complete.
+
+- Repository: dreaddo151-sys/koko; PR #12 remains open, unmerged and mergeable.
+- Candidate branch: feature/universal-capability-discovery-clean-2026-11-17.
+- Candidate HEAD after CI workflow correction: 2418155aaf268b136158c7dd8008aff79efe3aac.
+- PR base: work/futuristic-command-center-2026-11-17 at b474b0f200c9c800898e67dd0957c2ac927d4aa1.
+- PR scope at audit: 52 changed files. Historical backup/original files are included in the PR change list; do not delete them until their content and provenance are inspected. Attempts to retrieve several reported backup paths at the current branch returned 404, so no deletion was attempted.
+- GitHub Actions run #306 (44160690656) is the run for this HEAD. Web build and npm lockfile checks passed; Rust formatting, strict Clippy and Rust tests passed. Optimized release build was still running at the latest observation; installer, Python regression, GPU ownership and package smoke-test jobs had not yet completed. Recheck the run before relying on any later result.
+- Two workflow invocation defects were corrected on this branch: package assembly now runs via bash scripts/package-ubuntu.sh in CI and release workflows, avoiding dependence on the executable bit. The CI package job also validates installer syntax before assembly. These changes are in the candidate HEAD above.
+- Source review confirms dread-agents currently defines a provider-neutral AgentAdapter contract only; no concrete Hermes/OpenHands/DeerFlow task adapter is implemented by that contract. Pstack agent Markdown files remain untrusted prompt profiles, not executing agents.
+- The current task kernel executes only reviewed service-discovery and GPU-chat runners. No mission DAG/dependency planner, priority scheduler, multi-agent delegation or provider cancellation is accepted.
+- The capability model and Pstack import path keep imported records disabled by default and use SHA-256 fingerprints for skill content. A complete transactional extension install/update/remove manager, signature verification, atomic activation and rollback are still not accepted.
+- Host discovery now includes Linux OS/kernel, CPU thread count, RAM, root filesystem capacity and NVIDIA telemetry fields (VRAM, driver, PCIe link, utilization, temperature and power where the utility reports them). It does not yet prove complete physical-disk/workspace inventory, CPU model/topology, CUDA toolkit/runtime compatibility, model-file/projector inventory or all configured local-service states.
+- Ubuntu package workflow source now includes .deb and tarball assembly, checksum manifest and disposable package smoke testing. A signed updater, .deb failed-upgrade rollback, clean-install/reboot/upgrade tests and actual workstation install remain unaccepted.
+- No live workstation action was performed during this audit. ComfyUI, Python Hub, GPU Supervisor, llama.cpp and user data were not modified by these GitHub-only changes.
+
+### Updated phase ledger (acceptance, not code-presence)
+
+| Phase | Current status | Outstanding acceptance |
+|---|---|---|
+| 0 Preservation | Historical facts documented; current baseline not captured | Capture fresh machine-readable baseline and verify live services/data on workstation |
+| 1 Rust/Hub continuity | Rust API and console build; not one Master Hub | Integrate with legacy Python Hub, route parity, regression and rollback |
+| 2 Discovery | Partial read-only host and configured service discovery | Complete CPU/storage/CUDA/model/tool/MCP inventory and persist provenance/health states |
+| 3 Missions | Bounded task runner and durable task records | Mission planner, DAG, priorities, resource-aware scheduling, delegation and aggregation |
+| 4 Agents | Interface contract and health/profile discovery only | Concrete Hermes/OpenHands/DeerFlow adapters with start/status/events/cancel/result/recovery tests |
+| 5 Extensions | Pstack pinned importer, preview and disabled-by-default records | Transactional update/remove, signed provenance, atomic activation, rollback, compatibility and reviewed tool/MCP runtime |
+| 6 GPU | Supervisor bridge design and mocked CI coverage | Live bridge credentials/source, llama.cpp inference, concurrent chat/ComfyUI/video lease test on both GPUs |
+| 7 Media | Existing ComfyUI/H3 assets documented historically | Image artifact, playable MP4, FlashVSR output, progress/cancel/download and concurrency acceptance |
+| 8 Security/repair | Bearer auth, bounded inputs, approval audit and fail-closed imports in part | Complete PASS/DENY/ASK; repair simulation/approval/apply/postconditions/rollback; secret and sandbox audit |
+| 9 Unified UI | React console production build | Live browser API/WebSocket, Python Hub integration, sessions/checkpoints/history/tool activity and media acceptance |
+| 10 Installer/updater | CI package assembly and portable migration rollback tests in progress | Complete run #306; signed updater, .deb rollback, install/upgrade/reboot/uninstall preservation on Ubuntu |
+| 11 Release | Not accepted | All gates above plus dual-3090 workstation report, SBOM/license inventory and verified release artifacts |
+
+Release remains blocked. Do not merge or install merely because the current CI run becomes green; workstation and end-to-end acceptance remain mandatory.
