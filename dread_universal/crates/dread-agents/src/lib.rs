@@ -4,6 +4,8 @@
 //! no discovery or execution. Concrete adapters must be reviewed and registered
 //! separately; imported capabilities start disabled.
 
+pub mod hermes;
+
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
