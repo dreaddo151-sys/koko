@@ -43,3 +43,38 @@ impl Store {
  pub fn list_jobs(&self)->Result<Vec<Job>,String>{let c=self.0.lock().map_err(|e|e.to_string())?;let mut s=c.prepare("SELECT id,kind,status,payload,created_at,updated_at FROM jobs ORDER BY id DESC LIMIT 100").map_err(|e|e.to_string())?;let rows=s.query_map([],|r|Ok(Job{id:r.get(0)?,kind:r.get(1)?,status:r.get(2)?,payload:r.get(3)?,created_at:r.get(4)?,updated_at:r.get(5)?})).map_err(|e|e.to_string())?;rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())}
  pub fn cancel_job(&self,id:i64)->Result<bool,String>{let c=self.0.lock().map_err(|e|e.to_string())?;let n=c.execute("UPDATE jobs SET status='cancelled',updated_at=CURRENT_TIMESTAMP WHERE id=?1 AND status='queued'",[id]).map_err(|e|e.to_string())?;Ok(n>0)}
 }
+
+#[cfg(test)]
+mod tests {
+ use super::*;
+ #[test]
+ fn persists_exchange_usage_and_conversation_history() {
+  let path=std::env::temp_dir().join(format!("dread-store-{}.sqlite",uuid::Uuid::new_v4()));
+  let store=Store::open(path.to_str().unwrap()).unwrap();
+  store.save_exchange("c-1","test-model","hello","world",(3,2,5)).unwrap();
+  let history=store.conversation_messages("c-1",20).unwrap();
+  assert_eq!(history["messages"].as_array().unwrap().len(),2);
+  assert_eq!(history["messages"][0]["role"],"user");
+  assert_eq!(history["messages"][1]["content"],"world");
+  let usage=store.usage_totals().unwrap();
+  assert_eq!(usage["requests"],1);
+  assert_eq!(usage["total_tokens"],5);
+  drop(store);
+  let _=std::fs::remove_file(&path);
+  let _=std::fs::remove_file(path.with_extension("sqlite-wal"));
+  let _=std::fs::remove_file(path.with_extension("sqlite-shm"));
+ }
+ #[test]
+ fn only_queued_jobs_can_be_cancelled() {
+  let path=std::env::temp_dir().join(format!("dread-jobs-{}.sqlite",uuid::Uuid::new_v4()));
+  let store=Store::open(path.to_str().unwrap()).unwrap();
+  let id=store.create_job("test","{}").unwrap();
+  assert!(store.cancel_job(id).unwrap());
+  assert!(!store.cancel_job(id).unwrap());
+  assert_eq!(store.list_jobs().unwrap()[0].status,"cancelled");
+  drop(store);
+  let _=std::fs::remove_file(&path);
+  let _=std::fs::remove_file(path.with_extension("sqlite-wal"));
+  let _=std::fs::remove_file(path.with_extension("sqlite-shm"));
+ }
+}
