@@ -35,6 +35,28 @@ done
 
 install -d -m 0700 "$CONFIG_DIR" "$DATA_DIR/data" "$UNIT_DIR"
 
+was_active=false
+install_complete=false
+STAGE=""
+cleanup() {
+  if [[ -n "${STAGE:-}" && -d "$STAGE" ]]; then
+    rm -rf -- "$STAGE"
+  fi
+  if [[ "$was_active" == true && "$install_complete" != true ]]; then
+    systemctl --user start "$SERVICE" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
+# Stop only DREAD's own API before touching its SQLite files; never stop ComfyUI or the legacy Hub.
+if systemctl --user is-active --quiet "$SERVICE"; then
+  was_active=true
+  systemctl --user stop "$SERVICE"
+elif curl --fail --silent http://127.0.0.1:8765/health 2>/dev/null | grep -q 'dread-universal'; then
+  printf 'An unmanaged DREAD API is using port 8765. Stop it before installing to avoid copying a live database.\n' >&2
+  exit 1
+fi
+
 # Migrate legacy app-local config and SQLite data without overwriting newer user data.
 if [[ -d "$PREFIX/config" ]]; then
   for name in services.toml agents.toml; do
@@ -70,12 +92,6 @@ chmod 0600 "$ENV_FILE"
 
 install -d -m 0700 "$(dirname -- "$PREFIX")"
 STAGE="$(mktemp -d "${PREFIX}.stage.XXXXXX")"
-cleanup() {
-  if [[ -n "${STAGE:-}" && -d "$STAGE" ]]; then
-    rm -rf -- "$STAGE"
-  fi
-}
-trap cleanup EXIT
 cp -a "$BUNDLE_DIR/bin" "$BUNDLE_DIR/web" "$BUNDLE_DIR/scripts" "$BUNDLE_DIR/docs" "$STAGE/"
 cp -a "$BUNDLE_DIR/config" "$STAGE/"
 if [[ -d "$PREFIX/config" ]]; then
@@ -84,12 +100,6 @@ fi
 if [[ -d "$PREFIX/data" ]]; then
   mkdir -p "$STAGE/data"
   cp -a -n "$PREFIX/data/." "$STAGE/data/"
-fi
-
-was_active=false
-if systemctl --user is-active --quiet "$SERVICE"; then
-  was_active=true
-  systemctl --user stop "$SERVICE"
 fi
 
 if [[ -e "$PREFIX" ]]; then
@@ -149,6 +159,7 @@ rollback() {
     rm -f -- "$UNIT_DIR/$SERVICE"
     systemctl --user daemon-reload || true
   fi
+  install_complete=true
 }
 
 systemctl --user daemon-reload
@@ -171,6 +182,7 @@ if [[ "$healthy" != true ]]; then
   printf 'DREAD health check failed; previous application files were restored.\n' >&2
   exit 1
 fi
+install_complete=true
 
 printf 'PROJECT DREAD installed and healthy at http://127.0.0.1:8765\n'
 printf 'API token file: %s (keep private; paste its value into the console)\n' "$ENV_FILE"
