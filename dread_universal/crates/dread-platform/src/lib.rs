@@ -30,6 +30,16 @@ pub struct GpuDevice {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct StorageDevice {
+    pub source: String,
+    pub filesystem: String,
+    pub mount_point: String,
+    pub total_mib: Option<u64>,
+    pub used_mib: Option<u64>,
+    pub available_mib: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct HostProfile {
     pub os: String,
     pub architecture: String,
@@ -42,6 +52,7 @@ pub struct HostProfile {
     pub memory_available_mib: Option<u64>,
     pub root_disk_total_mib: Option<u64>,
     pub root_disk_available_mib: Option<u64>,
+    pub storage_devices: Vec<StorageDevice>,
     pub gpu_devices: Vec<GpuDevice>,
     pub llama_server: Option<String>,
     pub nvidia_smi_available: bool,
@@ -332,6 +343,70 @@ fn root_disk_capacity_mib() -> (Option<u64>, Option<u64>) {
     )
 }
 
+fn parse_df_storage(output: &str) -> Vec<StorageDevice> {
+    const PSEUDO_FILESYSTEMS: &[&str] = &[
+        "autofs",
+        "cgroup",
+        "cgroup2",
+        "configfs",
+        "debugfs",
+        "devpts",
+        "devtmpfs",
+        "fusectl",
+        "mqueue",
+        "overlay",
+        "proc",
+        "pstore",
+        "securityfs",
+        "squashfs",
+        "sysfs",
+        "tmpfs",
+        "tracefs",
+    ];
+    output
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.len() < 6 || PSEUDO_FILESYSTEMS.contains(&fields[1]) {
+                return None;
+            }
+            let total_bytes = fields[2].parse::<u64>().ok()?;
+            Some(StorageDevice {
+                source: fields[0].to_string(),
+                filesystem: fields[1].to_string(),
+                total_mib: Some(total_bytes / 1024 / 1024),
+                used_mib: fields[3]
+                    .parse::<u64>()
+                    .ok()
+                    .map(|bytes| bytes / 1024 / 1024),
+                available_mib: fields[4]
+                    .parse::<u64>()
+                    .ok()
+                    .map(|bytes| bytes / 1024 / 1024),
+                mount_point: fields[5].to_string(),
+            })
+        })
+        .collect()
+}
+
+fn mounted_storage_devices() -> Vec<StorageDevice> {
+    let Some(binary) = find_binary(&["df"]) else {
+        return Vec::new();
+    };
+    let Some(output) = run_probe(
+        &binary,
+        &[
+            "-B1",
+            "-P",
+            "--output=source,fstype,size,used,avail,target",
+        ],
+    ) else {
+        return Vec::new();
+    };
+    parse_df_storage(&output)
+}
+
 fn llama_server_path() -> Option<String> {
     if let Ok(configured) = env::var("DREAD_LLM_SERVER") {
         let path = PathBuf::from(configured);
@@ -383,6 +458,7 @@ pub fn detect_host() -> HostProfile {
     let meminfo = fs::read_to_string("/proc/meminfo").unwrap_or_default();
     let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
     let (root_disk_total_mib, root_disk_available_mib) = root_disk_capacity_mib();
+    let storage_devices = mounted_storage_devices();
 
     HostProfile {
         os: env::consts::OS.into(),
@@ -401,6 +477,7 @@ pub fn detect_host() -> HostProfile {
         memory_available_mib: memory_info_mib(&meminfo, "MemAvailable"),
         root_disk_total_mib,
         root_disk_available_mib,
+        storage_devices,
         gpu_devices,
         llama_server: llama_server_path(),
         nvidia_smi_available: nvidia.is_some(),
@@ -441,6 +518,21 @@ mod tests {
         assert!(!profile.architecture.is_empty());
         assert!(profile.cpu_threads >= 1);
         assert_eq!(profile.inference_backend, "llama.cpp");
+    }
+
+    #[test]
+    fn df_parser_reports_persistent_and_network_mounts_but_skips_pseudo_filesystems() {
+        let sample = "Filesystem Type 1B-blocks Used Available Mounted on\n/dev/nvme0n1p2 ext4 107374182400 21474836480 85899345920 /\nserver:/archive nfs4 214748364800 53687091200 161061273600 /mnt/archive\ntmpfs tmpfs 8589934592 0 8589934592 /run\n";
+        let mounts = parse_df_storage(sample);
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[0].source, "/dev/nvme0n1p2");
+        assert_eq!(mounts[0].filesystem, "ext4");
+        assert_eq!(mounts[0].mount_point, "/");
+        assert_eq!(mounts[0].total_mib, Some(102400));
+        assert_eq!(mounts[0].used_mib, Some(20480));
+        assert_eq!(mounts[1].filesystem, "nfs4");
+        assert_eq!(mounts[1].mount_point, "/mnt/archive");
+        assert_eq!(mounts[1].available_mib, Some(153600));
     }
 
     #[test]
