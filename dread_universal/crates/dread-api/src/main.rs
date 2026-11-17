@@ -27,7 +27,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env, fs,
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
@@ -98,6 +98,11 @@ struct CreateCapability {
     adapter: Option<String>,
     #[serde(default = "empty_object")]
     manifest: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct BatchCreateCapabilities {
+    records: Vec<CreateCapability>,
 }
 
 fn default_compatibility() -> String {
@@ -604,6 +609,100 @@ async fn create_capability(
         }
     })?;
     Ok((StatusCode::CREATED, Json(json!({ "item": record }))))
+}
+
+async fn import_capability_batch(
+    State(state): State<AppState>,
+    Json(input): Json<BatchCreateCapabilities>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    if input.records.is_empty() || input.records.len() > 128 {
+        return Err(ApiError::bad_request(
+            "Capability batch must contain between 1 and 128 records",
+        ));
+    }
+
+    let mut seen = HashSet::new();
+    let mut records = Vec::with_capacity(input.records.len());
+    for item in input.records {
+        let record = CapabilityRecord {
+            id: item.id,
+            name: item.name,
+            kind: item.kind,
+            description: item.description,
+            version: item.version,
+            license: item.license,
+            provenance: item.provenance,
+            compatibility: item.compatibility,
+            dependencies: item.dependencies,
+            adapter: item.adapter,
+            status: CapabilityStatus::Disabled,
+            manifest: item.manifest,
+        };
+        if !seen.insert(record.id.clone()) {
+            return Err(ApiError::bad_request(format!(
+                "Capability batch contains duplicate id: {}",
+                record.id
+            )));
+        }
+        record
+            .validate()
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        records.push(record);
+    }
+
+    let mut conn = db_lock(&state)?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let mut created = 0usize;
+    let mut already_present = 0usize;
+
+    for record in records {
+        let existing_json = tx
+            .query_row(
+                "SELECT record_json FROM capabilities WHERE id = ?1",
+                params![record.id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+
+        if let Some(existing_json) = existing_json {
+            let mut existing: CapabilityRecord = serde_json::from_str(&existing_json)
+                .map_err(|error| ApiError::internal(format!("Stored capability is invalid: {error}")))?;
+            // Import timestamps are observational metadata; compare all other
+            // fields so a changed source or altered capability cannot be skipped.
+            existing.provenance.imported_at = record.provenance.imported_at;
+            if existing != record {
+                return Err(ApiError::conflict(format!(
+                    "Capability {} already exists with different metadata or provenance",
+                    record.id
+                )));
+            }
+            already_present += 1;
+            continue;
+        }
+
+        let encoded = serde_json::to_string(&record)
+            .map_err(|error| ApiError::internal(format!("Could not encode capability: {error}")))?;
+        tx.execute(
+            "INSERT INTO capabilities (id, record_json, created_at) VALUES (?1, ?2, ?3)",
+            params![record.id, encoded, record.provenance.imported_at],
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+        created += 1;
+    }
+
+    tx.commit()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "created": created,
+            "already_present": already_present,
+            "execution_started": false
+        })),
+    ))
 }
 
 async fn get_capability(
@@ -2700,6 +2799,10 @@ fn app(state: AppState) -> Router {
         .route(
             "/api/capabilities/import",
             axum::routing::post(import_discovered_skills),
+        )
+        .route(
+            "/api/capabilities/import-batch",
+            axum::routing::post(import_capability_batch),
         )
         .route("/api/capabilities/{id}/preview", get(preview_capability))
         .route(
