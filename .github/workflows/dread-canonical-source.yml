@@ -6,6 +6,7 @@ on:
       - feature/agent-capability-foundation-2026-11-17
       - integration/dread-canonical-source-run81
       - work/capability-registry-console-2026-11-17
+      - work/futuristic-command-center-2026-11-17
     paths:
       - .github/workflows/dread-canonical-source.yml
       - dread_universal/Cargo.toml
