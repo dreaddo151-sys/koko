@@ -134,13 +134,16 @@ impl ExecutionGate {
             .unwrap_or(self.config.max_retry_backoff)
             .min(self.config.max_retry_backoff);
 
-        tokio::select! {
-            _ = tokio::time::sleep(delay) => Ok(()),
-            changed = cancellation.changed() => {
-                if changed.is_err() || *cancellation.borrow() {
-                    Err(ExecutionError::Cancelled { attempts })
-                } else {
-                    self.wait_before_retry(attempts, cancellation).await
+        loop {
+            if *cancellation.borrow() {
+                return Err(ExecutionError::Cancelled { attempts });
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => return Ok(()),
+                changed = cancellation.changed() => {
+                    if changed.is_err() || *cancellation.borrow() {
+                        return Err(ExecutionError::Cancelled { attempts });
+                    }
                 }
             }
         }
