@@ -16,17 +16,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: dread-universal-${{ github.workflow }}-${{ github.ref }}
+  group: dread-universal-ubuntu-ci
   cancel-in-progress: true
 
 jobs:
   rust:
-    name: Rust / ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    name: Rust / Ubuntu 24.04
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: dread_universal
@@ -46,8 +42,8 @@ jobs:
         run: cargo build --workspace --release --locked
 
   web:
-    name: Web console
-    runs-on: ubuntu-latest
+    name: Web console / Ubuntu 24.04
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: dread_universal/web
