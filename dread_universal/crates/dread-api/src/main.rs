@@ -10,7 +10,9 @@ use axum::{
     routing::get,
 };
 use dread_agents::{CapabilityKind, CapabilityProvenance, CapabilityRecord, CapabilityStatus};
-use dread_discovery::{discover, discover_agents, load_agents, load_services};
+use dread_discovery::{
+    discover, discover_agents, known_agent_endpoints, load_agents, load_services,
+};
 use dread_gpu::{GpuGatewayClient, GpuSupervisorClient};
 use dread_orchestrator::{ExecutionConfig, ExecutionError, ExecutionGate};
 use dread_platform::cached_host_profile;
@@ -305,7 +307,13 @@ async fn agents() -> Result<Json<Value>, ApiError> {
         Err(_) if !FsPath::new(&config_path).exists() => Vec::new(),
         Err(error) => return Err(ApiError::bad_request(error)),
     };
-    let results = discover_agents(configured).await;
+    let mut endpoints = configured;
+    for candidate in known_agent_endpoints() {
+        if !endpoints.iter().any(|item| item.id == candidate.id) {
+            endpoints.push(candidate);
+        }
+    }
+    let results = discover_agents(endpoints).await;
     serde_json::to_value(results).map(Json).map_err(|error| {
         ApiError::internal(format!(
             "Could not serialize agent discovery results: {error}"
