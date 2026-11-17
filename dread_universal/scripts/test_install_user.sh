@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd -- "$(dirname -- "\${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf -- "$TMP"' EXIT
 
@@ -28,7 +28,7 @@ case "$1" in
     ;;
   enable)
     shift
-    if [[ "\${1:-}" == "--now" ]]; then
+    if [[ "${1:-}" == "--now" ]]; then
       printf 'active\n' > "$MOCK_SYSTEMD_STATE"
     fi
     ;;
@@ -42,7 +42,7 @@ MOCK
 cat > "$MOCK_BIN/curl" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "\${MOCK_FAIL_HEALTH:-0}" == 1 ]]; then exit 7; fi
+if [[ "${MOCK_FAIL_HEALTH:-0}" == 1 ]]; then exit 7; fi
 if [[ -f "$MOCK_SYSTEMD_STATE" && "$(cat "$MOCK_SYSTEMD_STATE")" == active ]]; then
   printf '{"status":"ok","service":"dread-universal"}\n'
 else
