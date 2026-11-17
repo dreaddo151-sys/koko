@@ -25,7 +25,14 @@ main{min-height:100vh;min-width:0}
 select.composer-model{height:46px;min-width:0}
 textarea.composer-input{min-height:46px;height:46px;max-height:118px;resize:vertical;padding:13px 14px;font:11px/1.5 ui-monospace,monospace}
 .composer-send{height:46px;min-width:125px}
+.composer-actions{display:flex;align-items:center;gap:6px}
+.composer-enhance{height:46px;padding:9px 10px;font-size:8px}
+.enhance-preview{margin-top:9px;padding:9px;border:1px solid #a88bff55;border-radius:7px;background:#17152a}
+.enhance-preview>div{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.enhance-preview b{color:#c6b5ff;font:800 8px ui-monospace,monospace;letter-spacing:.1em}
+.enhance-preview textarea{height:72px;min-height:72px;margin:7px 0;font-size:9px}
+
 .composer-status{display:flex;align-items:center;gap:7px;margin-top:7px;color:#779eaa;font:7px ui-monospace,monospace;letter-spacing:.025em}
 .composer-status svg{color:#68d8bd;flex-shrink:0}
 @media(max-width:1150px){.composer-dock{left:220px;padding-left:20px;padding-right:20px}.content{padding-bottom:190px}}
-@media(max-width:760px){.composer-dock{left:62px;padding:8px 9px max(9px,env(safe-area-inset-bottom))}.composer-shell{padding:8px}.composer-heading>small{display:none}.composer-heading span{font-size:6px}.composer-bar{grid-template-columns:minmax(0,1fr) auto;gap:6px}.composer-model{grid-column:1/-1;width:100%;height:36px!important}.composer-input{grid-column:1/-1;height:56px!important;min-height:56px!important}.composer-send{grid-column:2;grid-row:2;height:56px;min-width:90px;padding:8px}.content{padding-bottom:220px}}
+@media(max-width:760px){.composer-dock{left:62px;padding:8px 9px max(9px,env(safe-area-inset-bottom))}.composer-shell{padding:8px}.composer-heading>small{display:none}.composer-heading span{font-size:6px}.composer-bar{grid-template-columns:minmax(0,1fr) auto;gap:6px}.composer-model{grid-column:1/-1;width:100%;height:36px!important}.composer-input{grid-column:1/-1;height:56px!important;min-height:56px!important}.composer-actions{grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr}.composer-enhance{height:40px}.composer-send{height:40px;min-width:0;padding:8px}.content{padding-bottom:220px}}
