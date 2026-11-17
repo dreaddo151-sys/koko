@@ -270,6 +270,24 @@ impl AgentAdapter for HermesApiAdapter {
                     false,
                 ));
             }
+            let input_fields = [
+                "input",
+                "session_id",
+                "instructions",
+                "conversation_history",
+                "previous_response_id",
+            ];
+            if request
+                .input
+                .as_object()
+                .is_none_or(|object| object.keys().any(|key| !input_fields.contains(&key.as_str())))
+            {
+                return Err(adapter_error(
+                    "invalid_input",
+                    "Hermes run input contains unsupported fields".into(),
+                    false,
+                ));
+            }
             let input = request
                 .input
                 .get("input")
@@ -629,6 +647,28 @@ mod tests {
         assert!(HermesApiAdapter::new("http://user:pass@127.0.0.1:8642", "key", "Hermes").is_err());
         assert!(HermesApiAdapter::new("http://127.0.0.1:8642", "", "Hermes").is_err());
         assert!(HermesApiAdapter::new("http://127.0.0.1:8642", "key", "Hermes").is_ok());
+    }
+
+    #[test]
+    fn rejects_unsupported_run_input_fields_before_network_access() {
+        let adapter = HermesApiAdapter::new(
+            "http://127.0.0.1:8642",
+            "test-api-key",
+            "Hermes",
+        )
+        .unwrap();
+        let request = StartTaskRequest {
+            task_id: "dread-task-1".into(),
+            capability_id: "hermes.run".into(),
+            input: json!({"input":"inspect workspace","tools":["terminal"]}),
+            idempotency_key: "dread-task-1".into(),
+        };
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(adapter.start_task(request));
+        assert_eq!(result.unwrap_err().code, "invalid_input");
     }
 
     #[test]
