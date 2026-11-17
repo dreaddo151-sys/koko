@@ -24,6 +24,10 @@ cargo run -p dread-api --bin dread-universal
 
 API binds to loopback `127.0.0.1:8765`. Keep it on loopback until authentication and TLS are implemented.
 
+## Read-only workstation acceptance
+
+After building and starting the Rust API, run `bash scripts/workstation-acceptance.sh` from `dread_universal/`. The probe checks llama.cpp, its POST tokenizer, ComfyUI, optional DREAD services, NVIDIA inventory and PCIe link status. It does not stop, restart, kill or reconfigure services or GPUs. Required llama.cpp, tokenizer and ComfyUI checks must pass before hardware acceptance can be claimed.
+
 ## API
 - `GET /health`: API health and configured llama.cpp endpoint.
 - `GET /api/services`: read-only llama.cpp and ComfyUI checks.
