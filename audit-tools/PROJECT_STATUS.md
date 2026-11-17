@@ -82,6 +82,7 @@ The release archive is produced from the exact uploaded baseline after applying 
 7. [ ] Provider-specific adapters, enabled only after each local endpoint contract is verified.
 8. [x] Pstack pinned metadata importer and disabled-by-default dry-run validation (live API import still pending).
 9. [ ] Bounded execution kernel integration with durable task lifecycle, plus priority/resource-aware queue policy.
-10. [ ] React/TypeScript operator UI driven by real API and event state.\n11. [ ] Incremental legacy Python Hub workflow parity, installer/upgrade/rollback, backup/restore tests and dual-RTX-3090 workstation acceptance.
+10. [ ] React/TypeScript operator UI driven by real API and event state. 
+11. [ ] Incremental legacy Python Hub workflow parity, installer/upgrade/rollback, backup/restore tests and dual-RTX-3090 workstation acceptance.
 
 The Python Hub, ComfyUI, Ollama and GPU Supervisor remain separate runtime/reference components. Full Universal Hub parity has not been achieved.
