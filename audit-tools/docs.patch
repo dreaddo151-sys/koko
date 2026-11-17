@@ -1,0 +1,128 @@
+--- README.md
++++ README.md
+@@ -1,2 +1,5 @@
+-# koko
+-mine
++# PROJECT DREAD UNIVERSAL
++
++The complete source bundle is under [`dread_universal/`](dread_universal/). Start with its [Rust API foundation README](dread_universal/README.md), [verification gates](dread_universal/docs/VERIFICATION.md), and [project status](dread_universal/docs/PROJECT_STATUS.md).
++
++This bundle preserves the existing Python Hub and local engine references. The Rust service is additive and must not replace or control ComfyUI or the GPU Supervisor until feature parity and explicit operator approval.
+--- dread_universal/README.md
++++ dread_universal/README.md
+@@ -13,11 +13,10 @@
+ Run commands from this directory:
+ 
+ ```bash
+-cargo generate-lockfile
+ cargo fmt --all -- --check
+-cargo clippy --workspace --all-targets -- -D warnings
+-cargo test --workspace
+-cargo build --workspace --release
++cargo clippy --workspace --all-targets --locked -- -D warnings
++cargo test --workspace --locked
++cargo build --workspace --release --locked
+ ```
+ 
+ Run the API:
+@@ -37,7 +36,7 @@
+ | `DREAD_SERVICES_CONFIG` | `config/services.toml` | Local service-discovery configuration |
+ | `RUST_LOG` | `info` | Tracing filter |
+ 
+-The API intentionally binds to loopback by default. There is no authentication in this foundation release. Do not bind to a LAN/public interface or expose it through a reverse proxy without adding authentication and authorization first.
++The API is enforced to bind to loopback only because this foundation has no authentication. Non-loopback DREAD_BIND values are rejected at startup. JSON request bodies are limited to 32 MiB; oversized requests are rejected instead of being silently truncated.
+ 
+ The sample discovery configuration checks:
+ - DREAD Hub at `127.0.0.1:8080`
+@@ -54,6 +53,9 @@
+ |---|---|---|
+ | GET | `/health` | API health and version |
+ | GET | `/api/services` | Probe configured local services |
++| GET | `/api/gpu/health` | Read GPU gateway health through the existing Supervisor gateway |
++| GET | `/api/gpu/models` | List models exposed by the gateway |
++| POST | `/api/gpu/v1/{path}` | Forward OpenAI-compatible inference requests and SSE streams through the gateway |
+ | GET | `/api/registry` | List registry entries |
+ | POST | `/api/registry` | Create a registry entry |
+ | GET | `/api/registry/{id}` | Read one entry |
+@@ -78,11 +80,15 @@
+ - SQLite uses WAL mode and creates its parent directory automatically.
+ - Back up the database file before manual maintenance or migration.
+ - The registry stores metadata as JSON.
+-- The service discovery configuration currently accepts loopback HTTP endpoints only.
++- The service discovery configuration accepts strictly parsed loopback HTTP URLs only; redirects are disabled to prevent escaping the loopback boundary.
+ - The API does not invoke shell commands, launch models, schedule GPU work, or modify existing services.
+ 
++## GPU ownership boundary
++
++The Rust API communicates only with the existing local GPU gateway at `127.0.0.1:11500`. The Python GPU Supervisor remains the sole authority for GPU leases, process lifecycle, and VRAM coordination. Rust must not call the upstream model server directly or acquire a second GPU lock.
++
+ ## Scope and remaining work
+ 
+-This is a working API foundation, not the complete autonomous DREAD platform. Production authentication/authorization, audit logging, migrations, agent adapters, plugin import, repair orchestration, GPU-supervisor integration, native installers, and full end-to-end hardware validation remain separate milestones. The GPU Supervisor must remain the sole GPU coordination authority.
++This is a working API foundation, not the complete autonomous DREAD platform. Production authentication/authorization, audit logging, database migrations, runtime agent adapters, a live capability/plugin registry, approval and repair orchestration, a complete frontend, native installers, and full end-to-end hardware validation remain separate milestones. The GPU Supervisor must remain the sole GPU coordination authority.
+ 
+ See [docs/VERIFICATION.md](docs/VERIFICATION.md) for release gates and operational constraints.
+--- dread_universal/docs/VERIFICATION.md
++++ dread_universal/docs/VERIFICATION.md
+@@ -3,13 +3,15 @@
+ A source archive is not error-free merely because it packages. Release gates:
+ 
+ 1. cargo fmt --all -- --check
+-2. cargo clippy --workspace --all-targets -- -D warnings
++2. cargo clippy --workspace --all-targets --locked -- -D warnings
+ 3. cargo test --workspace --locked
+ 4. cargo build --workspace --release --locked
+-5. API smoke test with a temporary database
+-6. Integration checks against the operator's real local services
++5. Large-message round-trip tests at 5 KB, 10 KB and 20 KB
++6. Loopback bind and URL-validation tests; redirects disabled for local probes
++7. API smoke test with a temporary database
++8. Integration checks against the operator's real local services
+ 
+-GitHub Actions runs gates 1–4. The API binds to loopback by default. There is no authentication; do not expose it to untrusted networks.
++GitHub Actions runs gates 1–4. The API rejects non-loopback bind addresses until authentication is implemented. JSON request bodies have a 32 MiB ceiling.
+ 
+ Discovery statuses:
+ - ONLINE: HTTP 2xx/3xx
+--- dread_universal/integrations/pstack/README.md
++++ dread_universal/integrations/pstack/README.md
+@@ -3,6 +3,6 @@
+ Upstream: https://github.com/cursor/plugins/tree/main/pstack
+ Observed manifest version: 0.15.43. Upstream tree SHA: 2f87c854fe3e2fcda44ca86b46ede35aad3c46b7. The skills tree contains 58 SKILL.md files. License: MIT, Copyright (c) 2026 Lauren Tan.
+ 
+-Import is separate from execution. Review every skill, agent, hook and automation and classify it as native, compatible, adapter_needed, dependency_needed, credential_required, unsupported or disabled. Default is disabled. Do not execute Cursor hooks/automations or trust imported instructions. Adapt compatible workflows to Hermes, OpenHands and OpenCode. Keep GPU operations under the existing GPU Supervisor.
++Import is separate from execution. Review every skill, agent, hook and automation and classify it as native, compatible, adapter_needed, dependency_needed, credential_required, unsupported or disabled. Default is disabled. Do not execute Cursor hooks/automations or trust imported instructions. Adapt compatible workflows through provider-neutral adapters. Hermes, OpenHands and DeerFlow may be enabled only after their local endpoints and capabilities are verified. OpenCode is intentionally excluded from this project integration. Keep GPU operations under the existing GPU Supervisor.
+ 
+-Run `scripts/import-pstack.sh` from the source root to sparse-checkout the official `pstack/` folder. The importer refuses to overwrite an existing import and executes no imported code.
++Run `scripts/import-pstack.sh` from the source root to sparse-checkout the official `pstack/` folder. The importer refuses to overwrite an existing import, verifies the expected upstream tree hash and manifest version, and executes no imported code.
+--- dread_universal/scripts/import-pstack.sh
++++ dread_universal/scripts/import-pstack.sh
+@@ -3,6 +3,8 @@
+ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+ DEST="$ROOT/integrations/pstack/upstream"
+ REPO="https://github.com/cursor/plugins.git"
++EXPECTED_TREE="2f87c854fe3e2fcda44ca86b46ede35aad3c46b7"
++EXPECTED_VERSION="0.15.43"
+ TMP="$(mktemp -d "${TMPDIR:-/tmp}/dread-pstack.XXXXXX")"
+ trap 'rm -rf "$TMP"' EXIT
+ if [[ -e "$DEST" ]]; then
+@@ -10,6 +12,11 @@
+   exit 2
+ fi
+ git clone --depth 1 --filter=blob:none --sparse "$REPO" "$TMP/plugins"
++ACTUAL_TREE="$(git -C "$TMP/plugins" rev-parse 'HEAD:pstack')"
++if [[ "$ACTUAL_TREE" != "$EXPECTED_TREE" ]]; then
++  echo "Upstream pstack tree changed: expected $EXPECTED_TREE, got $ACTUAL_TREE" >&2
++  exit 3
++fi
+ git -C "$TMP/plugins" sparse-checkout set pstack
+ test -f "$TMP/plugins/pstack/plugin.json"
+ test -f "$TMP/plugins/pstack/LICENSE"
+@@ -18,6 +25,7 @@
+ m=json.load(open(sys.argv[1]))
+ assert m.get("name")=="pstack"
+ assert m.get("license")=="MIT"
++assert m.get("version")=="0.15.43", m.get("version")
+ print("Validated pstack",m.get("version"),"license",m.get("license"))
+ PY
+ mkdir -p "$(dirname "$DEST")"
