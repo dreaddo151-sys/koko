@@ -510,54 +510,66 @@ fn pstack_skills_root() -> Result<PathBuf, ApiError> {
                 .join(path)
         });
     }
+
     let cwd = env::current_dir().map_err(|e| ApiError::internal(e.to_string()))?;
     for candidate in [
         cwd.join("integrations/cursor-plugins/pstack"),
         cwd.join("integrations/pstack/upstream"),
+        cwd.join("../integrations/cursor-plugins/pstack"),
+        cwd.join("../integrations/pstack/upstream"),
     ] {
         if candidate.join("skills").is_dir() {
             return Ok(candidate);
         }
     }
+
     Err(ApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
-        message: "Pstack skill catalog not found; set DREAD_SKILLS_ROOT to its root directory".into(),
+        message: "Pstack skill catalog not found; set DREAD_SKILLS_ROOT to its root directory"
+            .into(),
     })
 }
 
 async fn discover_pstack_skills() -> Result<Json<Value>, ApiError> {
     let root = pstack_skills_root()?;
     let skills = discover_skills(&root).map_err(|e| ApiError::bad_request(e.to_string()))?;
-    let agents = discover_agent_profiles(&root).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let agents =
+        discover_agent_profiles(&root).map_err(|e| ApiError::bad_request(e.to_string()))?;
+
     let skill_values = skills
         .iter()
-        .map(|item| json!({
-            "id": item.id,
-            "name": item.name,
-            "description": item.description,
-            "relative_path": item.relative_path,
-            "bytes": item.bytes,
-            "fingerprint": item.fingerprint,
-            "kind": "skill",
-            "status": "not_imported",
-            "execution": "never"
-        }))
+        .map(|item| {
+            json!({
+                "id": item.id,
+                "name": item.name,
+                "description": item.description,
+                "relative_path": item.relative_path,
+                "bytes": item.bytes,
+                "fingerprint": item.fingerprint,
+                "kind": "skill",
+                "status": "not_imported",
+                "execution": "never"
+            })
+        })
         .collect::<Vec<_>>();
     let agent_values = agents
         .iter()
-        .map(|item| json!({
-            "id": item.id,
-            "name": item.name,
-            "description": item.description,
-            "relative_path": item.relative_path,
-            "bytes": item.bytes,
-            "fingerprint": item.fingerprint,
-            "kind": "agent",
-            "status": "not_imported",
-            "execution": "never",
-            "note": "Prompt profile only; not a live AgentAdapter process"
-        }))
+        .map(|item| {
+            json!({
+                "id": item.id,
+                "name": item.name,
+                "description": item.description,
+                "relative_path": item.relative_path,
+                "bytes": item.bytes,
+                "fingerprint": item.fingerprint,
+                "kind": "agent",
+                "status": "not_imported",
+                "execution": "never",
+                "note": "Prompt profile only; not a live AgentAdapter process"
+            })
+        })
         .collect::<Vec<_>>();
+
     Ok(Json(json!({
         "source": "Pstack",
         "root_configured": true,
@@ -574,12 +586,14 @@ async fn import_discovered_skills(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let root = pstack_skills_root()?;
     let skills = discover_skills(&root).map_err(|e| ApiError::bad_request(e.to_string()))?;
-    let agents = discover_agent_profiles(&root).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let agents =
+        discover_agent_profiles(&root).map_err(|e| ApiError::bad_request(e.to_string()))?;
     let now = now_epoch();
-    let source_revision = env::var("DREAD_PSTACK_REVISION")
-        .unwrap_or_else(|_| "unverified-local-copy".to_string());
-    let source_version = env::var("DREAD_PSTACK_VERSION")
-        .unwrap_or_else(|_| "0.15.43".to_string());
+    let source_revision =
+        env::var("DREAD_PSTACK_REVISION").unwrap_or_else(|_| "unverified-local-copy".to_string());
+    let source_version =
+        env::var("DREAD_PSTACK_VERSION").unwrap_or_else(|_| "0.15.43".to_string());
+
     let mut discovered = Vec::new();
     for item in skills {
         discovered.push((
@@ -601,10 +615,14 @@ async fn import_discovered_skills(
             item.fingerprint,
         ));
     }
+
     let mut conn = db_lock(&state)?;
-    let tx = conn.transaction().map_err(|e| ApiError::internal(e.to_string()))?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
     let mut imported = 0usize;
     let mut already_present = 0usize;
+
     for (kind, id, name, description, relative_path, fingerprint) in &discovered {
         let record = CapabilityRecord {
             id: id.clone(),
@@ -633,7 +651,9 @@ async fn import_discovered_skills(
                 "approval": null
             }),
         };
-        record.validate().map_err(|e| ApiError::bad_request(e.to_string()))?;
+        record
+            .validate()
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
         let encoded = serde_json::to_string(&record)
             .map_err(|e| ApiError::internal(e.to_string()))?;
         let changed = tx
@@ -642,12 +662,14 @@ async fn import_discovered_skills(
                 params![record.id, encoded, now],
             )
             .map_err(|e| ApiError::internal(e.to_string()))?;
+
         if changed == 1 {
             imported += 1;
         } else {
             already_present += 1;
         }
     }
+
     tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
     Ok((
         StatusCode::CREATED,
@@ -667,32 +689,59 @@ async fn preview_capability(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let conn = db_lock(&state)?;
-    let encoded = conn.query_row(
-        "SELECT record_json FROM capabilities WHERE id = ?1",
-        params![id],
-        |row| row.get::<_, String>(0),
-    ).optional().map_err(|e| ApiError::internal(e.to_string()))?
+    let encoded = conn
+        .query_row(
+            "SELECT record_json FROM capabilities WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| ApiError::internal(e.to_string()))?
         .ok_or_else(|| ApiError::not_found("Capability not found"))?;
     let record: CapabilityRecord = serde_json::from_str(&encoded)
         .map_err(|e| ApiError::internal(format!("Stored capability is invalid: {e}")))?;
     let root = pstack_skills_root()?;
+
     let (name, description, content, fingerprint) = match record.kind {
         CapabilityKind::Skill => {
             let context = load_skill_context(&root, &record.id)
                 .map_err(|e| ApiError::conflict(format!("Skill source is unavailable: {e}")))?;
-            (context.descriptor.name, context.descriptor.description, context.content, context.descriptor.fingerprint)
+            (
+                context.descriptor.name,
+                context.descriptor.description,
+                context.content,
+                context.descriptor.fingerprint,
+            )
         }
         CapabilityKind::Agent => {
-            let context = load_agent_profile_context(&root, &record.id)
-                .map_err(|e| ApiError::conflict(format!("Agent profile is unavailable: {e}")))?;
-            (context.descriptor.name, context.descriptor.description, context.content, context.descriptor.fingerprint)
+            let context = load_agent_profile_context(&root, &record.id).map_err(|e| {
+                ApiError::conflict(format!("Agent profile is unavailable: {e}"))
+            })?;
+            (
+                context.descriptor.name,
+                context.descriptor.description,
+                context.content,
+                context.descriptor.fingerprint,
+            )
         }
-        _ => return Err(ApiError::bad_request("Only Markdown skills and agent profiles support preview")),
+        _ => {
+            return Err(ApiError::bad_request(
+                "Only Markdown skills and agent profiles support preview",
+            ));
+        }
     };
-    let expected = record.manifest.get("fingerprint").and_then(Value::as_str).unwrap_or_default();
+
+    let expected = record
+        .manifest
+        .get("fingerprint")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if expected != fingerprint {
-        return Err(ApiError::conflict("Capability content changed since import; re-import before review"));
+        return Err(ApiError::conflict(
+            "Capability content changed since import; re-import before review",
+        ));
     }
+
     Ok(Json(json!({
         "id": record.id,
         "name": name,
@@ -712,50 +761,82 @@ async fn enable_capability(
     let reason = input.reason.trim();
     let approved_by = state.operator_id.trim();
     if reason.is_empty() || reason.len() > 2000 {
-        return Err(ApiError::bad_request("A review reason of 1 to 2000 characters is required"));
+        return Err(ApiError::bad_request(
+            "A review reason of 1 to 2000 characters is required",
+        ));
     }
+
     let now = now_epoch();
     let mut conn = db_lock(&state)?;
-    let encoded = conn.query_row(
-        "SELECT record_json FROM capabilities WHERE id = ?1",
-        params![id],
-        |row| row.get::<_, String>(0),
-    ).optional().map_err(|e| ApiError::internal(e.to_string()))?
+    let encoded = conn
+        .query_row(
+            "SELECT record_json FROM capabilities WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| ApiError::internal(e.to_string()))?
         .ok_or_else(|| ApiError::not_found("Capability not found"))?;
     let mut record: CapabilityRecord = serde_json::from_str(&encoded)
         .map_err(|e| ApiError::internal(format!("Stored capability is invalid: {e}")))?;
+
     if !matches!(record.kind, CapabilityKind::Skill | CapabilityKind::Agent) {
-        return Err(ApiError::conflict("Only Markdown skills and agent prompt profiles can be enabled as model context"));
+        return Err(ApiError::conflict(
+            "Only Markdown skills and agent prompt profiles can be enabled as model context",
+        ));
     }
     if record.status == CapabilityStatus::Rejected {
         return Err(ApiError::conflict("Rejected capabilities cannot be enabled"));
     }
+
     let root = pstack_skills_root()?;
     let fingerprint = match record.kind {
         CapabilityKind::Skill => load_skill_context(&root, &record.id)
             .map_err(|e| ApiError::conflict(format!("Skill source is no longer valid: {e}")))?
-            .descriptor.fingerprint,
+            .descriptor
+            .fingerprint,
         CapabilityKind::Agent => load_agent_profile_context(&root, &record.id)
             .map_err(|e| ApiError::conflict(format!("Agent profile is no longer valid: {e}")))?
-            .descriptor.fingerprint,
+            .descriptor
+            .fingerprint,
         _ => unreachable!(),
     };
-    let expected = record.manifest.get("fingerprint").and_then(Value::as_str).unwrap_or_default();
+    let expected = record
+        .manifest
+        .get("fingerprint")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if expected != fingerprint {
-        return Err(ApiError::conflict("Capability content changed since import; re-import and review it before enabling"));
+        return Err(ApiError::conflict(
+            "Capability content changed since import; re-import and review it before enabling",
+        ));
     }
-    let manifest = record.manifest.as_object_mut()
+
+    let manifest = record
+        .manifest
+        .as_object_mut()
         .ok_or_else(|| ApiError::bad_request("Capability manifest must be a JSON object"))?;
-    manifest.insert("approval".into(), json!({
-        "approved_by": approved_by,
-        "approved_at": now,
-        "reason": reason
-    }));
+    manifest.insert(
+        "approval".into(),
+        json!({
+            "approved_by": approved_by,
+            "approved_at": now,
+            "reason": reason
+        }),
+    );
     record.status = CapabilityStatus::Enabled;
-    record.validate().map_err(|e| ApiError::bad_request(e.to_string()))?;
-    let updated = serde_json::to_string(&record).map_err(|e| ApiError::internal(e.to_string()))?;
-    conn.execute("UPDATE capabilities SET record_json = ?2 WHERE id = ?1", params![id, updated])
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    record
+        .validate()
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let updated =
+        serde_json::to_string(&record).map_err(|e| ApiError::internal(e.to_string()))?;
+    conn.execute(
+        "UPDATE capabilities SET record_json = ?2 WHERE id = ?1",
+        params![id, updated],
+    )
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+
     Ok(Json(json!({"item": record, "execution": "never"})))
 }
 
@@ -764,21 +845,31 @@ async fn disable_capability(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let mut conn = db_lock(&state)?;
-    let encoded = conn.query_row(
-        "SELECT record_json FROM capabilities WHERE id = ?1",
-        params![id],
-        |row| row.get::<_, String>(0),
-    ).optional().map_err(|e| ApiError::internal(e.to_string()))?
+    let encoded = conn
+        .query_row(
+            "SELECT record_json FROM capabilities WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| ApiError::internal(e.to_string()))?
         .ok_or_else(|| ApiError::not_found("Capability not found"))?;
     let mut record: CapabilityRecord = serde_json::from_str(&encoded)
         .map_err(|e| ApiError::internal(format!("Stored capability is invalid: {e}")))?;
+
     record.status = CapabilityStatus::Disabled;
     if let Some(manifest) = record.manifest.as_object_mut() {
         manifest.remove("approval");
     }
-    let updated = serde_json::to_string(&record).map_err(|e| ApiError::internal(e.to_string()))?;
-    conn.execute("UPDATE capabilities SET record_json = ?2 WHERE id = ?1", params![id, updated])
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let updated =
+        serde_json::to_string(&record).map_err(|e| ApiError::internal(e.to_string()))?;
+    conn.execute(
+        "UPDATE capabilities SET record_json = ?2 WHERE id = ?1",
+        params![id, updated],
+    )
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+
     Ok(Json(json!({"item": record, "execution": "never"})))
 }
 
