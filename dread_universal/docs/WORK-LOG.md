@@ -246,3 +246,15 @@ Recovered prior terminal/API evidence and corrected the acceptance accounting. T
 ### Revised retest policy
 
 Do not repeat basic GPU enumeration, generic API health or standalone llama.cpp inference as if no prior tests existed. Before workstation deployment, capture a fresh preservation baseline. For the new candidate, perform a narrow integration regression through the existing authenticated bridge and Supervisor-owned inference path, including health responsiveness during inference. Test concurrent dual-GPU chat/ComfyUI/video only when the integrated media jobs are implemented. Preserve all existing service and GPU ownership boundaries.
+
+
+## Mission planning API vertical slice — 2026-11-18
+
+- Added SQLite persistence for mission graphs and deterministic execution order.
+- Added authenticated `POST /api/missions` and `GET /api/missions/{id}` endpoints.
+- The planning endpoint rejects empty/oversized graphs, oversized node fields, missing dependencies, self-dependencies, duplicate node IDs and dependency cycles through the existing graph validator.
+- Added API regression tests for ordering, persistence/readback, duplicate mission IDs, cycle rejection and the 128-node limit.
+- Safety boundary: plans are stored with status `planned`; API explicitly returns `execution_started: false`. No task dispatch, agent invocation, tool execution or GPU activity is triggered by mission planning.
+- Source commit: `1d04452c05739a759988bedb40ee638debc32909`.
+- CI runs #336/#337 were queued for this commit at the time of this entry. Do not mark this vertical slice CI-verified until the run for this exact SHA completes.
+- This is a mission-planning API slice, not mission orchestration completion. Dependency-aware scheduling, task creation/aggregation, failure propagation, retries, pause/resume and provider delegation remain outstanding.
