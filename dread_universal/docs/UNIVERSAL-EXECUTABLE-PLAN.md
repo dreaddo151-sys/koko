@@ -53,7 +53,7 @@ Future remote extension installation must use a signed/pinned manifest, explicit
 | 4 | Installers | Linux shell, Windows PowerShell and macOS package installers create private config, service startup and rollback |
 | 5 | Agent catalog | Known local agent endpoints are probed read-only; adding an agent requires an adapter manifest and explicit enablement |
 | 6 | Extension manager | One-click discover, preview, install, update, disable and rollback for pinned skills and agent profiles |
-| 7 | Release artifacts | Signed versioned executables/installers and a verified update manifest for each supported OS/architecture |
+| 7 | Release artifacts | Native OS binaries, web console and SHA-256 manifests are built by the release workflow; signed installers and verified update manifests remain future work |
 
 ## Portability contract
 
