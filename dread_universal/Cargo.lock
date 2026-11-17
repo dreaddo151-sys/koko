@@ -234,9 +234,9 @@ dependencies = [
  "axum",
  "dread-agents",
  "dread-discovery",
- "dread-skills",
  "dread-gpu",
  "dread-orchestrator",
+ "dread-skills",
  "futures",
  "reqwest",
  "rusqlite",
@@ -274,16 +274,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "dread-skills"
-version = "0.4.0"
-
-[[package]]
 name = "dread-orchestrator"
 version = "0.4.0"
 dependencies = [
  "serde_json",
  "tokio",
 ]
+
+[[package]]
+name = "dread-skills"
+version = "0.4.0"
 
 [[package]]
 name = "equivalent"
