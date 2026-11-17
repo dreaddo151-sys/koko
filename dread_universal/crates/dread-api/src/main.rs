@@ -1906,7 +1906,26 @@ async fn run_task(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    queue_task(state, id)
+    let result = queue_task(state.clone(), id.clone());
+    if result.is_ok() {
+        let mission_id = {
+            let Ok(conn) = state.db.lock() else {
+                return result;
+            };
+            conn.query_row(
+                "SELECT mission_id FROM mission_tasks WHERE task_id = ?1",
+                params![id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+        };
+        if let Some(mission_id) = mission_id {
+            dispatch_ready_mission_tasks(state.clone(), mission_id);
+        }
+    }
+    result
 }
 
 fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), ApiError> {
