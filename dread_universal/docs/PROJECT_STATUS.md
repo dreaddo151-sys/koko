@@ -11,7 +11,7 @@ The canonical-source consolidation is committed on `integration/dread-canonical-
 
 The hardened baseline passed formatting, Clippy with warnings denied, workspace tests and an optimized release build in GitHub Actions run `44002596952`.
 
-The canonical-source branch passed the direct-source quality workflow in GitHub Actions run `44023186920` (run #23): Pstack pin/tree/provenance, 11 importer tests, Rust formatting, Clippy with warnings denied, workspace tests including startup queue recovery, and optimized release build. This run includes Bearer authentication, server-derived approval identity and restart-safe queue handling.
+The canonical-source branch passed the direct-source quality workflow in GitHub Actions run `44023186920` (run #23): Pstack pin/tree/provenance, 11 importer tests, Rust formatting, Clippy with warnings denied, 39 Rust tests including startup queue recovery, and optimized release build. This run includes Bearer authentication, server-derived approval identity and restart-safe queue handling.
 - `cargo fmt --all -- --check`: PASS
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: PASS
 - `cargo test --workspace --locked`: PASS — 34 Rust tests
@@ -107,7 +107,7 @@ The master architecture plan is the target specification, not a declaration of c
 | Master-plan phase | Status | Evidence / remaining gate |
 |---|---|---|
 | 0 — Baseline | PARTIAL | Historical workstation map exists. Current local Rust/rustup installation, current service states and GPU Supervisor adapter contract have not been revalidated in this GitHub workflow. Do not repeat a full workstation audit. |
-| 1 — Rust foundation | CANONICAL SOURCE / CI PASS | The complete Rust workspace is committed at `dread_universal/`; run `44023186920` (run #23) passed Pstack verification, 11 importer tests, formatting, Clippy, workspace tests and optimized release build. Loopback Bearer auth, server-derived approval identity and startup recovery are included. A live non-conflicting workstation health smoke test remains outstanding. |
+| 1 — Rust foundation | CANONICAL SOURCE / CI PASS | The complete Rust workspace is committed at `dread_universal/`; run `44023186920` (run #23) passed Pstack verification, 11 importer tests, formatting, Clippy, 39 Rust tests and optimized release build. Loopback Bearer auth, server-derived approval identity and startup recovery are included. A live non-conflicting workstation health smoke test remains outstanding. |
 | 2 — Existing service adapters | NOT VERIFIED | No completed Hermes, OpenHands, OpenCode, Ollama, llama.cpp gateway, ComfyUI or DREAD Hub adapter contract and representative read-only request is evidenced by this workflow. Agent health discovery is generic configured HTTP probing, not those dedicated adapters. |
 | 3 — Capability registry | PARTIAL | Capability metadata registry and pinned Pstack dry-run/importer tests pass. Full Cursor plugin ingestion, compatibility classification, MCP/OpenAPI/CLI/service inventory and representative sample reconciliation remain outstanding. |
 | 4 — Agent orchestration | PARTIAL | Durable task lifecycle, approval audit, WebSocket stream, bounded runner, one allowlisted read-only service-discovery task and fail-closed startup queue recovery pass CI. No planner, provider/agent delegation, priority scheduling, result aggregation or multi-agent end-to-end test yet. |
