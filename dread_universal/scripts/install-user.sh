@@ -112,7 +112,9 @@ rollback() {
   if [[ -n "$BACKUP" && -e "$BACKUP" ]]; then
     mv -- "$BACKUP" "$PREFIX"
     systemctl --user daemon-reload || true
-    systemctl --user start "$SERVICE" >/dev/null 2>&1 || true
+    if [[ "$was_active" == true ]]; then
+      systemctl --user start "$SERVICE" >/dev/null 2>&1 || true
+    fi
   else
     systemctl --user disable "$SERVICE" >/dev/null 2>&1 || true
     rm -f -- "$UNIT_DIR/$SERVICE"
