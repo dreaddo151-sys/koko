@@ -54,13 +54,13 @@ The run applied the candidate patches to the exact uploaded baseline archive bef
   - Subscribes before loading persisted history to avoid a replay/live-event gap.
   - Replays events after the supplied sequence cursor in bounded 1,000-event pages.
   - Uses a bounded broadcast channel and recovers missed events from SQLite if a subscriber falls behind.
-  - Formatting, Clippy, compilation and the committed-event subscriber unit test pass in run #77. An authenticated network-level WebSocket test now covers handshake, replay, live event delivery and reconnect using a sequence cursor.
+  - Formatting, Clippy, compilation and the committed-event subscriber unit test pass in run #77. Run `44025427057` passed the authenticated network-level WebSocket test covering handshake, replay, live event delivery and reconnect using a sequence cursor.
 - Pstack capability importer:
   - Catalog pins Pstack `0.15.43`, commit `2f87c854fe3e2fcda44ca86b46ede35aad3c46b7`, subtree `71d8e1d1d718e2149dc43b2535618064f29cba6b`, MIT; inventory is 58 skills and 2 agents.
   - The active pinned source is `integrations/pstack/upstream/` at `0.15.43`, verified against the commit/tree and all 60 provenance hashes. The separate `integrations/pstack-upstream/` directory is a retained older `0.15.42` snapshot; it is not the importer source and has not been relabelled or overwritten.
   - `scripts/import-pstack.sh` verifies the pinned commit/tree and manifest before writing a provenance marker with per-file SHA-256 values.
   - `scripts/import_pstack_capabilities.py` defaults to dry-run; `--apply` is required to POST metadata to the explicit-port loopback API and now requires `DREAD_API_TOKEN` (at least 32 characters), sent as a Bearer token for every API request. It refuses missing/mismatched markers, changed files, unsafe paths, redirects and existing capabilities not confirmed disabled.
-  - Historical run #77 passed nine importer tests. Canonical-source run `44023186920` passed 11 importer tests, verified the pinned version/commit/tree and all 60 `files_sha256` entries, and completed the dry-run for 58 skills and 2 agents. Imported metadata starts disabled. No skills, agents, scripts or hooks are executed. The live API `--apply` operation has not been run; it now requires `DREAD_API_TOKEN`.
+  - Canonical-source run `44025427057` passed the live authenticated API import: 58 skills and 2 agents were registered, all 60 records were read back disabled, and a second `--apply` returned 0 created / 60 already present. The run also passed all 11 importer tests, Pstack pin/tree and 60 per-file provenance hashes, Rust formatting, Clippy with warnings denied, all workspace tests and the optimized release build. No skills, agents, scripts or hooks were executed.
 - Bounded execution kernel (`dread-orchestrator`) is now wired to the durable task API for one safe built-in runner:
   - Enforces a maximum of two active runners and eight admitted tasks by default.
   - Applies a 120-second per-attempt timeout, one attempt by default, and watch-channel cancellation.
@@ -89,10 +89,10 @@ The run applied the candidate patches to the exact uploaded baseline archive bef
 2. [x] Provider-neutral agent/capability contracts and disabled-by-default capability registry.
 3. [x] Durable SQLite task lifecycle and approval/cancellation audit history.
 4. [x] Read-only, loopback-only configured agent health discovery.
-5. [x] WebSocket task-event fanout, durable replay cursor and bounded lag recovery (unit/CI verified; client handshake test pending).
+5. [x] WebSocket task-event fanout, durable replay cursor, bounded lag recovery and authenticated network handshake/reconnect test (run `44025427057` passed).
 6. [x] Loopback API Bearer authentication, fail-closed token configuration and server-derived approval identity (CI verified); [ ] role-based authorization, token rotation and any remote-access policy.
 7. [ ] Provider-specific adapters, enabled only after each local endpoint contract is verified.
-8. [x] Pstack pinned metadata importer and disabled-by-default dry-run validation (live API import still pending).
+8. [x] Pstack pinned metadata importer, authenticated live API apply, persisted readback, disabled-state verification and idempotent re-import (run `44025427057` passed).
 9. [x] Bounded execution kernel primitive, one allowlisted read-only service-discovery runner, and fail-closed startup queue recovery integrated with durable task lifecycle (CI verified); [ ] priority/resource-aware policy and provider/agent adapters.
 10. [ ] React/TypeScript operator UI driven by real API and event state.
 11. [ ] Incremental legacy Python Hub workflow parity, installer/upgrade/rollback, backup/restore tests and dual-RTX-3090 workstation acceptance.
@@ -107,7 +107,7 @@ The master architecture plan is the target specification, not a declaration of c
 | Master-plan phase | Status | Evidence / remaining gate |
 |---|---|---|
 | 0 — Baseline | PARTIAL | Historical workstation map exists. Current local Rust/rustup installation, current service states and GPU Supervisor adapter contract have not been revalidated in this GitHub workflow. Do not repeat a full workstation audit. |
-| 1 — Rust foundation | CANONICAL SOURCE / CI PASS | The complete Rust workspace is committed at `dread_universal/`; run `44023186920` (run #23) passed Pstack verification, 11 importer tests, formatting, Clippy, 39 Rust tests and optimized release build. Loopback Bearer auth, server-derived approval identity and startup recovery are included. A live non-conflicting workstation health smoke test remains outstanding. |
+| 1 — Rust foundation | CANONICAL SOURCE / CI PASS | The complete Rust workspace is committed at `dread_universal/`; run `44025427057` (run #30) passed Pstack provenance, 11 importer tests, formatting, Clippy, 40 Rust tests, optimized release build and the authenticated live Pstack import/readback/idempotency check. Loopback Bearer auth, server-derived approval identity and startup recovery are included. A live non-conflicting workstation health smoke test remains outstanding. |
 | 2 — Existing service adapters | NOT VERIFIED | No completed Hermes, OpenHands, OpenCode, Ollama, llama.cpp gateway, ComfyUI or DREAD Hub adapter contract and representative read-only request is evidenced by this workflow. Agent health discovery is generic configured HTTP probing, not those dedicated adapters. |
 | 3 — Capability registry | PARTIAL | Capability metadata registry and pinned Pstack dry-run/importer tests pass. Full Cursor plugin ingestion, compatibility classification, MCP/OpenAPI/CLI/service inventory and representative sample reconciliation remain outstanding. |
 | 4 — Agent orchestration | PARTIAL | Durable task lifecycle, approval audit, WebSocket replay/live stream with authenticated handshake and reconnect test, bounded runner, one allowlisted read-only service-discovery task and fail-closed startup queue recovery pass CI. No planner, provider/agent delegation, priority scheduling, result aggregation or multi-agent end-to-end test yet. |
