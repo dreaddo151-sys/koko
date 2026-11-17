@@ -675,23 +675,32 @@ async fn preview_capability(
         .ok_or_else(|| ApiError::not_found("Capability not found"))?;
     let record: CapabilityRecord = serde_json::from_str(&encoded)
         .map_err(|e| ApiError::internal(format!("Stored capability is invalid: {e}")))?;
-    if record.kind != CapabilityKind::Skill {
-        return Err(ApiError::bad_request("Only Markdown skill capabilities support preview"));
-    }
     let root = pstack_skills_root()?;
-    let context = load_skill_context(&root, &record.id)
-        .map_err(|e| ApiError::conflict(format!("Skill source is unavailable: {e}")))?;
+    let (name, description, content, fingerprint) = match record.kind {
+        CapabilityKind::Skill => {
+            let context = load_skill_context(&root, &record.id)
+                .map_err(|e| ApiError::conflict(format!("Skill source is unavailable: {e}")))?;
+            (context.descriptor.name, context.descriptor.description, context.content, context.descriptor.fingerprint)
+        }
+        CapabilityKind::Agent => {
+            let context = load_agent_profile_context(&root, &record.id)
+                .map_err(|e| ApiError::conflict(format!("Agent profile is unavailable: {e}")))?;
+            (context.descriptor.name, context.descriptor.description, context.content, context.descriptor.fingerprint)
+        }
+        _ => return Err(ApiError::bad_request("Only Markdown skills and agent profiles support preview")),
+    };
     let expected = record.manifest.get("fingerprint").and_then(Value::as_str).unwrap_or_default();
-    if expected != context.descriptor.fingerprint {
-        return Err(ApiError::conflict("Skill content changed since import; re-import before review"));
+    if expected != fingerprint {
+        return Err(ApiError::conflict("Capability content changed since import; re-import before review"));
     }
     Ok(Json(json!({
         "id": record.id,
-        "name": record.name,
-        "description": record.description,
-        "content": context.content,
+        "name": name,
+        "description": description,
+        "content": content,
         "trust": "untrusted_context",
-        "execution": "never"
+        "execution": "never",
+        "kind": record.kind
     })))
 }
 
@@ -715,18 +724,25 @@ async fn enable_capability(
         .ok_or_else(|| ApiError::not_found("Capability not found"))?;
     let mut record: CapabilityRecord = serde_json::from_str(&encoded)
         .map_err(|e| ApiError::internal(format!("Stored capability is invalid: {e}")))?;
-    if record.kind != CapabilityKind::Skill {
-        return Err(ApiError { status: StatusCode::CONFLICT, message: "Only reviewed Markdown skills can be enabled by this workflow".into() });
+    if !matches!(record.kind, CapabilityKind::Skill | CapabilityKind::Agent) {
+        return Err(ApiError::conflict("Only Markdown skills and agent prompt profiles can be enabled as model context"));
     }
     if record.status == CapabilityStatus::Rejected {
-        return Err(ApiError { status: StatusCode::CONFLICT, message: "Rejected capabilities cannot be enabled".into() });
+        return Err(ApiError::conflict("Rejected capabilities cannot be enabled"));
     }
     let root = pstack_skills_root()?;
-    let context = dread_skills::load_skill_context(&root, &record.id)
-        .map_err(|e| ApiError::conflict(format!("Skill source is no longer valid: {e}")))?;
+    let fingerprint = match record.kind {
+        CapabilityKind::Skill => load_skill_context(&root, &record.id)
+            .map_err(|e| ApiError::conflict(format!("Skill source is no longer valid: {e}")))?
+            .descriptor.fingerprint,
+        CapabilityKind::Agent => load_agent_profile_context(&root, &record.id)
+            .map_err(|e| ApiError::conflict(format!("Agent profile is no longer valid: {e}")))?
+            .descriptor.fingerprint,
+        _ => unreachable!(),
+    };
     let expected = record.manifest.get("fingerprint").and_then(Value::as_str).unwrap_or_default();
-    if expected != context.descriptor.fingerprint {
-        return Err(ApiError { status: StatusCode::CONFLICT, message: "Skill content changed since import; re-import and review it before enabling".into() });
+    if expected != fingerprint {
+        return Err(ApiError::conflict("Capability content changed since import; re-import and review it before enabling"));
     }
     let manifest = record.manifest.as_object_mut()
         .ok_or_else(|| ApiError::bad_request("Capability manifest must be a JSON object"))?;
@@ -1351,39 +1367,46 @@ fn load_enabled_skill_contexts(
         return Ok(Vec::new());
     };
     if ids.len() > 8 {
-        return Err("At most 8 skill contexts may be attached to one task".into());
+        return Err("At most 8 skill or agent contexts may be attached to one task".into());
     }
     let root = pstack_skills_root().map_err(|error| error.message)?;
     let conn = db.lock().map_err(|_| "Database lock is unavailable".to_string())?;
     let mut contexts = Vec::new();
     let mut total_bytes = 0usize;
     for value in ids {
-        let id = value.as_str().ok_or_else(|| "Skill id must be a string".to_string())?;
+        let id = value.as_str().ok_or_else(|| "Capability id must be a string".to_string())?;
         let encoded: String = conn.query_row(
             "SELECT record_json FROM capabilities WHERE id = ?1",
             params![id],
             |row| row.get(0),
         ).optional().map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Skill capability '{id}' is not imported"))?;
+            .ok_or_else(|| format!("Capability '{id}' is not imported"))?;
         let record: CapabilityRecord = serde_json::from_str(&encoded).map_err(|e| e.to_string())?;
-        if record.kind != CapabilityKind::Skill || record.status != CapabilityStatus::Enabled {
-            return Err(format!("Skill capability '{id}' is not enabled"));
+        if !matches!(record.kind, CapabilityKind::Skill | CapabilityKind::Agent)
+            || record.status != CapabilityStatus::Enabled
+        {
+            return Err(format!("Capability '{id}' is not an enabled skill or agent profile"));
         }
-        let context = load_skill_context(&root, id).map_err(|e| e.to_string())?;
+        let (name, description, content, fingerprint) = match record.kind {
+            CapabilityKind::Skill => {
+                let context = load_skill_context(&root, id).map_err(|e| e.to_string())?;
+                (context.descriptor.name, context.descriptor.description, context.content, context.descriptor.fingerprint)
+            }
+            CapabilityKind::Agent => {
+                let context = load_agent_profile_context(&root, id).map_err(|e| e.to_string())?;
+                (context.descriptor.name, context.descriptor.description, context.content, context.descriptor.fingerprint)
+            }
+            _ => return Err("Unsupported capability kind".into()),
+        };
         let expected = record.manifest.get("fingerprint").and_then(Value::as_str).unwrap_or_default();
-        if expected != context.descriptor.fingerprint {
-            return Err(format!("Skill '{id}' changed after approval; disable and re-import it"));
+        if expected != fingerprint {
+            return Err(format!("Capability '{id}' changed after approval; disable and re-import it"));
         }
-        total_bytes = total_bytes.saturating_add(context.content.len());
+        total_bytes = total_bytes.saturating_add(content.len());
         if total_bytes > 256 * 1024 {
-            return Err("Combined skill context exceeds 256 KiB".into());
+            return Err("Combined skill and agent context exceeds 256 KiB".into());
         }
-        contexts.push(format!(
-            "Skill: {}\nDescription: {}\n\n{}",
-            context.descriptor.name,
-            context.descriptor.description,
-            context.content
-        ));
+        contexts.push(format!("Profile: {name}\nDescription: {description}\n\n{content}"));
     }
     Ok(contexts)
 }
