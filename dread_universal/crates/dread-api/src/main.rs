@@ -1292,7 +1292,9 @@ fn constant_time_eq(expected: &[u8], actual: &[u8]) -> bool {
     expected
         .iter()
         .zip(actual)
-        .fold(0_u8, |difference, (left, right)| difference | (left ^ right))
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
         == 0
 }
 
@@ -1353,7 +1355,10 @@ fn app(state: AppState) -> Router {
             get(get_registry_item).delete(delete_registry_item),
         )
         .layer(DefaultBodyLimit::max(MAX_API_BODY_BYTES))
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_api_token));
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_api_token,
+        ));
 
     Router::new()
         .route("/health", get(health))
