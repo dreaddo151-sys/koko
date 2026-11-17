@@ -26,9 +26,19 @@ cargo run -p dread-api
 | `DREAD_DB_PATH` | `data/dread_registry.sqlite3` | SQLite database |
 | `DREAD_SERVICES_CONFIG` | `config/services.toml` | Local service discovery |
 | `DREAD_AGENTS_CONFIG` | `config/agents.toml` | Explicit local agent health probes |
+| `DREAD_API_TOKEN` | required | Bearer token for all `/api/*` routes; at least 32 characters |
+| `DREAD_OPERATOR_ID` | `local-operator` | Server-side identity recorded for approvals |
 | `RUST_LOG` | `info` | Tracing filter |
 
-The API rejects non-loopback bind addresses because authentication/authorization is not implemented. JSON request bodies are limited to 32 MiB.
+Generate a token locally and start the API with:
+
+```bash
+export DREAD_API_TOKEN="$(openssl rand -hex 32)"
+export DREAD_OPERATOR_ID="local-operator"
+cargo run -p dread-api
+```
+
+Never commit the token to Git. Every `/api/*` route requires `Authorization: Bearer $DREAD_API_TOKEN`. If the token is missing, API routes fail closed with HTTP 503; an invalid or missing request token returns HTTP 401. `/health` remains unauthenticated for basic liveness checks. The API still rejects non-loopback bind addresses; bearer authentication does not authorize LAN/public exposure. JSON request bodies are limited to 32 MiB.
 
 ## HTTP API
 
@@ -43,7 +53,7 @@ The API rejects non-loopback bind addresses because authentication/authorization
 | GET | `/api/tasks/{id}` | Read task state |
 | GET | `/api/tasks/{id}/events` | Read ordered task audit events |
 | GET (WebSocket upgrade) | `/api/tasks/{id}/stream?after_sequence=N` | Stream live events and replay persisted history after a sequence cursor |
-| POST | `/api/tasks/{id}/approve` | Record approval; approval alone does not execute |
+| POST | `/api/tasks/{id}/approve` | Record approval using server-configured operator identity; approval alone does not execute |
 | POST | `/api/tasks/{id}/run` | Queue the approved built-in read-only service-discovery task |
 | GET | `/api/tasks/{id}/result` | Read persisted execution result |
 | POST | `/api/tasks/{id}/cancel` | Cancel pending/queued/running task and signal active runner |
@@ -71,7 +81,7 @@ Agent health states distinguish 2xx ONLINE, 3xx REDIRECTED, 4xx REACHABLE, 5xx D
 
 ### Task approval and event-stream boundary
 
-Creating a task creates a durable `pending_approval` record. Approval records a caller-supplied label and reason and changes the state to `approved`; approval alone does not start execution. The explicit `POST /api/tasks/{id}/run` endpoint currently accepts only approved tasks with no capability ID and task type `service_discovery`. That built-in runner performs configured loopback-only HTTP health probes, runs through the bounded execution gate (2 concurrent, 8 admitted by default, one attempt, 120-second timeout), and persists the result for `GET /api/tasks/{id}/result`. Running tasks can be cancelled through the cancellation watch channel. No shell commands, Pstack skills, plugins, imported agents or arbitrary capabilities are executed. Unsupported task types are rejected. The approval label is not authenticated identity; the API remains loopback-only. The worker queue is not yet recovered after process restart, and provider/agent dispatch is not implemented. The WebSocket stream emits committed task events, replays persisted history using `after_sequence`, bounds replay pages and recovers missed notifications from SQLite when a subscriber falls behind. A full browser/client WebSocket handshake and reconnect test remains outstanding.
+Creating a task creates a durable `pending_approval` record. Approval accepts a reason and records the server-configured `DREAD_OPERATOR_ID`; caller-supplied approver names are ignored. Approval alone does not start execution. The explicit `POST /api/tasks/{id}/run` endpoint currently accepts only approved tasks with no capability ID and task type `service_discovery`. That built-in runner performs configured loopback-only HTTP health probes, runs through the bounded execution gate (2 concurrent, 8 admitted by default, one attempt, 120-second timeout), and persists the result for `GET /api/tasks/{id}/result`. Running tasks can be cancelled through the cancellation watch channel. No shell commands, Pstack skills, plugins, imported agents or arbitrary capabilities are executed. Unsupported task types are rejected. The approval label is not authenticated identity; the API remains loopback-only. The worker queue is not yet recovered after process restart, and provider/agent dispatch is not implemented. The WebSocket stream emits committed task events, replays persisted history using `after_sequence`, bounds replay pages and recovers missed notifications from SQLite when a subscriber falls behind. A full browser/client WebSocket handshake and reconnect test remains outstanding.
 
 ## Pstack catalog import
 

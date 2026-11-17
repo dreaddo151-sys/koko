@@ -7,7 +7,11 @@ on:
       - integration/dread-canonical-source-run81
     paths:
       - .github/workflows/dread-canonical-source.yml
-      - dread_universal/**
+      - dread_universal/Cargo.toml
+      - dread_universal/Cargo.lock
+      - dread_universal/crates/**
+      - dread_universal/config/**
+      - dread_universal/scripts/**
       - legacy-reference/**
       - SOURCE_PROVENANCE_RUN81.md
   workflow_dispatch:
@@ -31,7 +35,7 @@ jobs:
       INNER_SHA256: 004bfb598fed41c1024467ff3a354e4bceb09dbbc14f113d5b1998cc2ff9fe50
     steps:
       - name: Checkout triggering branch
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           fetch-depth: 0
           persist-credentials: true

@@ -2,14 +2,14 @@
 
 ## Automated Rust gates — canonical source branch passed
 
-Canonical-source workflow run `44020353017` validated the tracked workspace on `integration/dread-canonical-source-run81` after the bounded task-execution integration, without downloading or reapplying the baseline archive patches:
+Canonical-source workflow run `44021546750` validated the tracked workspace on `integration/dread-canonical-source-run81` after bounded task execution and bearer authentication, without downloading or reapplying the baseline archive patches:
 
 1. Pstack provenance pin/tree and all 60 `files_sha256` entries — PASS
 2. Pstack importer unit tests — PASS, 9 tests
 3. Pstack importer dry-run — PASS, 58 skills and 2 agents, all disabled
 4. `cargo fmt --all -- --check` — PASS
 5. `cargo clippy --workspace --all-targets --locked -- -D warnings` — PASS
-6. `cargo test --workspace --locked` — PASS — 36 Rust tests, including two new task-dispatch/result tests
+6. `cargo test --workspace --locked` — PASS — 38 Rust tests, including task dispatch/result and bearer-authentication tests
 7. `cargo build --workspace --release --locked` — PASS
 
 The canonical branch contains the source at `dread_universal/`; the CI job checked out that branch and ran the gates directly in that directory. Draft PR #3 is open against the feature branch and has not been merged.
@@ -29,7 +29,7 @@ The historical run #77 workflow applied candidate patches to the exact uploaded 
 
 ## Security and behavior gates
 
-- API binds to loopback only until authentication/authorization exists.
+- API binds to loopback only; all `/api/*` routes require a Bearer token; `/health` remains unauthenticated.
 - JSON request body limit: 32 MiB; oversize requests must be rejected, not truncated.
 - Exact-value payload round-trip coverage includes 5 KB, 10 KB and 20 KB.
 - Local service and agent discovery accept explicit-port loopback HTTP URLs only.
@@ -42,7 +42,9 @@ The historical run #77 workflow applied candidate patches to the exact uploaded 
 - The built-in runner performs only configured loopback HTTP service probes through the existing discovery client; no shell, plugin, skill or agent code is executed.
 - Execution uses the bounded gate (2 concurrent, 8 admitted by default, 1 attempt, 120-second timeout); results are persisted at `GET /api/tasks/{id}/result`.
 - Running-task cancellation sends a watch-channel signal; queued/running work is not yet recovered after API process restart.
-- `approved_by` is caller-provided text, not authenticated identity.
+- `DREAD_API_TOKEN` must be configured and at least 32 characters; missing server token configuration fails closed with 503, and missing/invalid request credentials return 401.
+- Approval identity is derived from server-side `DREAD_OPERATOR_ID`; request-supplied approver names are not trusted.
+- Authentication is single-operator bearer-token authentication. Role-based authorization, token rotation and remote-access policy are not implemented; API binding remains loopback-only.
 - Capability imports/records remain disabled by default; no imported code or hooks execute.
 - WebSocket task events are emitted only after the corresponding SQLite transaction commits.
 - WebSocket replay uses `after_sequence`, bounded 1,000-event pages, and SQLite recovery after broadcast-channel lag.
@@ -68,7 +70,7 @@ Run #77 uploaded artifact `DREAD_UNIVERSAL_AGENT_DISCOVERY_FOUNDATION` (artifact
 - End-to-end WebSocket handshake/reconnect using a real client or browser.
 - Hermes/OpenHands/other agent endpoint contracts and provider-specific adapters.
 - Live Pstack API `--apply`, registration persistence and post-import reconciliation.
-- Authentication/authorization and remote-access security.
+- Role-based authorization, token rotation and any future remote-access security review.
 - Durable queue recovery after process restart, cancellation of a live provider task and resource-aware scheduling.
 - Frontend, GPU contention/lease handoff, installer/upgrade/rollback and dual-RTX-3090 acceptance.
 
@@ -80,7 +82,7 @@ The existing Python GPU Supervisor remains the only GPU lease authority. Rust ma
 | Phase | Current evidence | Acceptance still required |
 |---|---|---|
 | 0 Baseline | Historical paths/endpoints and GPU policy documented | Confirm only changed prerequisites; current local Rust toolchain and exact Supervisor adapter contract remain unverified |
-| 1 Rust foundation | Canonical source committed in `dread_universal/`; run `44019266094` passes fmt, Clippy, tests and release build directly from branch | Live non-conflicting workstation health smoke test |
+| 1 Rust foundation | Canonical source committed in `dread_universal/`; run `44021546750` passes fmt, Clippy, 38 tests and release build; loopback Bearer auth verified | Live non-conflicting workstation health smoke test |
 | 2 Service adapters | Generic read-only configured agent health probing | Dedicated Hermes/OpenHands/OpenCode/Ollama/llama.cpp/ComfyUI/DREAD adapters; one read-only request each |
 | 3 Capability registry | Disabled-by-default registry plus pinned Pstack dry-run, 9 tests | Cursor manifest/agent ingestion, compatibility taxonomy, MCP/OpenAPI/CLI inventory and representative provenance checks |
 | 4 Orchestration | Task state/approval audit, event stream, bounded runner integrated with one allowlisted service-discovery task; 36 Rust tests pass | Planner, provider/agent delegation, restart-recoverable queue, result aggregation, provider cancellation and multi-agent end-to-end test |

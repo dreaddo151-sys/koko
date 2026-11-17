@@ -75,8 +75,10 @@ The run applied the candidate patches to the exact uploaded baseline archive bef
 - The existing Python GPU Supervisor remains the sole GPU ownership, VRAM lease and process-lifecycle authority.
 - Rust may communicate only with the local GPU gateway at `127.0.0.1:11500`; it must not call the upstream model server directly or acquire a second GPU lock.
 - Keep the Python Hub and ComfyUI running while Rust features are developed and tested.
-- The Rust API is loopback-only and currently has no authentication. Do not expose it to a LAN or public network.
-- The `approved_by` value is a caller-supplied audit label, not a verified identity. Approval is not an authorization boundary until authentication is added.
+- All `/api/*` routes require a Bearer token from `DREAD_API_TOKEN`; missing server configuration fails closed with 503, and missing/invalid request credentials return 401. `/health` remains unauthenticated.
+- `DREAD_API_TOKEN` must be at least 32 characters. The token is supplied through the process environment and must never be committed to the repository.
+- Approval audit identity is taken from server configuration `DREAD_OPERATOR_ID`, not caller-supplied request data.
+- The API remains loopback-only. This is single-operator bearer authentication, not role-based authorization, token rotation or approval policy for remote access. Do not expose it to a LAN or public network.
 - Agent discovery is read-only. Provider endpoints remain unconfigured until verified on the workstation.
 - OpenCode remains in the master plan as an external system; its dedicated adapter and read-only contract are not yet implemented or verified.
 - No destructive repair, credential change, live service migration or GitHub `main` merge is authorized by this work.
@@ -88,7 +90,7 @@ The run applied the candidate patches to the exact uploaded baseline archive bef
 3. [x] Durable SQLite task lifecycle and approval/cancellation audit history.
 4. [x] Read-only, loopback-only configured agent health discovery.
 5. [x] WebSocket task-event fanout, durable replay cursor and bounded lag recovery (unit/CI verified; client handshake test pending).
-6. [ ] Authentication/authorization before any network exposure or trusted approval identity.
+6. [x] Loopback API Bearer authentication, fail-closed token configuration and server-derived approval identity (CI verified); [ ] role-based authorization, token rotation and any remote-access policy.
 7. [ ] Provider-specific adapters, enabled only after each local endpoint contract is verified.
 8. [x] Pstack pinned metadata importer and disabled-by-default dry-run validation (live API import still pending).
 9. [x] Bounded execution kernel primitive and one allowlisted read-only service-discovery runner integrated with durable task lifecycle (CI verified); [ ] durable queue recovery, priority/resource-aware policy and provider/agent adapters.
@@ -105,7 +107,7 @@ The master architecture plan is the target specification, not a declaration of c
 | Master-plan phase | Status | Evidence / remaining gate |
 |---|---|---|
 | 0 — Baseline | PARTIAL | Historical workstation map exists. Current local Rust/rustup installation, current service states and GPU Supervisor adapter contract have not been revalidated in this GitHub workflow. Do not repeat a full workstation audit. |
-| 1 — Rust foundation | CANONICAL SOURCE / CI PASS | The complete Rust workspace is committed at `dread_universal/` on `integration/dread-canonical-source-run81`; canonical-source run `44019266094` passed formatting, Clippy, workspace tests and optimized release build directly from that branch. A live non-conflicting workstation health smoke test remains outstanding. |
+| 1 — Rust foundation | CANONICAL SOURCE / CI PASS | The complete Rust workspace is committed at `dread_universal/`; run `44021546750` passed formatting, Clippy, 38 Rust tests and optimized release build. Loopback Bearer auth and server-derived approval identity are included. A live non-conflicting workstation health smoke test remains outstanding. |
 | 2 — Existing service adapters | NOT VERIFIED | No completed Hermes, OpenHands, OpenCode, Ollama, llama.cpp gateway, ComfyUI or DREAD Hub adapter contract and representative read-only request is evidenced by this workflow. Agent health discovery is generic configured HTTP probing, not those dedicated adapters. |
 | 3 — Capability registry | PARTIAL | Capability metadata registry and pinned Pstack dry-run/importer tests pass. Full Cursor plugin ingestion, compatibility classification, MCP/OpenAPI/CLI/service inventory and representative sample reconciliation remain outstanding. |
 | 4 — Agent orchestration | PARTIAL | Durable task lifecycle, approval audit, WebSocket stream, bounded runner and one allowlisted read-only service-discovery task pass CI. No planner, provider/agent delegation, durable queue recovery, result aggregation or multi-agent end-to-end test yet. |
