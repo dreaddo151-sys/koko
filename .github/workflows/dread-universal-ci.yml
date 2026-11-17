@@ -40,6 +40,8 @@ jobs:
         run: cargo test --workspace --locked
       - name: Release build
         run: cargo build --workspace --release --locked
+      - name: Validate Ubuntu installer scripts
+        run: bash -n scripts/install-user.sh scripts/configure-user.sh scripts/package-ubuntu.sh
       - name: Python bridge and importer regression tests
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
       - name: Enforce single-owner GPU boundary
