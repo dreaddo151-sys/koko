@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { Activity, AlertCircle, Bot, Check, ChevronRight, Cpu, KeyRound, LockKeyhole, MessageSquare, Play, Plus, RefreshCw, Search, Server, ShieldCheck, TerminalSquare, X } from "lucide-react";
+import { Activity, AlertCircle, Bot, Check, ChevronRight, Cpu, KeyRound, LockKeyhole, LogOut, MessageSquare, Play, Plus, RefreshCw, Search, Server, ShieldCheck, TerminalSquare, X } from "lucide-react";
 
 type Model = { id: string };
 type Task = { id: string; title: string; task_type: string; status: string; created_at: number };
@@ -95,7 +95,7 @@ function App() {
       <div className="side-foot">LOCAL-FIRST CONTROL PLANE<br/>NO REMOTE EXECUTION</div>
     </aside>
     <main>
-      <header className="topbar"><div>DREAD SYSTEM <ChevronRight size={13}/> <b>{page.toUpperCase()}</b></div><div className="topright"><span className={connected?"online":"offline"}><i/>{connected?"API CONNECTED":token?"API OFFLINE":"LOCKED"}</span><button className="icon" onClick={()=>void refresh()}><RefreshCw size={15}/></button></div></header>
+      <header className="topbar"><div>DREAD SYSTEM <ChevronRight size={13}/> <b>{page.toUpperCase()}</b></div><div className="topright"><span className={connected?"online":"offline"}><i/>{connected?"API CONNECTED":token?"API OFFLINE":"LOCKED"}</span><button className="icon" onClick={()=>void refresh()} title="Refresh"><RefreshCw size={15}/></button>{token&&<button className="icon" title="Disconnect and clear token" onClick={()=>{setToken("");setPage("overview");setActive("");setEvents([]);setResult(null);}}><LogOut size={15}/></button>}</div></header>
       <div className="content">
         <div className="heading"><div><label>LOCAL AI OPERATIONS / COMMAND HUB</label><h1>{page==="overview"?"Command overview":page==="tasks"?"Task operations":"Agent directory"}</h1><p>Observe, approve and operate your local AI stack without bypassing its safety boundaries.</p></div><div className="workstation"><i/>DUAL GPU WORKSTATION PROFILE</div></div>
         {!token&&<div className="connect"><LockKeyhole size={21}/><div><b>Unlock local control plane</b><small>API token stays in page memory; it is never written to browser storage.</small></div><div className="token"><KeyRound size={15}/><input type={show?"text":"password"} value={draft} onChange={e=>setDraft(e.target.value)} onKeyDown={e=>e.key==="Enter"&&connect()} placeholder="DREAD_API_TOKEN"/><button className="icon" onClick={()=>setShow(!show)}><Search size={14}/></button><button className="primary" onClick={connect}>Connect</button></div></div>}

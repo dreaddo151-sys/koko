@@ -7,6 +7,8 @@
 
 ## Verified source and CI results
 
+Latest canonical-source workflow run `44070114961` (run #38) passed Pstack pin/provenance, 11 importer tests, Rust formatting, Clippy with warnings denied, 43 Rust tests, optimized release build, React/TypeScript production build, authenticated live Pstack API import/readback/idempotency and source inventory hashing. The operator console build is verified; browser-level live API acceptance and workstation deployment are not.
+
 The canonical-source consolidation is committed on `integration/dread-canonical-source-run81`. GitHub Actions run `44019266094` passed against that committed workspace. The subsequent task-kernel integration also passed the full direct-source quality workflow in run `44020353017`: Pstack provenance/dry-run, nine importer tests, Rust formatting, Clippy with warnings denied, 36 Rust tests, and optimized release build. The branch contains `dread_universal/` as a normal tracked workspace, `legacy-reference/`, historical Cargo manifest backups, and `SOURCE_PROVENANCE_RUN81.md`. Draft integration PR: [#3](https://github.com/dreaddo151-sys/koko/pull/3). This closes the earlier external-archive-only source-of-truth gap; it does not make the platform workstation-ready.
 
 The hardened baseline passed formatting, Clippy with warnings denied, workspace tests and an optimized release build in GitHub Actions run `44002596952`.
@@ -41,6 +43,7 @@ The run applied the candidate patches to the exact uploaded baseline archive bef
   - The runner uses the bounded `dread-orchestrator` gate (default max concurrency 2, max admitted 8, one attempt, 120-second per-attempt timeout). It performs configured loopback-only HTTP health probes; it does not execute shell commands, imported skills, plugins or agent code.
   - Results and lifecycle events are persisted. API CI verifies successful execution, result retrieval, terminal task state and success-event history.
   - This is deliberately narrow: there is no provider/agent delegation, capability-backed runner or priority policy. Startup recovery resumes only queued approved capability-free `service_discovery` tasks. Queued `gpu_chat` work is failed closed after restart to avoid duplicate inference; interrupted `running` tasks are marked failed and never replayed. Unsupported or capability-linked queued work is failed closed.
+- React/TypeScript operator console in `web/`: model discovery, approval-gated GPU chat task creation, task approval/run/cancel, task audit/result inspection and read-only agent status views. The bearer token remains in page memory with a disconnect control; the UI polls authenticated HTTP APIs and does not put credentials in WebSocket URLs. Vite production build passes CI; the UI is not embedded in the Rust API server and live browser/API acceptance remains outstanding.
 - Read-only local agent health discovery at `GET /api/agents`:
   - Reads `config/agents.toml` or `DREAD_AGENTS_CONFIG`.
   - Empty configuration by default; at most 32 entries and unique IDs.
@@ -94,7 +97,7 @@ The run applied the candidate patches to the exact uploaded baseline archive bef
 7. [ ] Provider-specific adapters, enabled only after each local endpoint contract is verified.
 8. [x] Pstack pinned metadata importer, authenticated live API apply, persisted readback, disabled-state verification and idempotent re-import (run `44025427057` passed).
 9. [x] Bounded execution kernel integrated with the durable task lifecycle: read-only service discovery and approval-gated local GPU chat through the existing gateway; fail-closed restart recovery (CI verified); [ ] priority/resource-aware policy and provider/agent adapters.
-10. [ ] React/TypeScript operator UI driven by real API and event state.
+10. [~] React/TypeScript operator console foundation and production build (CI verified); [ ] browser/API acceptance, deployment/embedding and npm lockfile.
 11. [ ] Incremental legacy Python Hub workflow parity, installer/upgrade/rollback, backup/restore tests and dual-RTX-3090 workstation acceptance.
 
 The Python Hub, ComfyUI, Ollama and GPU Supervisor remain separate runtime/reference components. Full Universal Hub parity has not been achieved.
@@ -112,7 +115,7 @@ The master architecture plan is the target specification, not a declaration of c
 | 3 — Capability registry | PARTIAL | Capability metadata registry and pinned Pstack dry-run/importer tests pass. Full Cursor plugin ingestion, compatibility classification, MCP/OpenAPI/CLI/service inventory and representative sample reconciliation remain outstanding. |
 | 4 — Agent orchestration | PARTIAL | Durable task lifecycle, approval audit, authenticated WebSocket replay/live stream, bounded runner with service-discovery and GPU-chat tasks, and fail-closed restart handling pass CI. No planner, provider/agent delegation, priority scheduling, result aggregation or multi-agent end-to-end test yet. |
 | 5 — GPU/resource coordination | NOT VERIFIED | The documented GPU gateway boundary exists, but no Rust adapter to the existing Python GPU Supervisor, resource inventory, lease/handoff test or controlled inference verification is evidenced here. Do not create a second scheduler. |
-| 6 — Modern interface | NOT STARTED / NOT VERIFIED | No React/TypeScript/Tailwind/shadcn frontend or production UI build is evidenced. |
+| 6 — Modern interface | PARTIAL / BUILD VERIFIED | React/TypeScript/Tailwind console with token gate, task controls, model discovery, agent view and event/result polling; Vite production build passes run `44070114961`. No browser-level live API test, embedded serving, committed npm lockfile or workstation deployment yet. |
 | 7 — Diagnostics and controlled repair | NOT STARTED | No diagnosis/repair workflow, simulation, approval-gated patch application, backup/rollback executor or reversible repair test is evidenced. |
 | 8 — Migration and release | NOT READY | CI source candidate is not a workstation release or migration. Feature parity, install/upgrade/rollback, live acceptance and user-approved cutover remain outstanding. |
 

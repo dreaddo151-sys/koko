@@ -103,11 +103,11 @@ npm install
 npm run dev
 ```
 
-Open `http://127.0.0.1:5173` and enter `DREAD_API_TOKEN`. The token is held only in page memory, not browser storage. The UI polls authenticated HTTP endpoints for task, agent and model state; it does not place the bearer token in a WebSocket URL. Run `npm run build` for a production bundle or `npm run preview` to serve that bundle on loopback. The frontend is not yet embedded in the Rust API server.
+Open `http://127.0.0.1:5173` and enter `DREAD_API_TOKEN`. The token is held only in page memory, not browser storage; use Disconnect to clear it from the current tab. The UI polls authenticated HTTP endpoints for task, agent and model state; it does not place the bearer token in a WebSocket URL. Run `npm run build` for a production bundle or `npm run preview` to serve that bundle on loopback. The frontend is not yet embedded in the Rust API server. Direct dependency versions are pinned in `package.json`, but a committed npm lockfile and browser-level API acceptance test remain outstanding.
 
 ## Scope
 
-This is a tested Rust foundation with a canonical tracked source branch, not the complete Universal Hub. WebSocket task-event streaming, read-only agent discovery, disabled-by-default capability metadata, authenticated live Pstack import and idempotency, and approval-gated local GPU chat through the gateway have CI evidence. The bounded orchestration kernel is connected to the durable task API for two reviewed built-in runners. Startup recovery and the authenticated WebSocket handshake/reconnect path are CI verified. Remaining milestones include dedicated provider/agent adapters, React operator UI, legacy Hub parity, Supervisor/resource integration, installer/upgrade/rollback and live dual-RTX-3090 acceptance.
+This is a tested Rust foundation with a canonical tracked source branch, not the complete Universal Hub. WebSocket task-event streaming, read-only agent discovery, disabled-by-default capability metadata, authenticated live Pstack import and idempotency, and approval-gated local GPU chat through the gateway have CI evidence. The bounded orchestration kernel is connected to the durable task API for two reviewed built-in runners. Startup recovery and the authenticated WebSocket handshake/reconnect path are CI verified. Remaining milestones include browser-level UI/API acceptance and deployment integration, dedicated provider/agent adapters, legacy Hub parity, Supervisor/resource integration, installer/upgrade/rollback and live dual-RTX-3090 acceptance.
 
 See [project status](docs/PROJECT_STATUS.md) and [verification gates](docs/VERIFICATION.md).
 

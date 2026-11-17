@@ -11,7 +11,8 @@ Canonical-source workflow run `44068498087` (run #35) validated the tracked work
 5. `cargo clippy --workspace --all-targets --locked -- -D warnings` — PASS
 6. `cargo test --workspace --locked` — PASS — 43 Rust tests, including GPU-chat gateway dispatch/result, unsafe-payload/model-allowlist rejection, bearer authentication, WebSocket handshake/replay/reconnect and startup-recovery tests
 7. `cargo build --workspace --release --locked` — PASS
-8. Authenticated API integration — PASS: unauthenticated capability request returned 401; 58 skills + 2 agents imported; 60 records read back with `disabled` status; second import created 0 and found 60 already present.
+8. React/TypeScript operator console: `npm install --no-audit --no-fund --package-lock=false` and `npm run build` — PASS (Vite production bundle).
+9. Authenticated API integration — PASS: unauthenticated capability request returned 401; 58 skills + 2 agents imported; 60 records read back with `disabled` status; second import created 0 and found 60 already present.
 
 The canonical branch contains the source at `dread_universal/`; the CI job checked out that branch and ran the gates directly in that directory. Draft PR #3 is open against the feature branch and has not been merged.
 
@@ -73,7 +74,7 @@ Run #77 uploaded artifact `DREAD_UNIVERSAL_AGENT_DISCOVERY_FOUNDATION` (artifact
 - Hermes/OpenHands/other agent endpoint contracts and provider-specific adapters.
 - Role-based authorization, token rotation and any future remote-access security review.
 - Priority/resource-aware scheduling, cancellation of a live provider task and provider-specific execution adapters. Startup queue recovery is implemented and covered by the current canonical CI run.
-- Frontend, live GPU contention/lease handoff and dual-RTX-3090 inference, installer/upgrade/rollback and workstation acceptance.
+- Browser-level frontend/API acceptance, UI embedding/serving, live GPU contention/lease handoff and dual-RTX-3090 inference, installer/upgrade/rollback and workstation acceptance.
 
 The existing Python GPU Supervisor remains the only GPU lease authority. Rust may use only its local gateway at `127.0.0.1:11500`; it must not contact the upstream model server directly or acquire a second GPU lock. Do not stop or modify the existing DREAD Hub, ComfyUI, Ollama or GPU Supervisor as part of Rust development.
 
@@ -88,7 +89,7 @@ The existing Python GPU Supervisor remains the only GPU lease authority. Rust ma
 | 3 Capability registry | Disabled-by-default registry plus pinned Pstack dry-run, 11 importer tests | Cursor manifest/agent ingestion, compatibility taxonomy, MCP/OpenAPI/CLI inventory and representative provenance checks |
 | 4 Orchestration | Task state/approval audit, event stream, bounded runner integrated with service-discovery and GPU-chat tasks; fail-closed restart handling is CI verified | Planner, provider/agent delegation, priority scheduling, result aggregation, live provider cancellation and multi-agent end-to-end test |
 | 5 GPU/resources | Existing gateway boundary documented | Python GPU Supervisor adapter, resource discovery, lease ownership and one controlled inference/handoff test |
-| 6 UI | No frontend acceptance evidence | React/TypeScript/Tailwind/shadcn production build and live API/WebSocket interaction |
+| 6 UI | React/TypeScript/Tailwind Vite console production build passes run `44070114961`; token remains in page memory; task and agent views use authenticated polling | Browser-level live API acceptance, WebSocket UI integration, committed npm lockfile, embedding/serving and workstation deployment |
 | 7 Repair | No repair executor acceptance evidence | Diagnose/plan/simulate/approve/apply/monitor/rollback with a safe reversible test |
 | 8 Release | CI candidate artifact only | Self-contained source, installer/upgrade/rollback, feature parity, workstation acceptance and explicit user-approved migration |
 
