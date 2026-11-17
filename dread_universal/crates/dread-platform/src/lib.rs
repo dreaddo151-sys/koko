@@ -63,7 +63,17 @@ fn find_binary(names: &[&str]) -> Option<PathBuf> {
 }
 
 fn run_probe(program: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new(program).args(args).output().ok()?;
+    // Bound diagnostic probes so a stuck driver utility cannot stall profile requests.
+    let output = if let Some(timeout) = find_binary(&["timeout"]) {
+        Command::new(timeout)
+            .args(["--signal=KILL", "5s"])
+            .arg(program)
+            .args(args)
+            .output()
+            .ok()?
+    } else {
+        Command::new(program).args(args).output().ok()?
+    };
     if !output.status.success() {
         return None;
     }
