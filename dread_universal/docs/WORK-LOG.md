@@ -328,3 +328,12 @@ Do not repeat basic GPU enumeration, generic API health or standalone llama.cpp 
 - CI run #509 (`44197296018`) passed all three jobs on code candidate `8c19a5b904fc32c0e811c55ed0d96bb5cd15cc1a`: Rust formatting, strict Clippy, workspace tests including the mission scheduler regressions, release build, installer syntax, portable migration/rollback, Python bridge/importer tests, GPU single-owner guard, React production build, package checksum/content checks, disposable Ubuntu 24.04 `.deb` install, API health, UI, unauthenticated 401 and authenticated host-profile smoke test.
 - Scheduler scope remains deliberately bounded: no priority/resource-aware queue policy, retry/backoff, mission-level aggregation strategy or interrupted-mission recovery has been claimed.
 - No live workstation deployment, service restart, GPU job or media generation was performed.
+
+
+## Priority-ordered independent mission roots — 2026-11-18
+
+- Mission start now queues all other approved, dependency-free root nodes after the operator explicitly starts an approved root. The graph's deterministic priority-aware execution order is preserved for ready-node dispatch.
+- Successful node completion dispatches newly ready approved dependents. Approval arriving after prerequisite completion triggers dispatch. Pending-approval nodes remain held; failures/cancellations block further dispatch. The shared execution semaphore bounds concurrent runners.
+- Added integration coverage proving priority ordering of independent roots and automatic dispatch of all approved roots, in addition to the existing dependency and late-approval tests.
+- Run #520 (`44197777681`) passed all three CI jobs on code candidate `c41ea4b4424c30f1da536305dc0fef7e8f3f4129`: formatting, strict Clippy, Rust tests, release build, installer/migration/rollback tests, Python bridge/importer regressions, GPU single-owner guard, React build and disposable Ubuntu 24.04 package/API/UI/auth/host-profile smoke tests.
+- Still incomplete in mission orchestration: resource-class-aware scheduling, retry/backoff, per-node timeout and provider cancellation propagation, mission-level aggregation policy, and interrupted mission recovery.
