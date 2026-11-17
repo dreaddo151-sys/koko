@@ -104,9 +104,12 @@ jobs:
           set -euo pipefail
           (cd dist/release && sha256sum --check SHA256SUMS)
           dpkg-deb --info dist/release/dread-universal_*.deb
-          tar -tzf dist/release/dread-universal-ubuntu-*.tar.gz | grep -q 'bundle/bin/dread-universal'
-          tar -tzf dist/release/dread-universal-ubuntu-*.tar.gz | grep -q 'bundle/web/dist/index.html'
-          tar -tzf dist/release/dread-universal-ubuntu-*.tar.gz | grep -q 'bundle/scripts/capture-workstation-baseline.sh'
+          archive_listing="$(mktemp)"
+          trap 'rm -f "$archive_listing"' EXIT
+          tar -tzf dist/release/dread-universal-ubuntu-*.tar.gz > "$archive_listing"
+          grep -Fqx 'bundle/bin/dread-universal' "$archive_listing"
+          grep -Fqx 'bundle/web/dist/index.html' "$archive_listing"
+          grep -Fqx 'bundle/scripts/capture-workstation-baseline.sh' "$archive_listing"
       - name: Install and smoke-test packaged API and production console
         working-directory: dread_universal
         run: |
