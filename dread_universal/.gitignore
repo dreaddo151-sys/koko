@@ -1,0 +1,22 @@
+# Rust build output
+/target/
+
+# Web build output and dependencies
+/web/node_modules/
+/web/dist/
+
+# Local runtime state and secrets
+/data/
+/.env
+/.env.*
+!/.env.example
+
+# Local editor/OS files
+.DS_Store
+.idea/
+.vscode/
+
+# Keep recovery copies outside the tracked source tree
+*.backup
+*.backup_*
+*.orig
