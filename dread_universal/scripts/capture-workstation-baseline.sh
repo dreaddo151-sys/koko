@@ -61,11 +61,25 @@ OUT="$BASE_DIR/workstation-baseline-$STAMP.txt"
     printf '%s: HTTP %s\n' "$label" "${code:-unreachable}"
   done
   printf '\n=== NVIDIA DEVICES / LINK STATE ===\n'
+  printf 'PCIe current link values are a point-in-time snapshot; idle power-saving downshift is expected. Validate link generation/width only under sustained GPU load.\n'
   if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi -L 2>&1 || true
     nvidia-smi --query-gpu=name,memory.total,memory.used,driver_version,pcie.link.gen.current,pcie.link.width.current,pcie.link.gen.max,pcie.link.width.max,utilization.gpu,temperature.gpu,power.draw --format=csv,noheader,nounits 2>&1 || true
   else
     printf 'nvidia-smi: not found\n'
+  fi
+  printf '\n=== CUDA TOOLKIT DISCOVERY ===\n'
+  for nvcc in "$(command -v nvcc 2>/dev/null || true)" /usr/local/cuda/bin/nvcc /usr/local/cuda-*/bin/nvcc; do
+    if [[ -n "$nvcc" && -x "$nvcc" ]]; then
+      printf 'Compiler: %s\n' "$nvcc"
+      "$nvcc" --version 2>&1 || true
+    fi
+  done
+  printf '\n=== PHYSICAL BLOCK DEVICES (INCLUDING UNMOUNTED DISKS) ===\n'
+  if command -v lsblk >/dev/null 2>&1; then
+    lsblk --json --bytes --output NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS,MODEL,TRAN 2>&1 || true
+  else
+    printf 'lsblk: not found\n'
   fi
   printf '\n=== WORKSPACE / DATA FILESYSTEM CAPACITY ===\n'
   if [[ -d "$WORKSPACE" ]]; then
