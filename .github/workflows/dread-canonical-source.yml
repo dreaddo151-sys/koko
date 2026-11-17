@@ -175,6 +175,10 @@ jobs:
         run: cargo test --workspace --locked
         working-directory: dread_universal
 
+      - name: Optimized release build
+        run: cargo build --workspace --release --locked
+        working-directory: dread_universal
+
       - name: Exercise authenticated Pstack API apply and idempotent re-import
         shell: bash
         working-directory: dread_universal
