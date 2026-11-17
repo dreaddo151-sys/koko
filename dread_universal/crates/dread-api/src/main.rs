@@ -886,8 +886,7 @@ async fn disable_capability(
         manifest.remove("approval");
     }
 
-    let updated =
-        serde_json::to_string(&record).map_err(|e| ApiError::internal(e.to_string()))?;
+    let updated = serde_json::to_string(&record).map_err(|e| ApiError::internal(e.to_string()))?;
     conn.execute(
         "UPDATE capabilities SET record_json = ?2 WHERE id = ?1",
         params![id, updated],
