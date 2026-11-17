@@ -14,6 +14,7 @@ axum = { workspace = true, features = ["http1", "tokio"] }
 dread-discovery = { path = "../dread-discovery" }
 reqwest = { workspace = true, features = ["stream"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["fs", "sync"] }
