@@ -1,8 +1,8 @@
 //! Provider-neutral contracts for PROJECT DREAD agent adapters and capabilities.
 //!
-//! This crate deliberately contains no provider-specific HTTP clients and performs
-//! no discovery or execution. Concrete adapters must be reviewed and registered
-//! separately; imported capabilities start disabled.
+//! Provider adapters are explicit, loopback-restricted clients and are not
+//! auto-discovered or registered by this crate. Callers must enforce DREAD
+//! approval before task submission; imported capabilities start disabled.
 
 pub mod hermes;
 
