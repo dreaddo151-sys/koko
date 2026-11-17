@@ -111,14 +111,30 @@ pub trait AgentAdapter: Send + Sync {
     fn health<'a>(&'a self) -> AdapterFuture<'a, AgentHealth>;
     fn capabilities<'a>(&'a self) -> AdapterFuture<'a, Vec<AgentCapability>>;
     fn start_task<'a>(&'a self, request: StartTaskRequest) -> AdapterFuture<'a, AgentTask>;
-    fn task_status<'a>(&'a self, task_id: &'a str) -> AdapterFuture<'a, AgentTask>;
+    /// Provider lifecycle methods receive both stable identities. The local
+    /// task ID is returned to DREAD callers; the provider ID is used only for
+    /// the remote API path and must never be substituted for the local ID.
+    fn task_status<'a>(
+        &'a self,
+        task_id: &'a str,
+        provider_task_id: &'a str,
+    ) -> AdapterFuture<'a, AgentTask>;
     fn events<'a>(
         &'a self,
         task_id: &'a str,
+        provider_task_id: &'a str,
         after_sequence: u64,
     ) -> AdapterFuture<'a, Vec<AgentEvent>>;
-    fn cancel_task<'a>(&'a self, task_id: &'a str) -> AdapterFuture<'a, AgentTask>;
-    fn task_result<'a>(&'a self, task_id: &'a str) -> AdapterFuture<'a, AgentTask>;
+    fn cancel_task<'a>(
+        &'a self,
+        task_id: &'a str,
+        provider_task_id: &'a str,
+    ) -> AdapterFuture<'a, AgentTask>;
+    fn task_result<'a>(
+        &'a self,
+        task_id: &'a str,
+        provider_task_id: &'a str,
+    ) -> AdapterFuture<'a, AgentTask>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
