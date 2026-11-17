@@ -113,6 +113,12 @@ struct QueuedTaskRecovery {
 }
 
 #[derive(Debug, Deserialize)]
+struct EnhancePrompt {
+    model: String,
+    prompt: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct CreateTask {
     title: String,
     task_type: String,
@@ -1524,6 +1530,56 @@ async fn gpu_models(State(state): State<AppState>) -> Result<Json<Value>, ApiErr
         .map_err(|e| ApiError::internal(e.to_string()))
 }
 
+async fn enhance_prompt(
+    State(state): State<AppState>,
+    Json(input): Json<EnhancePrompt>,
+) -> Result<Json<Value>, ApiError> {
+    let prompt = input.prompt.trim();
+    if prompt.is_empty() || prompt.len() > 32_768 {
+        return Err(ApiError::bad_request("prompt must contain 1 to 32768 bytes"));
+    }
+    let model = input.model.trim();
+    if model.is_empty() || model.len() > 200 {
+        return Err(ApiError::bad_request("model must contain 1 to 200 characters"));
+    }
+    let supervisor = state.supervisor.as_ref().ok_or_else(|| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        message: "Prompt enhancement requires the authenticated Python GPU Supervisor bridge".into(),
+    })?;
+    let available = state.gpu.models().await.map_err(|error| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        message: format!("llama.cpp model discovery failed: {error}"),
+    })?;
+    if !available.data.iter().any(|item| item.id == model) {
+        return Err(ApiError::bad_request("Requested model is not exposed by the local llama.cpp gateway"));
+    }
+    let request = json!({
+        "model": model,
+        "stream": false,
+        "temperature": 0.2,
+        "max_tokens": 2048,
+        "messages": [
+            {"role": "system", "content": "Improve the user's prompt for clarity, specificity, useful constraints, and measurable output. Preserve the user's intent. Do not answer the prompt. Return only the improved prompt, with no preamble or commentary."},
+            {"role": "user", "content": prompt}
+        ]
+    });
+    let response = supervisor.chat_completion(&request).await.map_err(|error| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        message: format!("Local prompt enhancement failed: {error}"),
+    })?;
+    let enhanced = response.pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 65_536)
+        .ok_or_else(|| ApiError::internal("llama.cpp returned no usable enhanced prompt"))?;
+    Ok(Json(json!({
+        "model": model,
+        "enhanced_prompt": enhanced,
+        "requires_operator_review": true,
+        "note": "The suggestion is not submitted or executed. Review and apply it yourself."
+    })))
+}
+
 async fn gpu_inference(
     State(state): State<AppState>,
     Path(path): Path<String>,
@@ -1610,6 +1666,7 @@ fn app(state: AppState) -> Router {
         .route("/api/gpu/health", get(gpu_health))
         .route("/api/gpu/models", get(gpu_models))
         .route("/api/usage/tokens", get(token_usage))
+        .route("/api/prompt/enhance", axum::routing::post(enhance_prompt))
         .route("/api/tasks", get(list_tasks).post(create_task))
         .route("/api/tasks/{id}", get(get_task))
         .route("/api/tasks/{id}/events", get(task_events))
