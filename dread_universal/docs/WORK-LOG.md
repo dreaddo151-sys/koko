@@ -205,3 +205,17 @@ The current candidate was reviewed against all phases in `MASTER-PLAN.md`. This 
 - Commits for this workstream include `6460d7a`, `84e8f3c`, `52fc561`, `35e47a1`, `53d422c`, `8848381`, `074e784`, `a40037a`, `8c48fb8`, `d701116`, `79d000b`, `ca42feb`, `f40a16d`, `0fefc1e`, `217fb69`, `e0af073`, `1340206`, `d60711a`, `0c1126a`, `9f59e9f`, `14d5ffc`.
 - Current CI validation run #243 (`44155642033`) is still in progress. Do not report packaging, installer rollback, or bridge concurrency tests as passed until this run completes.
 - Remaining packaging gaps: no committed npm lockfile; `.deb` upgrade rollback is not transactional; release checksums are not publisher signatures; clean Ubuntu 24.04 install/upgrade/reboot and user's dual-3090 workstation acceptance are still outstanding.
+
+## 2026-11-17 — PR #12 remaining-phase audit
+
+Reviewed the controlling master plan, agent contract, skills importer, host discovery, task kernel, installer/package scripts, web console and PR metadata against the current feature branch.
+
+- Candidate HEAD: 2418155aaf268b136158c7dd8008aff79efe3aac (after workflow fixes).
+- Corrected CI and release workflow package-script invocation to use Bash explicitly. Commit sequence: CI workflow fix a78c4ff954dd611729c363c0807d336367088319; release workflow fix and current HEAD 2418155aaf268b136158c7dd8008aff79efe3aac.
+- Run #306 (44160690656): web build, formatting, Clippy and Rust tests passed at last poll; release build still running. Remaining steps were not yet evidenced as passed.
+- Concrete provider agent adapters are still absent. The Rust trait is a contract only. Do not claim Hermes/OpenHands/DeerFlow execution.
+- Mission DAG/priority/resource scheduling, complete extension transactions/signatures, full Hub continuity, media artifact pipelines, complete repair policy, signed updater and workstation acceptance remain outstanding.
+- Current audit details and updated phase ledger are appended to MASTER-PLAN.md. It explicitly supersedes stale branch/run/count statements earlier in that document.
+- No Ubuntu workstation commands were run and no live services or user data were changed.
+
+Next safe engineering sequence: wait for run #306 and repair any concrete CI failure; then implement a single bounded provider adapter against a verified local agent API contract, with mocked contract tests and an opt-in live test. In parallel, design Hub integration around the existing Python route inventory rather than replacing it. Do not fabricate agent endpoints or enable imported Pstack code.
