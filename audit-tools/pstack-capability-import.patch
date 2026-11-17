@@ -290,7 +290,7 @@
 +    raise SystemExit(main())
 --- /dev/null
 +++ b/scripts/test_import_pstack_capabilities.py
-@@ -0,1 +1,121 @@
+@@ -0,0 +1,120 @@
 +import json
 +import sys
 +import tempfile
