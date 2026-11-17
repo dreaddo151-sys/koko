@@ -1021,8 +1021,18 @@ async fn execute_gpu_chat(gpu: &GpuGatewayClient, payload: &Value) -> Result<Val
     let response = gpu.post_v1("/v1/chat/completions", &request).await
         .map_err(|error| format!("GPU inference request failed: {error}"))?;
     let status = response.status();
-    let body = response.bytes().await.map_err(|error| format!("Could not read GPU inference response: {error}"))?;
-    if body.len() > 1_048_576 { return Err("GPU inference response exceeds the 1 MiB task-result limit".to_string()); }
+    if response.content_length().is_some_and(|length| length > 1_048_576) {
+        return Err("GPU inference response exceeds the 1 MiB task-result limit".to_string());
+    }
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("Could not read GPU inference response: {error}"))?;
+        if body.len().saturating_add(chunk.len()) > 1_048_576 {
+            return Err("GPU inference response exceeds the 1 MiB task-result limit".to_string());
+        }
+        body.extend_from_slice(&chunk);
+    }
     if !status.is_success() {
         return Err(format!("GPU gateway returned HTTP {}: {}", status.as_u16(), String::from_utf8_lossy(&body)));
     }
