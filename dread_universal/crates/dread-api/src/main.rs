@@ -1525,7 +1525,10 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let recovered_tasks = recover_task_queue(&state)?;
-    info!(recovered_tasks, "Recovered eligible queued tasks; interrupted running tasks were marked failed");
+    info!(
+        recovered_tasks,
+        "Recovered eligible queued tasks; interrupted running tasks were marked failed"
+    );
     info!(address = %addr, database = %db_path, "PROJECT DREAD Universal API listening");
     axum::serve(listener, app(state))
         .with_graceful_shutdown(async {
@@ -1727,7 +1730,12 @@ mod tests {
                 ("queued-safe", "service_discovery", "queued", None),
                 ("running-interrupted", "service_discovery", "running", None),
                 ("queued-unsupported", "arbitrary_command", "queued", None),
-                ("queued-capability", "service_discovery", "queued", Some("pstack.skill")),
+                (
+                    "queued-capability",
+                    "service_discovery",
+                    "queued",
+                    Some("pstack.skill"),
+                ),
             ] {
                 conn.execute(
                     "INSERT INTO tasks (id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, approval_reason, created_at, updated_at)
@@ -1756,7 +1764,11 @@ mod tests {
                 .db
                 .lock()
                 .unwrap()
-                .query_row("SELECT status FROM tasks WHERE id = 'queued-safe'", [], |row| row.get(0))
+                .query_row(
+                    "SELECT status FROM tasks WHERE id = 'queued-safe'",
+                    [],
+                    |row| row.get(0),
+                )
                 .unwrap();
             if status == "completed" {
                 break;
@@ -1766,17 +1778,36 @@ mod tests {
 
         let conn = state.db.lock().unwrap();
         let status: String = conn
-            .query_row("SELECT status FROM tasks WHERE id = 'queued-safe'", [], |row| row.get(0))
+            .query_row(
+                "SELECT status FROM tasks WHERE id = 'queued-safe'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(status, "completed");
 
-        for id in ["running-interrupted", "queued-unsupported", "queued-capability"] {
+        for id in [
+            "running-interrupted",
+            "queued-unsupported",
+            "queued-capability",
+        ] {
             let status: String = conn
-                .query_row("SELECT status FROM tasks WHERE id = ?1", params![id], |row| row.get(0))
+                .query_row(
+                    "SELECT status FROM tasks WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
                 .unwrap();
-            assert_eq!(status, "failed", "task {id} must fail closed during recovery");
+            assert_eq!(
+                status, "failed",
+                "task {id} must fail closed during recovery"
+            );
             let error: String = conn
-                .query_row("SELECT error FROM task_results WHERE task_id = ?1", params![id], |row| row.get(0))
+                .query_row(
+                    "SELECT error FROM task_results WHERE task_id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
                 .unwrap();
             assert!(!error.is_empty());
         }
