@@ -171,29 +171,6 @@
  use dread_gpu::GpuGatewayClient;
  use futures::StreamExt;
  use rusqlite::{Connection, OptionalExtension, Transaction, params};
-@@ -242,7 +262,23 @@
-     })
- }
- 
-+async fn agents() -> Result<Json<Value>, ApiError> {
-+    let config_path =
-+        env::var("DREAD_AGENTS_CONFIG").unwrap_or_else(|_| "config/agents.toml".to_string());
-+
-+    let configured = match load_agents(&config_path) {
-+        Ok(items) => items,
-+        Err(_) if !FsPath::new(&config_path).exists() => Vec::new(),
-+        Err(error) => return Err(ApiError::bad_request(error)),
-+    };
-+
-+    let results = discover_agents(configured).await;
-+    serde_json::to_value(results).map(Json).map_err(|error| {
-+        ApiError::internal(format!("Could not serialize agent discovery results: {error}"))
-+    })
-+}
-+
- async fn list_registry(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-     let conn = db_lock(&state)?;
-     let mut stmt = conn
 --- /dev/null
 +++ b/config/agents.toml
 @@ -0,1 +1,13 @@
