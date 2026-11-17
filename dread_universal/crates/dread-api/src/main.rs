@@ -4866,7 +4866,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(instantiated.status(), StatusCode::ACCEPTED);
-        let body = to_bytes(instantiated.into_body(), usize::MAX).await.unwrap();
+        let body = to_bytes(instantiated.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let result: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(result["item"]["tasks"][0]["node_id"], "high");
         let first_id = result["item"]["tasks"][0]["task_id"].as_str().unwrap();
@@ -4880,7 +4882,9 @@ mod tests {
                         .method("POST")
                         .uri(format!("/api/tasks/{task_id}/approve"))
                         .header("content-type", "application/json")
-                        .body(Body::from(json!({"reason":"approve priority mission"}).to_string()))
+                        .body(Body::from(
+                            json!({"reason":"approve priority mission"}).to_string(),
+                        ))
                         .unwrap(),
                 )
                 .await
