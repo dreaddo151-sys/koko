@@ -233,7 +233,7 @@ mod tests {
     use axum::{
         Json, Router,
         extract::Path,
-        routing::{delete, get, post},
+        routing::{get, post},
     };
     use serde_json::Value;
     use tokio::net::TcpListener;
