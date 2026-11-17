@@ -17,11 +17,16 @@ pub struct GpuDevice {
     pub vendor: String,
     pub name: String,
     pub vram_mib: Option<u64>,
+    pub vram_used_mib: Option<u64>,
+    pub vram_free_mib: Option<u64>,
     pub driver_version: Option<String>,
     pub pcie_link_gen: Option<u32>,
     pub pcie_link_width: Option<u32>,
+    pub pcie_link_gen_max: Option<u32>,
+    pub pcie_link_width_max: Option<u32>,
     pub utilization_percent: Option<u32>,
     pub temperature_c: Option<u32>,
+    pub power_draw_mw: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -70,19 +75,28 @@ fn parse_nvidia_csv(output: &str) -> Vec<GpuDevice> {
         .lines()
         .filter_map(|line| {
             let fields = line.split(',').map(str::trim).collect::<Vec<_>>();
-            if fields.len() < 7 || fields[0].is_empty() {
+            if fields.len() < 12 || fields[0].is_empty() {
                 return None;
             }
             Some(GpuDevice {
                 vendor: "nvidia".into(),
                 name: fields[0].into(),
                 vram_mib: fields[1].parse().ok(),
-                driver_version: (!fields[2].is_empty() && fields[2] != "N/A")
-                    .then(|| fields[2].to_string()),
-                pcie_link_gen: fields[3].parse().ok(),
-                pcie_link_width: fields[4].parse().ok(),
-                utilization_percent: fields[5].parse().ok(),
-                temperature_c: fields[6].parse().ok(),
+                vram_used_mib: fields[2].parse().ok(),
+                vram_free_mib: fields[3].parse().ok(),
+                driver_version: (!fields[4].is_empty() && fields[4] != "N/A")
+                    .then(|| fields[4].to_string()),
+                pcie_link_gen: fields[5].parse().ok(),
+                pcie_link_width: fields[6].parse().ok(),
+                pcie_link_gen_max: fields[7].parse().ok(),
+                pcie_link_width_max: fields[8].parse().ok(),
+                utilization_percent: fields[9].parse().ok(),
+                temperature_c: fields[10].parse().ok(),
+                power_draw_mw: fields[11]
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|watts| watts.is_finite() && *watts >= 0.0)
+                    .map(|watts| (watts * 1000.0).round() as u64),
             })
         })
         .collect()
@@ -92,7 +106,7 @@ fn nvidia_devices(binary: &Path) -> Vec<GpuDevice> {
     if let Some(output) = run_probe(
         binary,
         &[
-            "--query-gpu=name,memory.total,driver_version,pcie.link.gen.current,pcie.link.width.current,utilization.gpu,temperature.gpu",
+            "--query-gpu=name,memory.total,memory.used,memory.free,driver_version,pcie.link.gen.current,pcie.link.width.current,pcie.link.gen.max,pcie.link.width.max,utilization.gpu,temperature.gpu,power.draw",
             "--format=csv,noheader,nounits",
         ],
     ) {
