@@ -173,7 +173,7 @@
  use rusqlite::{Connection, OptionalExtension, Transaction, params};
 --- /dev/null
 +++ b/config/agents.toml
-@@ -0,0 +1,13 @@
+@@ -0,0 +1,12 @@
 +# Explicit local agent health probes only. Empty by default until endpoints are verified.
 +# Every enabled health_url must be an explicit-port loopback HTTP URL.
 +# Discovery performs GET requests only, follows no redirects, and never starts tasks.
