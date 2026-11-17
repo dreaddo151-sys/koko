@@ -3,13 +3,17 @@
 
 from __future__ import annotations
 
+import csv
 import hmac
 import ipaddress
+import io
 import json
 import os
 import runpy
 import signal
+import subprocess
 import threading
+import time
 import urllib.error
 import urllib.request
 from contextlib import AbstractContextManager
@@ -66,6 +70,49 @@ def validate_payload(payload: object) -> dict:
     normalized["stream"] = False
     return normalized
 
+
+def collect_gpu_telemetry() -> tuple[int, dict]:
+    """Read hardware counters only; never acquires a GPU lease or changes GPU state."""
+    fields = [
+        "index", "name", "utilization.gpu", "memory.used", "memory.total",
+        "temperature.gpu", "power.draw", "pcie.link.gen.current", "pcie.link.width.current",
+    ]
+    command = ["nvidia-smi", f"--query-gpu={','.join(fields)}", "--format=csv,noheader,nounits"]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=3, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return 503, {"error": "nvidia-smi telemetry query unavailable"}
+    if result.returncode != 0:
+        return 503, {"error": "nvidia-smi telemetry query failed"}
+    devices = []
+    for row in csv.reader(io.StringIO(result.stdout)):
+        values = [value.strip() for value in row]
+        if len(values) != len(fields):
+            continue
+        def number(value, cast=float):
+            if not value or value.upper() in {"N/A", "[N/A]", "NOT SUPPORTED"}:
+                return None
+            try:
+                return cast(value)
+            except ValueError:
+                return None
+        devices.append({
+            "index": number(values[0], int),
+            "name": values[1],
+            "utilization_percent": number(values[2]),
+            "memory_used_mib": number(values[3]),
+            "memory_total_mib": number(values[4]),
+            "temperature_c": number(values[5]),
+            "power_w": number(values[6]),
+            "pcie_generation": number(values[7], int),
+            "pcie_width": number(values[8], int),
+        })
+    return 200, {
+        "source": "nvidia-smi via Python Supervisor bridge",
+        "read_only": True,
+        "sampled_at_unix_ms": int(time.time() * 1000),
+        "devices": devices,
+    }
 
 class SupervisorBridge:
     def __init__(
@@ -159,8 +206,15 @@ def make_handler(bridge: SupervisorBridge, token: str):
         def do_GET(self):
             if self.path == "/health":
                 self._send(200, {"status": "ok", "supervisor": "configured"})
-            else:
-                self._send(404, {"error": "not found"})
+                return
+            if self.path == "/v1/telemetry":
+                if not self._authorized():
+                    self._send(401, {"error": "invalid bearer token"})
+                    return
+                status, payload = collect_gpu_telemetry()
+                self._send(status, payload)
+                return
+            self._send(404, {"error": "not found"})
 
         def do_POST(self):
             if self.path != "/v1/chat/completions":
