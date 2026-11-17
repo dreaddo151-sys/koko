@@ -9,6 +9,7 @@ The Rust workspace is the portable control plane. GPU ownership remains behind a
 ## Current implementation in this branch
 
 - Rust API, registry, task approval/audit, discovery and GPU gateway client.
+- Read-only host discovery reports OS, architecture, logical CPU threads, known NVIDIA/AMD/Apple GPU metadata and a llama.cpp server executable found in PATH or configured by environment.
 - `DREAD_GPU_GATEWAY_URL` configures the loopback OpenAI-compatible llama.cpp gateway. Default: `http://127.0.0.1:11500`.
 - Active service discovery uses llama.cpp `/api/tags`; Ollama is not an active backend.
 - Pstack scanner discovers `skills/<name>/SKILL.md` and optional `agents/<name>.md`.
@@ -46,7 +47,7 @@ Future remote extension installation must use a signed/pinned manifest, explicit
 | Phase | Deliverable | Acceptance evidence |
 |---|---|---|
 | 1 | Portable Rust core and CI | fmt, Clippy, tests and release build pass on Linux, Windows and macOS |
-| 2 | Host profile discovery | OS, architecture, CPU, RAM, GPU vendor/model/VRAM and available llama.cpp binary are detected without changing the host |
+| 2 | Host profile discovery | OS, architecture, CPU threads, supported GPU vendor/model/VRAM and available llama.cpp binary are detected without changing the host; RAM and additional vendor adapters remain to be added |
 | 3 | Runtime adapters | llama.cpp lifecycle, health, model discovery and shutdown are tested per OS; one GPU owner invariant is enforced |
 | 4 | Installers | Linux shell, Windows PowerShell and macOS package installers create private config, service startup and rollback |
 | 5 | Agent catalog | Known local agent endpoints are probed read-only; adding an agent requires an adapter manifest and explicit enablement |
