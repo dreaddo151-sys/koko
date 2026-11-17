@@ -2990,7 +2990,10 @@ mod tests {
             456,
         );
         assert_eq!(claimed.source_version.as_deref(), Some("operator-version"));
-        assert_eq!(claimed.source_revision.as_deref(), Some("operator-revision"));
+        assert_eq!(
+            claimed.source_revision.as_deref(),
+            Some("operator-revision")
+        );
         assert!(claimed.source_uri.is_none());
     }
 
