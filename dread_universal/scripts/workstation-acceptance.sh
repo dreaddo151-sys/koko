@@ -11,7 +11,7 @@ fail=0
 probe() {
   local label="$1" url="$2" required="$3" code
   code="$(curl --connect-timeout 3 --max-time 8 -sS -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || true)"
-  if [[ "$code" =~ ^2|3 ]]; then printf '[ONLINE]  %-22s HTTP %s\n' "$label" "$code"
+  if [[ "$code" =~ ^[23] ]]; then printf '[ONLINE]  %-22s HTTP %s\n' "$label" "$code"
   else printf '[OFFLINE] %-22s %s\n' "$label" "${code:-no response}"; [[ "$required" == yes ]] && fail=1; fi
 }
 echo "=== PROJECT DREAD READ-ONLY ACCEPTANCE ==="
@@ -19,7 +19,6 @@ echo "No services will be stopped or changed."
 echo
 probe "llama.cpp health" "$LLAMA_URL/health" yes
 probe "llama.cpp models" "$LLAMA_URL/v1/models" yes
-probe "llama.cpp tokenizer" "$LLAMA_URL/tokenize" no
 probe "ComfyUI" "$COMFY_URL/system_stats" yes
 probe "Rust API" "$API_URL/health" no
 probe "GPU Supervisor" "$SUPERVISOR_URL/health" no
