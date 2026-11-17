@@ -293,3 +293,14 @@ Do not repeat basic GPU enumeration, generic API health or standalone llama.cpp 
 - Important boundary: the adapter is not registered into the API's task/mission execution path. It must not be called until a DREAD-approved task lifecycle and provider sandbox/tool permission policy are connected. Hermes server health is not agent execution proof.
 - CI run #389 (`44191004156`) passed all three jobs for candidate `bfa432d51e103e08bb36c77e61695459330c40d0`: Rust formatting, strict Clippy, workspace tests, release build, installer validation, migration/rollback regression, Python bridge/importer tests, single-owner GPU guard, React build, package checksum/content validation and disposable Ubuntu 24.04 package/API/UI/auth smoke tests.
 - No live Hermes server was contacted, no agent task was executed, and no workstation process or file was changed.
+
+
+## Mounted storage discovery — 2026-11-18
+
+- Added a read-only GNU `df` probe to the host profile, with the existing bounded probe timeout and no shell invocation.
+- Added structured mount inventory for persistent and network filesystems: source, filesystem type, mount point, total, used and available MiB. Common pseudo-filesystems (tmpfs, proc, sysfs, overlay, cgroup, squashfs and others) are excluded.
+- Exposed the inventory in the authenticated host-profile API and rendered it in the React host overview.
+- Added a parser regression covering an ext4 root filesystem, an NFS mount, and pseudo-filesystem exclusion.
+- Explicit limitation: this is mounted-filesystem capacity, not physical disk/partition topology, SMART health, RAID state, NVMe diagnostics or storage-controller inventory.
+- CI run #403 (`44192143563`) passed all three jobs for code candidate `78c8d4db95686edfe8fbb5c0bc9b86de42da3d4b`: Rust formatting, strict Clippy, workspace tests (including the storage parser), release build, installer/migration/rollback tests, Python bridge/importer tests, single-owner GPU guard, React production build, package checksum/content verification and disposable Ubuntu 24.04 package/API/UI/auth smoke test.
+- No workstation files or services were read or changed by this CI run.
