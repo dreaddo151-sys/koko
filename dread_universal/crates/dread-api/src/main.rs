@@ -58,7 +58,8 @@ async fn boost_prompt(State(s):State<Arc<AppState>>,Json(q):Json<BoostRequest>)-
 async fn conversation(State(s):State<Arc<AppState>>,Path(id):Path<String>)->Result<Json<Value>,(StatusCode,String)> {
  s.store.conversation_messages(&id,200).map(Json).map_err(internal)
 }
-\nasync fn comfy_status(State(s):State<Arc<AppState>>)->Result<Json<Value>,(StatusCode,String)>{let r=s.http.get(format!("{}/system_stats",s.comfy_url)).send().await.map_err(upstream)?;let status=r.status();let body=r.json::<Value>().await.map_err(upstream)?;if !status.is_success(){return Err((StatusCode::BAD_GATEWAY,body.to_string()));}Ok(Json(body))}
+
+async fn comfy_status(State(s):State<Arc<AppState>>)->Result<Json<Value>,(StatusCode,String)>{let r=s.http.get(format!("{}/system_stats",s.comfy_url)).send().await.map_err(upstream)?;let status=r.status();let body=r.json::<Value>().await.map_err(upstream)?;if !status.is_success(){return Err((StatusCode::BAD_GATEWAY,body.to_string()));}Ok(Json(body))}
 async fn usage(State(s):State<Arc<AppState>>)->Result<Json<Value>,(StatusCode,String)>{s.store.usage_totals().map(Json).map_err(internal)}
 #[derive(Deserialize)]struct NewJob{kind:String,#[serde(default)]payload:Value}
 async fn create_job(State(s):State<Arc<AppState>>,Json(j):Json<NewJob>)->Result<Json<Value>,(StatusCode,String)>{if j.kind.trim().is_empty(){return Err((StatusCode::BAD_REQUEST,"kind is required".into()));}let id=s.store.create_job(&j.kind,&j.payload.to_string()).map_err(internal)?;Ok(Json(json!({"id":id,"status":"queued","note":"metadata queued; execution adapters are not enabled"})))}
