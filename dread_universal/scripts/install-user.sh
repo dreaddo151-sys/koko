@@ -19,8 +19,13 @@ DATA_DIR="$HOME/.local/share/dread-universal"
 UNIT_DIR="$HOME/.config/systemd/user"
 ENV_FILE="$CONFIG_DIR/dread.env"
 SERVICE="dread-universal.service"
+UNIT_FILE="$UNIT_DIR/$SERVICE"
 STAMP="$(date -u +%Y%m%dT%H%M%S%N)"
 BACKUP=""
+ROLLBACK_DIR=""
+ENV_FILE_EXISTED=false
+UNIT_FILE_EXISTED=false
+WAS_ENABLED=false
 
 for command in systemctl openssl curl install dpkg; do
   command -v "$command" >/dev/null 2>&1 || {
@@ -49,9 +54,25 @@ install -d -m 0700 "$CONFIG_DIR" "$DATA_DIR/data" "$UNIT_DIR"
 was_active=false
 install_complete=false
 STAGE=""
+ROLLBACK_DIR="$(mktemp -d "$HOME/.cache/dread-universal-rollback.XXXXXX")"
+chmod 0700 "$ROLLBACK_DIR"
+if [[ -e "$ENV_FILE" ]]; then
+  ENV_FILE_EXISTED=true
+  cp -a -- "$ENV_FILE" "$ROLLBACK_DIR/dread.env"
+fi
+if [[ -e "$UNIT_FILE" ]]; then
+  UNIT_FILE_EXISTED=true
+  cp -a -- "$UNIT_FILE" "$ROLLBACK_DIR/dread-universal.service"
+fi
+if systemctl --user is-enabled --quiet "$SERVICE" 2>/dev/null; then
+  WAS_ENABLED=true
+fi
 cleanup() {
   if [[ -n "${STAGE:-}" && -d "$STAGE" ]]; then
     rm -rf -- "$STAGE"
+  fi
+  if [[ -n "${ROLLBACK_DIR:-}" && -d "$ROLLBACK_DIR" ]]; then
+    rm -rf -- "$ROLLBACK_DIR"
   fi
   if [[ "$was_active" == true && "$install_complete" != true ]]; then
     systemctl --user start "$SERVICE" >/dev/null 2>&1 || true
@@ -120,7 +141,7 @@ fi
 mv -- "$STAGE" "$PREFIX"
 STAGE=""
 
-cat > "$UNIT_DIR/$SERVICE" <<EOF
+cat > "$UNIT_FILE" <<EOF
 [Unit]
 Description=PROJECT DREAD Universal Master Hub
 After=default.target
@@ -152,7 +173,7 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 [Install]
 WantedBy=default.target
 EOF
-chmod 0600 "$UNIT_DIR/$SERVICE"
+chmod 0600 "$UNIT_FILE"
 
 rollback() {
   systemctl --user stop "$SERVICE" >/dev/null 2>&1 || true
@@ -161,14 +182,29 @@ rollback() {
   fi
   if [[ -n "$BACKUP" && -e "$BACKUP" ]]; then
     mv -- "$BACKUP" "$PREFIX"
-    systemctl --user daemon-reload || true
-    if [[ "$was_active" == true ]]; then
-      systemctl --user start "$SERVICE" >/dev/null 2>&1 || true
-    fi
+  fi
+
+  # Restore service metadata and credentials as well as the application tree.
+  # Without this, a failed update could leave the previous binary paired with
+  # a newly generated token file or a newly written systemd unit.
+  if [[ "$ENV_FILE_EXISTED" == true ]]; then
+    install -m 0600 "$ROLLBACK_DIR/dread.env" "$ENV_FILE"
+  else
+    rm -f -- "$ENV_FILE"
+  fi
+  if [[ "$UNIT_FILE_EXISTED" == true ]]; then
+    install -m 0600 "$ROLLBACK_DIR/dread-universal.service" "$UNIT_FILE"
+  else
+    rm -f -- "$UNIT_FILE"
+  fi
+  systemctl --user daemon-reload || true
+  if [[ "$WAS_ENABLED" == true ]]; then
+    systemctl --user enable "$SERVICE" >/dev/null 2>&1 || true
   else
     systemctl --user disable "$SERVICE" >/dev/null 2>&1 || true
-    rm -f -- "$UNIT_DIR/$SERVICE"
-    systemctl --user daemon-reload || true
+  fi
+  if [[ "$was_active" == true ]]; then
+    systemctl --user start "$SERVICE" >/dev/null 2>&1 || true
   fi
   install_complete=true
 }
