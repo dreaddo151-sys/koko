@@ -12,6 +12,8 @@ type Service = { id: string; name: string; role: string; status: string; http_st
 type TokenUsage = { provider: string; prompt_tokens: number; completion_tokens: number; total_tokens: number; measured_responses: number; responses_without_usage: number; note: string };
 type RenderJob = { prompt_id: string; queue_position: number | null; status: string };
 type RenderQueue = { running_count: number; pending_count: number; running: RenderJob[]; pending: RenderJob[]; read_only: boolean };
+type GpuDevice = { index: number; name: string; utilization_percent: number | null; memory_used_mib: number | null; memory_total_mib: number | null; temperature_c: number | null; power_w: number | null; pcie_generation: number | null; pcie_width: number | null };
+type GpuTelemetry = { read_only: boolean; sampled_at_unix_ms: number; devices: GpuDevice[] };
 type Page = "overview" | "tasks" | "agents" | "capabilities" | "models" | "gpu";
 
 async function api<T>(path: string, token: string, init: RequestInit = {}): Promise<T> {
@@ -39,7 +41,7 @@ function Pill({value}:{value:string}) {
 function App() {
   const [token,setToken]=useState(""); const [draft,setDraft]=useState(""); const [show,setShow]=useState(false);
   const [connected,setConnected]=useState(false); const [supervisorOnline,setSupervisorConfigured]=useState(false); const [error,setError]=useState(""); const [busy,setBusy]=useState(false);
-  const [models,setModels]=useState<Model[]>([]); const [model,setModel]=useState(""); const [tokenUsage,setTokenUsage]=useState<TokenUsage|null>(null); const [renderQueue,setRenderQueue]=useState<RenderQueue|null>(null);
+  const [models,setModels]=useState<Model[]>([]); const [model,setModel]=useState(""); const [tokenUsage,setTokenUsage]=useState<TokenUsage|null>(null); const [renderQueue,setRenderQueue]=useState<RenderQueue|null>(null); const [gpuTelemetry,setGpuTelemetry]=useState<GpuTelemetry|null>(null);
   const [tasks,setTasks]=useState<Task[]>([]); const [agents,setAgents]=useState<Agent[]>([]); const [capabilities,setCapabilities]=useState<Capability[]>([]); const [services,setServices]=useState<Service[]>([]);
   const [prompt,setPrompt]=useState(""); const [enhancedPrompt,setEnhancedPrompt]=useState(""); const [enhancing,setEnhancing]=useState(false); const [active,setActive]=useState("");
   const [events,setEvents]=useState<Event[]>([]); const [result,setResult]=useState<Result|null>(null);
@@ -48,11 +50,11 @@ function App() {
   const refresh=useCallback(async()=>{
     if(!token){setConnected(false);return;}
     try{
-      const [health,gpuHealth,ml,tl,al,cl,sv,usage,render]=await Promise.all([
+      const [health,gpuHealth,ml,tl,al,cl,sv,usage,render,telemetry]=await Promise.all([
         api<{status:string}>("/health",""), api<{supervisor_online?:boolean}>("/api/gpu/health",token), api<{data?:Model[]}>("/api/gpu/models",token),
-        api<{items?:Task[]}>("/api/tasks",token), api<{items?:Agent[]} >("/api/agents",token), api<{items?:Capability[]}>("/api/capabilities",token), api<Service[]>("/api/services",token), api<TokenUsage>("/api/usage/tokens",token), api<RenderQueue>("/api/comfyui/monitor",token).catch(()=>null)
+        api<{items?:Task[]}>("/api/tasks",token), api<{items?:Agent[]} >("/api/agents",token), api<{items?:Capability[]}>("/api/capabilities",token), api<Service[]>("/api/services",token), api<TokenUsage>("/api/usage/tokens",token), api<RenderQueue>("/api/comfyui/monitor",token).catch(()=>null), api<GpuTelemetry>("/api/gpu/telemetry",token).catch(()=>null)
       ]);
-      setConnected(health.status==="ok"); setSupervisorConfigured(Boolean(gpuHealth.supervisor_online)); setModels(ml.data??[]); setTasks(tl.items??[]); setAgents(al.items??[]); setCapabilities(cl.items??[]); setServices(sv??[]); setTokenUsage(usage); setRenderQueue(render); setError(""); setLastRefresh(Date.now());
+      setConnected(health.status==="ok"); setSupervisorConfigured(Boolean(gpuHealth.supervisor_online)); setModels(ml.data??[]); setTasks(tl.items??[]); setAgents(al.items??[]); setCapabilities(cl.items??[]); setServices(sv??[]); setTokenUsage(usage); setRenderQueue(render); setGpuTelemetry(telemetry); setError(""); setLastRefresh(Date.now());
     }catch(e){setConnected(false);setError(e instanceof Error?e.message:"API request failed");}
   },[token]);
   useEffect(()=>{void refresh();if(!token)return;const t=window.setInterval(()=>void refresh(),5000);return()=>window.clearInterval(t);},[refresh,token]);
