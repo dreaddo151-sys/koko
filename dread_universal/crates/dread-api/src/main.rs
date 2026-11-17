@@ -2740,12 +2740,6 @@ async fn cancel_task(
         params![id],
     )
     .map_err(|error| ApiError::internal(error.to_string()))?;
-    tx.execute(
-        "UPDATE missions SET status = 'blocked'
-         WHERE id IN (SELECT mission_id FROM mission_tasks WHERE task_id = ?1)",
-        params![id],
-    )
-    .map_err(|error| ApiError::internal(error.to_string()))?;
     let event = append_task_event(
         &tx,
         &id,
