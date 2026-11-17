@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/dread-universal"
-DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/dread-universal"
-UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+CONFIG_DIR="$HOME/.config/dread-universal"
+DATA_DIR="$HOME/.local/share/dread-universal"
+UNIT_DIR="$HOME/.config/systemd/user"
 ENV_FILE="$CONFIG_DIR/dread.env"
 SERVICE="dread-universal.service"
 
