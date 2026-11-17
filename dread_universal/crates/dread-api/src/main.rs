@@ -1,11 +1,6 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    routing::{get, post},
-    Json, Router,
-};
+use axum::{Json, Router, extract::State, http::StatusCode, routing::{get, post}};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{env, sync::Arc, time::Duration};
 
 #[derive(Clone)]
@@ -52,10 +47,7 @@ async fn services(State(state): State<Arc<AppState>>) -> Json<Value> {
     }))
 }
 
-async fn futures_check(
-    client: reqwest::Client,
-    checks: Vec<(&'static str, String)>,
-) -> Vec<Value> {
+async fn futures_check(client: reqwest::Client, checks: Vec<(&'static str, String)>) -> Vec<Value> {
     let mut output = Vec::new();
     for (id, url) in checks {
         let result = match client.get(&url).send().await {
@@ -80,9 +72,7 @@ async fn futures_check(
     output
 }
 
-async fn models(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, (StatusCode, String)> {
+async fn models(State(state): State<Arc<AppState>>) -> Result<Json<Value>, (StatusCode, String)> {
     let url = format!("{}/v1/models", state.llama_url);
     let response = state.http.get(url).send().await.map_err(upstream)?;
     let status = response.status();
@@ -196,8 +186,7 @@ mod tests {
             "127.0.0.1:8765"
         );
         assert_eq!(
-            env::var("DREAD_LLAMA_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:11501".into()),
+            env::var("DREAD_LLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11501".into()),
             "http://127.0.0.1:11501"
         );
     }
