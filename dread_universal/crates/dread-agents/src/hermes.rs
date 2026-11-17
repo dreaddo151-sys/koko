@@ -708,6 +708,133 @@ mod tests {
         assert_eq!(parsed[0].event_type, "run.completed");
     }
 
+    #[tokio::test]
+    async fn hermes_http_lifecycle_preserves_local_and_provider_ids() {
+        use axum::{
+            Json, Router,
+            extract::{Path, State},
+            http::{HeaderMap, StatusCode, header},
+            response::IntoResponse,
+            routing::{get, post},
+        };
+        use serde_json::{Value, json};
+        use std::sync::{Arc, Mutex};
+        use tokio::net::TcpListener;
+
+        type Requests = Arc<Mutex<Vec<Value>>>;
+
+        async fn start_run(
+            State(requests): State<Requests>,
+            headers: HeaderMap,
+            Json(body): Json<Value>,
+        ) -> (StatusCode, Json<Value>) {
+            requests.lock().unwrap().push(json!({
+                "path":"/v1/runs",
+                "authorization":headers.get(header::AUTHORIZATION).and_then(|v|v.to_str().ok()),
+                "idempotency_key":headers.get("idempotency-key").and_then(|v|v.to_str().ok()),
+                "body":body
+            }));
+            (
+                StatusCode::ACCEPTED,
+                Json(json!({"run_id":"run_provider-9","status":"started"})),
+            )
+        }
+
+        async fn read_run(Path(run_id): Path<String>) -> Json<Value> {
+            Json(json!({"run_id":run_id,"status":"completed","output":"verified output"}))
+        }
+
+        async fn stop_run(
+            State(requests): State<Requests>,
+            Path(run_id): Path<String>,
+            headers: HeaderMap,
+        ) -> Json<Value> {
+            requests.lock().unwrap().push(json!({
+                "path":format!("/v1/runs/{run_id}/stop"),
+                "authorization":headers.get(header::AUTHORIZATION).and_then(|v|v.to_str().ok())
+            }));
+            Json(json!({"status":"stopping"}))
+        }
+
+        async fn run_events(Path(run_id): Path<String>) -> impl IntoResponse {
+            assert_eq!(run_id, "run_provider-9");
+            (
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                "event: tool.started\ndata: {\"sequence\":1,\"tool\":\"terminal\"}\n\n",
+            )
+        }
+
+        async fn capabilities() -> Json<Value> {
+            Json(json!({"features":{
+                "run_submission":true,
+                "run_status":true,
+                "run_events_sse":true,
+                "run_stop":true
+            }}))
+        }
+
+        let requests: Requests = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/health", get(|| async { Json(json!({"status":"ok"})) }))
+            .route("/v1/capabilities", get(capabilities))
+            .route("/v1/runs", post(start_run))
+            .route("/v1/runs/{run_id}", get(read_run))
+            .route("/v1/runs/{run_id}/events", get(run_events))
+            .route("/v1/runs/{run_id}/stop", post(stop_run))
+            .with_state(Arc::clone(&requests));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let adapter = HermesApiAdapter::new(
+            &format!("http://{address}"),
+            "test-api-key-that-is-long-enough",
+            "Hermes test",
+        )
+        .unwrap();
+        let capabilities = adapter.capabilities().await.unwrap();
+        assert_eq!(capabilities.len(), 1);
+        assert_eq!(capabilities[0].id, "hermes.run");
+
+        let started = adapter
+            .start_task(StartTaskRequest {
+                task_id: "dread-task-42".into(),
+                capability_id: "hermes.run".into(),
+                input: json!({"input":"inspect the approved workspace"}),
+                idempotency_key: "dread-task-42".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(started.task_id, "dread-task-42");
+        let provider_id = started.provider_task_id.as_deref().unwrap();
+        assert_eq!(provider_id, "run_provider-9");
+
+        let status = adapter.task_status("dread-task-42", provider_id).await.unwrap();
+        assert_eq!(status.task_id, "dread-task-42");
+        assert_eq!(status.provider_task_id.as_deref(), Some(provider_id));
+        assert_eq!(status.state, AgentTaskState::Succeeded);
+
+        let events = adapter.events("dread-task-42", provider_id, 0).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].task_id, "dread-task-42");
+        assert_eq!(events[0].sequence, 1);
+
+        let cancelled = adapter.cancel_task("dread-task-42", provider_id).await.unwrap();
+        assert_eq!(cancelled.task_id, "dread-task-42");
+        let result = adapter.task_result("dread-task-42", provider_id).await.unwrap();
+        assert_eq!(result.task_id, "dread-task-42");
+        assert_eq!(result.result.unwrap()["output"], "verified output");
+
+        let recorded = requests.lock().unwrap();
+        let create = recorded.iter().find(|item| item["path"] == "/v1/runs").unwrap();
+        assert_eq!(create["authorization"], "Bearer test-api-key-that-is-long-enough");
+        assert_eq!(create["idempotency_key"], "dread-task-42");
+        assert_eq!(create["body"]["input"], "inspect the approved workspace");
+        assert!(recorded.iter().any(|item| item["path"] == "/v1/runs/run_provider-9/stop"));
+    }
+
     #[test]
     fn parses_sse_lifecycle_and_filters_replayed_sequences() {
         let body = "event: tool.started\ndata: {\"sequence\":1,\"tool\":\"terminal\"}\n\nevent: run.completed\ndata: {\"sequence\":2,\"output\":\"done\"}\n\n";
