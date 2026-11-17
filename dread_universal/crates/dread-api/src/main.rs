@@ -982,7 +982,7 @@ fn validate_gpu_chat_payload(payload: &Value) -> Result<(), String> {
     if object.keys().any(|key| {
         !matches!(
             key.as_str(),
-            "model" | "messages" | "temperature" | "max_tokens"
+            "model" | "messages" | "temperature" | "max_tokens" | "stream"
         )
     }) {
         return Err("gpu_chat payload contains unsupported fields".to_string());
@@ -1029,6 +1029,11 @@ fn validate_gpu_chat_payload(payload: &Value) -> Result<(), String> {
     }
     if total_content_bytes > 1_048_576 {
         return Err("gpu_chat total message content exceeds 1 MiB".to_string());
+    }
+    if let Some(stream) = object.get("stream") {
+        if stream.as_bool() != Some(false) {
+            return Err("gpu_chat supports non-streaming inference only".to_string());
+        }
     }
     if let Some(temperature) = object.get("temperature") {
         temperature
