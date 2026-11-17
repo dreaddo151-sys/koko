@@ -85,7 +85,10 @@ impl GpuSupervisorClient {
             .await
             .context("Python GPU Supervisor telemetry request failed")?;
         let status = response.status();
-        if response.content_length().is_some_and(|length| length > 1_048_576) {
+        if response
+            .content_length()
+            .is_some_and(|length| length > 1_048_576)
+        {
             anyhow::bail!("GPU telemetry response exceeds the 1 MiB limit");
         }
         let mut body = Vec::new();
