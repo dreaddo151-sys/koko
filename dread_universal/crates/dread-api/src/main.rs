@@ -1473,16 +1473,23 @@ mod tests {
         broadcast::Receiver<TaskEvent>,
         tokio::task::JoinHandle<()>,
     ) {
-        test_app_with_auth_mode(false).await
+        test_app_with_auth_mode(false, Some("test-token".to_string())).await
     }
 
     async fn test_app_with_auth() -> (Router, tokio::task::JoinHandle<()>) {
-        let (router, _receiver, server) = test_app_with_auth_mode(true).await;
+        let (router, _receiver, server) =
+            test_app_with_auth_mode(true, Some("test-token".to_string())).await;
+        (router, server)
+    }
+
+    async fn test_app_with_unconfigured_auth() -> (Router, tokio::task::JoinHandle<()>) {
+        let (router, _receiver, server) = test_app_with_auth_mode(true, None).await;
         (router, server)
     }
 
     async fn test_app_with_auth_mode(
         auth_required: bool,
+        api_token: Option<String>,
     ) -> (
         Router,
         broadcast::Receiver<TaskEvent>,
@@ -1512,7 +1519,7 @@ mod tests {
                 events,
                 execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
                 cancellations: Arc::new(Mutex::new(HashMap::new())),
-                api_token: Some("test-token".to_string()),
+                api_token,
                 operator_id: "test-operator".to_string(),
                 auth_required,
             }),
@@ -1578,6 +1585,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(valid.status(), StatusCode::OK);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn api_fails_closed_when_bearer_token_is_not_configured() {
+        let (router, server) = test_app_with_unconfigured_auth().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         server.abort();
     }
 
@@ -1721,6 +1744,7 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let approved: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(approved["item"]["status"], "approved");
+        assert_eq!(approved["item"]["approved_by"], "test-operator");
         assert_eq!(approved["execution_started"], false);
 
         let response = router
