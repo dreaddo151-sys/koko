@@ -53,7 +53,7 @@ cd web
 npm run dev
 ```
 
-Open `http://127.0.0.1:5173`; Vite proxies API calls to `127.0.0.1:8765`. The token stays in page memory. Production installation must serve compiled assets without requiring Vite; that gate is not yet complete.
+Open `http://127.0.0.1:5173`; Vite proxies API calls to `127.0.0.1:8765`. The token stays in page memory. The API serves the compiled console from `DREAD_WEB_ROOT` (default `web/dist`) on the same loopback origin; Vite is only needed for development. The static-file handler rejects path traversal and symlinks.
 
 ## Runtime configuration
 
