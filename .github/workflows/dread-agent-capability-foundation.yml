@@ -59,6 +59,7 @@ jobs:
           grep -q 'name = "dread-agents"' Cargo.lock
           test -f crates/dread-agents/src/lib.rs
           grep -q 'api/capabilities' crates/dread-api/src/main.rs
+          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/agent-capability-clippy-fix.patch"
 
       - name: Install stable Rust, rustfmt and Clippy
         run: |
