@@ -97,7 +97,7 @@ jobs:
         run: bash -n scripts/install-user.sh scripts/configure-user.sh scripts/package-ubuntu.sh scripts/capture-workstation-baseline.sh
       - name: Assemble Ubuntu deb and portable bundle
         working-directory: dread_universal
-        run: scripts/package-ubuntu.sh
+        run: bash scripts/package-ubuntu.sh
       - name: Verify package checksums and contents
         working-directory: dread_universal
         run: |
