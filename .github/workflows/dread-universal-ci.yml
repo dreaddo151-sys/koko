@@ -1,0 +1,64 @@
+name: DREAD Universal CI
+
+on:
+  push:
+    branches: ["main", "foundation/**", "work/**", "feature/**"]
+    paths:
+      - "dread_universal/**"
+      - ".github/workflows/dread-universal-ci.yml"
+  pull_request:
+    paths:
+      - "dread_universal/**"
+      - ".github/workflows/dread-universal-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dread-universal-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: dread_universal
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify formatting
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: Release build
+        run: cargo build --workspace --release --locked
+
+  web:
+    name: Web console
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dread_universal/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: dread_universal/web/package.json
+      - name: Install pinned direct dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Build console
+        run: npm run build
