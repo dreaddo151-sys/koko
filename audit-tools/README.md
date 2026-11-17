@@ -70,6 +70,13 @@ Agent health states distinguish 2xx ONLINE, 3xx REDIRECTED, 4xx REACHABLE, 5xx D
 
 Creating a task only creates a durable `pending_approval` record. Approval records a caller-supplied approver label and reason, and changes the state to `approved`; it does not start a worker, invoke an agent or execute commands. The approver label is not authenticated identity. The stream uses bounded replay pages and recovers missed notifications from SQLite when a subscriber falls behind. A full browser/client WebSocket handshake test is still outstanding. There is no task executor or provider dispatch yet.
 
+
+## Pstack catalog import
+
+The catalog pins Pstack `0.15.43` (commit `2f87c854fe3e2fcda44ca86b46ede35aad3c46b7`, subtree `71d8e1d1d718e2149dc43b2535618064f29cba6b`, MIT): 58 skills and 2 agents. The bundled `integrations/pstack-upstream` copy is version `0.15.42` and is not accepted as the pinned source.
+
+First run `scripts/import-pstack.sh` to fetch and verify the exact catalog commit/tree. It records the pinned revision and per-file SHA-256 hashes. Then run `python3 scripts/import_pstack_capabilities.py` for validation/dry-run. Only add `--apply` when the loopback Rust API is running and metadata registration is intended. Existing entries must be confirmed disabled. This importer records metadata only: it never executes skill contents, agents, hooks or scripts.
+
 ## GPU ownership and service safety
 
 The Python GPU Supervisor remains the only GPU ownership, VRAM lease and process-lifecycle authority. Rust may call only the local gateway at `127.0.0.1:11500`; it must not call the upstream model server directly or acquire a second GPU lock. Keep the Python Hub and ComfyUI running while Rust development continues.
