@@ -1,5 +1,7 @@
 #[cfg(test)]
 use axum::body::Body;
+#[cfg(test)]
+use futures::StreamExt;
 use axum::{
     Json, Router,
     extract::{
