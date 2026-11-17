@@ -15,6 +15,7 @@ axum.workspace = true
 dread-discovery = { path = "../dread-discovery" }
 dread-agents = { path = "../dread-agents" }
 dread-skills = { path = "../dread-skills" }
+dread-platform = { path = "../dread-platform" }
 dread-gpu = { path = "../dread-gpu" }
 dread-orchestrator = { path = "../dread-orchestrator" }
 futures.workspace = true
