@@ -40,6 +40,10 @@ jobs:
           cd "$WORKSPACE"
           patch --batch --forward -p0 < "$GITHUB_WORKSPACE/audit-tools/discovery-hardening.patch"
           patch --batch --forward -p0 < "$GITHUB_WORKSPACE/audit-tools/gpu-api-hardening.patch"
+          patch --batch --forward -p0 < "$GITHUB_WORKSPACE/audit-tools/docs.patch"
+          cp "$GITHUB_WORKSPACE/audit-tools/PROJECT_STATUS.md" "$WORKSPACE/docs/PROJECT_STATUS.md"
+          bash -n "$WORKSPACE/scripts/import-pstack.sh"
+          python3 -m json.tool "$WORKSPACE/integrations/pstack/catalog.json" > /dev/null
 
       - name: Install stable Rust, rustfmt and Clippy
         run: |
@@ -67,3 +71,22 @@ jobs:
       - name: Optimized release build
         run: cargo build --workspace --release --locked
         working-directory: ${{ env.WORKSPACE }}
+
+      - name: Package complete source bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dread-final"
+          cp -a "$RUNNER_TEMP/dread-source/tmp/dread_zip_check/DREAD-UNIVERSAL" "$RUNNER_TEMP/dread-final/"
+          cp -a "$RUNNER_TEMP/dread-source/tmp/dread_zip_check/legacy-reference" "$RUNNER_TEMP/dread-final/"
+          cd "$RUNNER_TEMP/dread-final"
+          zip -qr "$RUNNER_TEMP/DREAD_UNIVERSAL_HARDENED.zip" DREAD-UNIVERSAL legacy-reference
+          sha256sum "$RUNNER_TEMP/DREAD_UNIVERSAL_HARDENED.zip"
+
+      - name: Upload verified source package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: DREAD_UNIVERSAL_HARDENED
+          path: ${{ runner.temp }}/DREAD_UNIVERSAL_HARDENED.zip
+          if-no-files-found: error
+          retention-days: 7
