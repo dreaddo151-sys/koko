@@ -66,9 +66,6 @@ jobs:
           grep -q 'api/tasks' crates/dread-api/src/main.rs
           grep -q 'task_events' crates/dread-api/src/main.rs
           patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/agent-readonly-discovery.patch"
-          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/task-websocket-stream.patch"
-          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/task-websocket-replay.patch"
-          grep -q '/api/tasks/{id}/stream' crates/dread-api/src/main.rs
           python3 - "$WORKSPACE/crates/dread-api/src/main.rs" <<'PY'
           from pathlib import Path
           import sys
@@ -115,13 +112,20 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Resolve WebSocket dependencies and refresh lockfile
-        run: cargo check --workspace
-        working-directory: ${{ env.WORKSPACE }}
-
       - name: Format workspace
         run: cargo fmt --all
         working-directory: ${{ env.WORKSPACE }}
+
+      - name: Apply reconnectable WebSocket task-event stream
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/task-websocket-stream.patch"
+          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/task-websocket-replay.patch"
+          grep -q '/api/tasks/{id}/stream' crates/dread-api/src/main.rs
+          cargo fmt --all
+          cargo check --workspace
 
       - name: Verify formatting
         run: cargo fmt --all -- --check
