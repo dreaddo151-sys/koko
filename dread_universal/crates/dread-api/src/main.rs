@@ -1689,6 +1689,7 @@ mod tests {
         http::Request,
         routing::post,
     };
+    #[cfg(test)]
     use futures::StreamExt;
     use serde_json::json;
     use tokio::net::TcpListener;
