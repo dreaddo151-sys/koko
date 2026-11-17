@@ -206,6 +206,9 @@ pub struct MissionNode {
     #[serde(default)]
     pub priority: u8,
     pub task_type: String,
+    /// JSON payload passed to the reviewed task runner after operator approval.
+    #[serde(default)]
+    pub payload: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -326,18 +329,21 @@ mod tests {
                     depends_on: vec!["build".into()],
                     priority: 250,
                     task_type: "report".into(),
+                    payload: Value::Null,
                 },
                 MissionNode {
                     id: "audit".into(),
                     depends_on: vec![],
                     priority: 20,
                     task_type: "audit".into(),
+                    payload: Value::Null,
                 },
                 MissionNode {
                     id: "build".into(),
                     depends_on: vec![],
                     priority: 1,
                     task_type: "build".into(),
+                    payload: Value::Null,
                 },
             ],
         };
@@ -356,6 +362,7 @@ mod tests {
                 depends_on: vec!["absent".into()],
                 priority: 0,
                 task_type: "x".into(),
+                payload: Value::Null,
             }],
         };
         assert_eq!(
@@ -374,6 +381,7 @@ mod tests {
                     depends_on: vec!["b".into()],
                     priority: 0,
                     task_type: "x".into(),
+                    payload: Value::Null,
                 },
                 MissionNode {
                     id: "b".into(),
