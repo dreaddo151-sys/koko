@@ -45,7 +45,7 @@ async fn boost_prompt(State(s):State<Arc<AppState>>,Json(q):Json<BoostRequest>)-
  // Lossless normalization only: preserve wording and order; collapse repeated horizontal
  // whitespace and excessive blank lines. No semantic deletion or invented instructions.
  let normalized=q.prompt.lines().map(|line|line.split_whitespace().collect::<Vec<_>>().join(" "))
-  .collect::<Vec<_>>().join("\\n").trim().to_string();
+  .collect::<Vec<_>>().join("\n").trim().to_string();
  let boosted_tokens=tokenize_text(&s,&normalized).await?;
  let budget=q.max_tokens.unwrap_or(usize::MAX);
  Ok(Json(json!({"original_prompt":q.prompt,"boosted_prompt":normalized,
