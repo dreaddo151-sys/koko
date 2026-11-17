@@ -42,8 +42,8 @@ jobs:
           patch --batch --forward -p0 < "$GITHUB_WORKSPACE/audit-tools/gpu-api-hardening.patch"
           cd "$WORKSPACE/.."
           awk '
-            /^--- dread_universal\\/integrations\\/pstack\\/README.md$/ { skip=1 }
-            /^--- dread_universal\\/scripts\\/import-pstack.sh$/ { skip=0 }
+            index($0, "--- dread_universal/integrations/pstack/README.md") == 1 { skip=1 }
+            index($0, "--- dread_universal/scripts/import-pstack.sh") == 1 { skip=0 }
             !skip { print }
           ' "$GITHUB_WORKSPACE/audit-tools/docs.patch" | patch --batch --forward -p0
           cp "$GITHUB_WORKSPACE/audit-tools/PSTACK_README.md" "$WORKSPACE/integrations/pstack/README.md"
