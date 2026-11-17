@@ -50,8 +50,11 @@ jobs:
           test -s dist/release/SHA256SUMS
           sha256sum --check dist/release/SHA256SUMS
           dpkg-deb --info dist/release/dread-universal_*.deb
-          tar -tzf dist/release/dread-universal-ubuntu-*.tar.gz | grep -q 'bundle/bin/dread-universal'
-          tar -tzf dist/release/dread-universal-ubuntu-*.tar.gz | grep -q 'bundle/web/dist/index.html'
+          archive_listing="$(mktemp)"
+          trap 'rm -f "$archive_listing"' EXIT
+          tar -tzf dist/release/dread-universal-ubuntu-*.tar.gz > "$archive_listing"
+          grep -Fqx 'bundle/bin/dread-universal' "$archive_listing"
+          grep -Fqx 'bundle/web/dist/index.html' "$archive_listing"
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag_name || github.ref_name }}
