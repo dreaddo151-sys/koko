@@ -35,7 +35,7 @@
 +echo "Imported to $DEST; pinned commit/tree recorded; no imported code was executed."
 --- /dev/null
 +++ b/scripts/import_pstack_capabilities.py
-@@ -0,0 +1,252 @@
+@@ -0,0 +1,260 @@
 +#!/usr/bin/env python3
 +"""Import pinned Pstack metadata into DREAD's disabled-by-default capability registry.
 +
@@ -231,10 +231,18 @@
 +        return exc.code, parsed
 +
 +
-+def _require_disabled_existing(body: dict | None, capability_id: str) -> None:
++def _require_disabled_existing(body: dict | None, record: dict[str, Any]) -> None:
++    capability_id = record["id"]
 +    item = body.get("item") if isinstance(body, dict) else None
 +    if not isinstance(item, dict) or item.get("status") != "disabled":
 +        raise ImportErrorSafe(f"Existing capability {capability_id} is not confirmed disabled; refusing to overwrite or skip it")
++    existing_provenance = item.get("provenance")
++    expected_provenance = record["provenance"]
++    if not isinstance(existing_provenance, dict) or any(
++        existing_provenance.get(key) != expected_provenance.get(key)
++        for key in ("source_name", "source_revision")
++    ):
++        raise ImportErrorSafe(f"Existing capability {capability_id} has different provenance; refusing to overwrite or skip it")
 +
 +
 +def apply_records(records: list[dict[str, Any]], api_base: str) -> tuple[int, int]:
@@ -245,7 +253,7 @@
 +        item_url = f"{base}/api/capabilities/{urllib.parse.quote(record['id'], safe='.-_')}"
 +        status, body = _request(opener, item_url, "GET")
 +        if status == 200:
-+            _require_disabled_existing(body, record["id"])
++            _require_disabled_existing(body, record)
 +            skipped += 1
 +            continue
 +        if status != 404:
@@ -257,7 +265,7 @@
 +            existing_status, existing_body = _request(opener, item_url, "GET")
 +            if existing_status != 200:
 +                raise ImportErrorSafe(f"Capability conflict could not be safely verified for {record['id']}")
-+            _require_disabled_existing(existing_body, record["id"])
++            _require_disabled_existing(existing_body, record)
 +            skipped += 1
 +        else:
 +            raise ImportErrorSafe(f"Capability import failed for {record['id']}: HTTP {status} {body}")
@@ -290,7 +298,7 @@
 +    raise SystemExit(main())
 --- /dev/null
 +++ b/scripts/test_import_pstack_capabilities.py
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,126 @@
 +import json
 +import sys
 +import tempfile
@@ -400,10 +408,16 @@
 +        with self.assertRaises(importer.ImportErrorSafe):
 +            importer.validate_loopback_api_url("http://127.0.0.1/api")
 +
-+    def test_existing_capability_must_be_disabled(self):
-+        importer._require_disabled_existing({"item": {"status": "disabled"}}, "pstack.skill.example")
++    def test_existing_capability_must_be_disabled_and_match_provenance(self):
++        record = {"id": "pstack.skill.example", "provenance": {"source_name": "Pstack", "source_revision": "a" * 40}}
++        existing = {"item": {"status": "disabled", "provenance": {"source_name": "Pstack", "source_revision": "a" * 40}}}
++        importer._require_disabled_existing(existing, record)
++        enabled = {"item": {"status": "enabled", "provenance": existing["item"]["provenance"]}}
 +        with self.assertRaises(importer.ImportErrorSafe):
-+            importer._require_disabled_existing({"item": {"status": "enabled"}}, "pstack.skill.example")
++            importer._require_disabled_existing(enabled, record)
++        stale = {"item": {"status": "disabled", "provenance": {"source_name": "Pstack", "source_revision": "b" * 40}}}
++        with self.assertRaises(importer.ImportErrorSafe):
++            importer._require_disabled_existing(stale, record)
 +
 +    def test_redirects_are_not_followed(self):
 +        self.assertIsNone(importer.NoRedirect().redirect_request(None, None, 302, "Found", {}, "http://example.com"))
