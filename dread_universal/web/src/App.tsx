@@ -9,6 +9,7 @@ type Event = { sequence: number; event_type: string; actor: string; created_at: 
 type Result = { result?: unknown; error?: string | null; attempts?: number; elapsed_ms?: number };
 type Capability = { id: string; name: string; kind: string; description: string; version?: string | null; license?: string | null; compatibility: string; dependencies: string[]; adapter?: string | null; status: string; provenance: { source_name: string; source_version?: string | null } };
 type Service = { id: string; name: string; role: string; status: string; http_status?: number | null; latency_ms?: number; summary?: string | null; detail?: string };
+type TokenUsage = { provider: string; prompt_tokens: number; completion_tokens: number; total_tokens: number; measured_responses: number; responses_without_usage: number; note: string };
 type Page = "overview" | "tasks" | "agents" | "capabilities" | "models" | "gpu";
 
 async function api<T>(path: string, token: string, init: RequestInit = {}): Promise<T> {
@@ -36,7 +37,7 @@ function Pill({value}:{value:string}) {
 function App() {
   const [token,setToken]=useState(""); const [draft,setDraft]=useState(""); const [show,setShow]=useState(false);
   const [connected,setConnected]=useState(false); const [supervisorOnline,setSupervisorConfigured]=useState(false); const [error,setError]=useState(""); const [busy,setBusy]=useState(false);
-  const [models,setModels]=useState<Model[]>([]); const [model,setModel]=useState("");
+  const [models,setModels]=useState<Model[]>([]); const [model,setModel]=useState(""); const [tokenUsage,setTokenUsage]=useState<TokenUsage|null>(null);
   const [tasks,setTasks]=useState<Task[]>([]); const [agents,setAgents]=useState<Agent[]>([]); const [capabilities,setCapabilities]=useState<Capability[]>([]); const [services,setServices]=useState<Service[]>([]);
   const [prompt,setPrompt]=useState(""); const [active,setActive]=useState("");
   const [events,setEvents]=useState<Event[]>([]); const [result,setResult]=useState<Result|null>(null);
@@ -45,11 +46,11 @@ function App() {
   const refresh=useCallback(async()=>{
     if(!token){setConnected(false);return;}
     try{
-      const [health,gpuHealth,ml,tl,al,cl,sv]=await Promise.all([
+      const [health,gpuHealth,ml,tl,al,cl,sv,usage]=await Promise.all([
         api<{status:string}>("/health",""), api<{supervisor_online?:boolean}>("/api/gpu/health",token), api<{data?:Model[]}>("/api/gpu/models",token),
-        api<{items?:Task[]}>("/api/tasks",token), api<{items?:Agent[]} >("/api/agents",token), api<{items?:Capability[]}>("/api/capabilities",token), api<Service[]>("/api/services",token)
+        api<{items?:Task[]}>("/api/tasks",token), api<{items?:Agent[]} >("/api/agents",token), api<{items?:Capability[]}>("/api/capabilities",token), api<Service[]>("/api/services",token), api<TokenUsage>("/api/usage/tokens",token)
       ]);
-      setConnected(health.status==="ok"); setSupervisorConfigured(Boolean(gpuHealth.supervisor_online)); setModels(ml.data??[]); setTasks(tl.items??[]); setAgents(al.items??[]); setCapabilities(cl.items??[]); setServices(sv??[]); setError(""); setLastRefresh(Date.now());
+      setConnected(health.status==="ok"); setSupervisorConfigured(Boolean(gpuHealth.supervisor_online)); setModels(ml.data??[]); setTasks(tl.items??[]); setAgents(al.items??[]); setCapabilities(cl.items??[]); setServices(sv??[]); setTokenUsage(usage); setError(""); setLastRefresh(Date.now());
     }catch(e){setConnected(false);setError(e instanceof Error?e.message:"API request failed");}
   },[token]);
   useEffect(()=>{void refresh();if(!token)return;const t=window.setInterval(()=>void refresh(),5000);return()=>window.clearInterval(t);},[refresh,token]);
@@ -82,7 +83,7 @@ function App() {
     try{await api(`/api/tasks/${task.id}/${verb}`,token,{method:"POST",body:verb==="approve"?JSON.stringify({reason:"Approved in DREAD Universal Console"}):undefined});await refresh();setActive(task.id);}
     catch(e){setError(e instanceof Error?e.message:`Task ${verb} failed`);}finally{setBusy(false);}
   };
-  const disconnect=()=>{setToken("");setDraft("");setPage("overview");setActive("");setEvents([]);setResult(null);setTasks([]);setAgents([]);setCapabilities([]);setModels([]);setServices([]);setModel("");setConnected(false);setSupervisorConfigured(false);};
+  const disconnect=()=>{setToken("");setDraft("");setPage("overview");setActive("");setEvents([]);setResult(null);setTasks([]);setAgents([]);setCapabilities([]);setModels([]);setServices([]);setModel("");setTokenUsage(null);setConnected(false);setSupervisorConfigured(false);};
   const activeTask=tasks.find(x=>x.id===active);
   const nav:[Page,string,ReactNode,string][]=[
     ["overview","Command deck",<Activity/>,"01"],["gpu","GPU telemetry",<Gauge/>,"02"],["models","Model arsenal",<Layers3/>,"03"],["agents","Agent network",<Bot/>,"04"],["tasks","Mission queue",<Workflow/>,"05"],["capabilities","Pstack registry",<ShieldCheck/>,"06"]
@@ -106,6 +107,7 @@ function App() {
           <Metric icon={<Activity/>} label="ACTIVE MISSIONS" value={String(stats.active).padStart(2,"0")} detail={`${stats.pending} AWAITING OPERATOR APPROVAL`} tone="violet"/>
           <Metric icon={<Layers3/>} label="LOCAL MODEL POOL" value={String(models.length).padStart(2,"0")} detail="DISCOVERED VIA GPU GATEWAY" tone="cyan"/>
           <Metric icon={<Radio/>} label="SERVICE UPLINKS" value={String(onlineServices).padStart(2,"0")} detail={`${services.length} CONFIGURED / READ-ONLY PROBES`} tone="green"/>
+          <Metric icon={<Activity/>} label="TOKENS / MEASURED" value={tokenUsage?tokenUsage.total_tokens.toLocaleString():"—"} detail={tokenUsage?`${tokenUsage.prompt_tokens.toLocaleString()} PROMPT / ${tokenUsage.completion_tokens.toLocaleString()} COMPLETION`:"NO PROVIDER USAGE REPORTED"} tone="violet"/>
         </div>
         {page==="overview"&&<div className="command-grid">
           <section className="panel gpu-strip"><PanelTitle icon={<Gauge/>} title="DUAL GPU ARRAY" meta="TELEMETRY SOURCE REQUIRED"/><div className="gpu-pair"><GpuCard index="GPU 0" title="RTX 3090" locked={!supervisorOnline}/><GpuCard index="GPU 1" title="RTX 3090" locked={!supervisorOnline}/></div><div className="telemetry-note"><Activity size={13}/> Utilization, VRAM, temperature and power readings are not exposed by the current API. No synthetic values are displayed.</div><button className="link" onClick={()=>setPage("gpu")}>OPEN GPU TELEMETRY <ChevronRight size={14}/></button></section>
