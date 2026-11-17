@@ -13,7 +13,7 @@ use dread_agents::{CapabilityKind, CapabilityProvenance, CapabilityRecord, Capab
 use dread_discovery::{discover, discover_agents, load_agents, load_services};
 use dread_gpu::{GpuGatewayClient, GpuSupervisorClient};
 use dread_orchestrator::{ExecutionConfig, ExecutionError, ExecutionGate};
-use dread_platform::detect_host;
+use dread_platform::cached_host_profile;
 use dread_skills::{
     discover_agent_profiles, discover_skills, load_agent_profile_context, load_skill_context,
 };
@@ -262,7 +262,7 @@ fn db_lock(state: &AppState) -> Result<std::sync::MutexGuard<'_, Connection>, Ap
 }
 
 async fn system_profile() -> Json<dread_platform::HostProfile> {
-    Json(detect_host())
+    Json(cached_host_profile())
 }
 
 async fn health() -> Json<Value> {
