@@ -52,20 +52,6 @@
  struct TaskEvent {
      task_id: String,
      sequence: u64,
-@@ -245,13 +247,11 @@
- async fn agents() -> Result<Json<Value>, ApiError> {
-     let config_path =
-         env::var("DREAD_AGENTS_CONFIG").unwrap_or_else(|_| "config/agents.toml".to_string());
--
-     let configured = match load_agents(&config_path) {
-         Ok(items) => items,
-         Err(_) if !FsPath::new(&config_path).exists() => Vec::new(),
-         Err(error) => return Err(ApiError::bad_request(error)),
-     };
--
-     let results = discover_agents(configured).await;
-     serde_json::to_value(results).map(Json).map_err(|error| {
-         ApiError::internal(format!(
 @@ -466,7 +466,7 @@
      payload: &Value,
      actor: &str,
@@ -270,7 +256,7 @@
      Ok(Json(json!({"item": task, "execution_started": false})))
  }
  
-@@ -819,6 +950,7 @@
+@@ -819,5 +950,6 @@
          .route("/api/tasks/{id}", get(get_task))
          .route("/api/tasks/{id}/events", get(task_events))
 +        .route("/api/tasks/{id}/stream", get(task_event_stream))
@@ -302,7 +288,7 @@
          let mock = Router::new()
              .route("/health", get(mock_health))
              .route("/v1/models", get(mock_models))
-@@ -938,13 +1076,41 @@
+@@ -938,14 +1076,42 @@
          let gpu = GpuGatewayClient::new(format!("http://{address}")).unwrap();
          let db = open_database(":memory:").unwrap();
  
