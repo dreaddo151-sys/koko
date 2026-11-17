@@ -46,7 +46,7 @@ jobs:
           path: dread_universal/target/release/dread-universal
           if-no-files-found: error
       - name: Validate Ubuntu installer scripts
-        run: bash -n scripts/install-user.sh scripts/configure-user.sh scripts/package-ubuntu.sh scripts/test_install_user.sh
+        run: bash -n scripts/install-user.sh scripts/configure-user.sh scripts/package-ubuntu.sh scripts/test_install_user.sh scripts/capture-workstation-baseline.sh
       - name: Test portable install migration and rollback
         working-directory: dread_universal
         run: bash scripts/test_install_user.sh
@@ -94,7 +94,7 @@ jobs:
           path: dread_universal/web/dist
       - name: Validate installer scripts
         working-directory: dread_universal
-        run: bash -n scripts/install-user.sh scripts/configure-user.sh scripts/package-ubuntu.sh
+        run: bash -n scripts/install-user.sh scripts/configure-user.sh scripts/package-ubuntu.sh scripts/capture-workstation-baseline.sh
       - name: Assemble Ubuntu deb and portable bundle
         working-directory: dread_universal
         run: scripts/package-ubuntu.sh
