@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: dread-agent-capability-foundation
+  group: dread-task-approval-foundation
   cancel-in-progress: true
 
 jobs:
@@ -60,6 +60,9 @@ jobs:
           test -f crates/dread-agents/src/lib.rs
           grep -q 'api/capabilities' crates/dread-api/src/main.rs
           patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/agent-capability-clippy-fix.patch"
+          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/task-lifecycle-approval.patch"
+          grep -q 'api/tasks' crates/dread-api/src/main.rs
+          grep -q 'task_events' crates/dread-api/src/main.rs
 
       - name: Install stable Rust, rustfmt and Clippy
         run: |
@@ -97,13 +100,13 @@ jobs:
           cp -a "$RUNNER_TEMP/dread-source/tmp/dread_zip_check/legacy-reference" "$RUNNER_TEMP/dread-final/"
           rm -rf "$RUNNER_TEMP/dread-final/DREAD-UNIVERSAL/dread_universal/target"
           cd "$RUNNER_TEMP/dread-final"
-          zip -qr "$RUNNER_TEMP/DREAD_UNIVERSAL_AGENT_FOUNDATION.zip" DREAD-UNIVERSAL legacy-reference
-          sha256sum "$RUNNER_TEMP/DREAD_UNIVERSAL_AGENT_FOUNDATION.zip"
+          zip -qr "$RUNNER_TEMP/DREAD_UNIVERSAL_TASK_APPROVAL_FOUNDATION.zip" DREAD-UNIVERSAL legacy-reference
+          sha256sum "$RUNNER_TEMP/DREAD_UNIVERSAL_TASK_APPROVAL_FOUNDATION.zip"
 
       - name: Upload verified candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: DREAD_UNIVERSAL_AGENT_FOUNDATION
-          path: ${{ runner.temp }}/DREAD_UNIVERSAL_AGENT_FOUNDATION.zip
+          name: DREAD_UNIVERSAL_TASK_APPROVAL_FOUNDATION
+          path: ${{ runner.temp }}/DREAD_UNIVERSAL_TASK_APPROVAL_FOUNDATION.zip
           if-no-files-found: error
           retention-days: 7
