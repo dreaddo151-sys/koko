@@ -76,7 +76,7 @@ jobs:
           if insertion in source[start:]:
               raise SystemExit("Agent route already exists in production router")
           position = source.index(route, start)
-          source = source[:position] + route + "\\n" + insertion + source[position + len(route):]
+          source = source[:position] + route + "\n" + insertion + source[position + len(route):]
           path.write_text(source)
           PY
           grep -q 'api/agents' crates/dread-api/src/main.rs
