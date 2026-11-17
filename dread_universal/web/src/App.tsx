@@ -10,6 +10,8 @@ type Result = { result?: unknown; error?: string | null; attempts?: number; elap
 type Capability = { id: string; name: string; kind: string; description: string; version?: string | null; license?: string | null; compatibility: string; dependencies: string[]; adapter?: string | null; status: string; provenance: { source_name: string; source_version?: string | null } };
 type Service = { id: string; name: string; role: string; status: string; http_status?: number | null; latency_ms?: number; summary?: string | null; detail?: string };
 type TokenUsage = { provider: string; prompt_tokens: number; completion_tokens: number; total_tokens: number; measured_responses: number; responses_without_usage: number; note: string };
+type RenderJob = { prompt_id: string; queue_position: number | null; status: string };
+type RenderQueue = { running_count: number; pending_count: number; running: RenderJob[]; pending: RenderJob[]; read_only: boolean };
 type Page = "overview" | "tasks" | "agents" | "capabilities" | "models" | "gpu";
 
 async function api<T>(path: string, token: string, init: RequestInit = {}): Promise<T> {
@@ -37,7 +39,7 @@ function Pill({value}:{value:string}) {
 function App() {
   const [token,setToken]=useState(""); const [draft,setDraft]=useState(""); const [show,setShow]=useState(false);
   const [connected,setConnected]=useState(false); const [supervisorOnline,setSupervisorConfigured]=useState(false); const [error,setError]=useState(""); const [busy,setBusy]=useState(false);
-  const [models,setModels]=useState<Model[]>([]); const [model,setModel]=useState(""); const [tokenUsage,setTokenUsage]=useState<TokenUsage|null>(null);
+  const [models,setModels]=useState<Model[]>([]); const [model,setModel]=useState(""); const [tokenUsage,setTokenUsage]=useState<TokenUsage|null>(null); const [renderQueue,setRenderQueue]=useState<RenderQueue|null>(null);
   const [tasks,setTasks]=useState<Task[]>([]); const [agents,setAgents]=useState<Agent[]>([]); const [capabilities,setCapabilities]=useState<Capability[]>([]); const [services,setServices]=useState<Service[]>([]);
   const [prompt,setPrompt]=useState(""); const [enhancedPrompt,setEnhancedPrompt]=useState(""); const [enhancing,setEnhancing]=useState(false); const [active,setActive]=useState("");
   const [events,setEvents]=useState<Event[]>([]); const [result,setResult]=useState<Result|null>(null);
@@ -46,11 +48,11 @@ function App() {
   const refresh=useCallback(async()=>{
     if(!token){setConnected(false);return;}
     try{
-      const [health,gpuHealth,ml,tl,al,cl,sv,usage]=await Promise.all([
+      const [health,gpuHealth,ml,tl,al,cl,sv,usage,render]=await Promise.all([
         api<{status:string}>("/health",""), api<{supervisor_online?:boolean}>("/api/gpu/health",token), api<{data?:Model[]}>("/api/gpu/models",token),
-        api<{items?:Task[]}>("/api/tasks",token), api<{items?:Agent[]} >("/api/agents",token), api<{items?:Capability[]}>("/api/capabilities",token), api<Service[]>("/api/services",token), api<TokenUsage>("/api/usage/tokens",token)
+        api<{items?:Task[]}>("/api/tasks",token), api<{items?:Agent[]} >("/api/agents",token), api<{items?:Capability[]}>("/api/capabilities",token), api<Service[]>("/api/services",token), api<TokenUsage>("/api/usage/tokens",token), api<RenderQueue>("/api/comfyui/monitor",token).catch(()=>null)
       ]);
-      setConnected(health.status==="ok"); setSupervisorConfigured(Boolean(gpuHealth.supervisor_online)); setModels(ml.data??[]); setTasks(tl.items??[]); setAgents(al.items??[]); setCapabilities(cl.items??[]); setServices(sv??[]); setTokenUsage(usage); setError(""); setLastRefresh(Date.now());
+      setConnected(health.status==="ok"); setSupervisorConfigured(Boolean(gpuHealth.supervisor_online)); setModels(ml.data??[]); setTasks(tl.items??[]); setAgents(al.items??[]); setCapabilities(cl.items??[]); setServices(sv??[]); setTokenUsage(usage); setRenderQueue(render); setError(""); setLastRefresh(Date.now());
     }catch(e){setConnected(false);setError(e instanceof Error?e.message:"API request failed");}
   },[token]);
   useEffect(()=>{void refresh();if(!token)return;const t=window.setInterval(()=>void refresh(),5000);return()=>window.clearInterval(t);},[refresh,token]);
@@ -120,6 +122,7 @@ function App() {
         </div>
         {page==="overview"&&<div className="command-grid">
           <section className="panel gpu-strip"><PanelTitle icon={<Gauge/>} title="DUAL GPU ARRAY" meta="TELEMETRY SOURCE REQUIRED"/><div className="gpu-pair"><GpuCard index="GPU 0" title="RTX 3090" locked={!supervisorOnline}/><GpuCard index="GPU 1" title="RTX 3090" locked={!supervisorOnline}/></div><div className="telemetry-note"><Activity size={13}/> Utilization, VRAM, temperature and power readings are not exposed by the current API. No synthetic values are displayed.</div><button className="link" onClick={()=>setPage("gpu")}>OPEN GPU TELEMETRY <ChevronRight size={14}/></button></section>
+          <section className="panel render-panel"><PanelTitle icon={<Play/>} title="COMFYUI RENDER MONITOR" meta="READ-ONLY / 5 SEC REFRESH"/><div className="render-summary"><div><b>{renderQueue?renderQueue.running_count:"—"}</b><small>RUNNING</small></div><div><b>{renderQueue?renderQueue.pending_count:"—"}</b><small>PENDING</small></div></div>{renderQueue?.running.length?renderQueue.running.map(job=><div className="row" key={job.prompt_id}><div><b>{job.prompt_id.slice(0,12)}</b><small>Active ComfyUI prompt</small></div><Pill value="RUNNING"/></div>):<Empty text={renderQueue?"No active render.":"ComfyUI monitor unavailable; verify the local runtime."}/ >}{renderQueue?.pending.slice(0,5).map(job=><div className="row" key={job.prompt_id}><div><b>{job.prompt_id.slice(0,12)}</b><small>Queue position {job.queue_position??"—"}</small></div><Pill value="PENDING"/></div>)}</section>
           <section className="panel system-panel"><PanelTitle icon={<Workflow/>} title="SYSTEM SYNAPSE" meta="LIVE SERVICE MAP"/><div className="synapse"><div className="syn-node hub-node"><span className="node-core"><Activity size={18}/></span><b>RUST CORE</b><small>{connected?"API CONNECTED":"AWAITING LINK"}</small></div><div className="syn-branches"><div className="syn-branch"><span className="syn-wire"/><div className="syn-node"><Cpu size={17}/><b>GPU SUPERVISOR</b><small>{supervisorOnline?"AUTHENTICATED":"LOCKED / :11502"}</small></div></div><div className="syn-branch"><span className="syn-wire"/><div className="syn-node"><Server size={17}/><b>COMFYUI RUNTIME</b><small>{comfy?.status??"NOT DISCOVERED"}</small></div></div><div className="syn-branch"><span className="syn-wire"/><div className="syn-node"><Bot size={17}/><b>AGENT FABRIC</b><small>{agents.length} CONFIGURED / READ ONLY</small></div></div></div></div><div className="system-foot"><span><i className="legend-online"/>ONLINE</span><span><i className="legend-locked"/>LOCKED / NOT CONFIGURED</span><span><i className="legend-line"/>DISCOVERY LINK</span></div></section>
           <section className="panel queue-panel"><PanelTitle icon={<Workflow/>} title="MISSION QUEUE" meta="5 SEC REFRESH"/><TaskList tasks={tasks.slice(0,5)} active={active} select={setActive} action={action} busy={busy}/><button className="link" onClick={()=>setPage("tasks")}>OPEN MISSION CONTROL <ChevronRight size={14}/></button></section>
           <section className="panel service-panel"><PanelTitle icon={<Radio/>} title="LOCAL SERVICE MATRIX" meta="READ-ONLY"/>{services.length?services.map(x=><div className="row" key={x.id}><div><b>{x.name}</b><small>{x.role} · {x.latency_ms??"—"} ms</small></div><Pill value={x.status}/></div>):<Empty text="Connect to load configured local services."/>}</section>
