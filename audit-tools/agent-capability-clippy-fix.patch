@@ -1,0 +1,28 @@
+diff --git a/crates/dread-agents/src/lib.rs b/crates/dread-agents/src/lib.rs
+index 9631fe2..0000000 100644
+--- a/crates/dread-agents/src/lib.rs
++++ b/crates/dread-agents/src/lib.rs
+@@ -134,21 +134,17 @@ pub trait AgentAdapter: Send + Sync {
+ }
+ 
+-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "snake_case")]
+ pub enum CapabilityStatus {
+     Discovered,
+     ReviewRequired,
++    #[default]
+     Disabled,
+     Approved,
+     Enabled,
+     Rejected,
+ }
+ 
+-impl Default for CapabilityStatus {
+-    fn default() -> Self {
+-        Self::Disabled
+-    }
+-}
+-
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub struct CapabilityProvenance {
