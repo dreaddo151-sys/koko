@@ -187,6 +187,11 @@ rollback() {
   # Restore service metadata and credentials as well as the application tree.
   # Without this, a failed update could leave the previous binary paired with
   # a newly generated token file or a newly written systemd unit.
+  # Disable the failed unit before removing its unit file; systemd may no
+  # longer resolve the unit name after daemon-reload if this was a first install.
+  if [[ "$WAS_ENABLED" != true ]]; then
+    systemctl --user disable "$SERVICE" >/dev/null 2>&1 || true
+  fi
   if [[ "$ENV_FILE_EXISTED" == true ]]; then
     install -m 0600 "$ROLLBACK_DIR/dread.env" "$ENV_FILE"
   else
@@ -200,8 +205,6 @@ rollback() {
   systemctl --user daemon-reload || true
   if [[ "$WAS_ENABLED" == true ]]; then
     systemctl --user enable "$SERVICE" >/dev/null 2>&1 || true
-  else
-    systemctl --user disable "$SERVICE" >/dev/null 2>&1 || true
   fi
   if [[ "$was_active" == true ]]; then
     systemctl --user start "$SERVICE" >/dev/null 2>&1 || true
