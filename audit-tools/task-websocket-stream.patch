@@ -52,7 +52,7 @@
  struct TaskEvent {
      task_id: String,
      sequence: u64,
-@@ -466,7 +466,7 @@
+@@ -464,7 +466,7 @@
      payload: &Value,
      actor: &str,
      created_at: u64,
@@ -61,7 +61,7 @@
      let payload_json = serde_json::to_string(payload)
          .map_err(|e| ApiError::internal(format!("Could not encode task event: {e}")))?;
      tx.execute(
-@@ -476,7 +476,19 @@
+@@ -474,7 +476,19 @@
          params![task_id, event_type, payload_json, actor, created_at],
      )
      .map_err(|e| ApiError::internal(e.to_string()))?;
@@ -82,7 +82,7 @@
  }
  
  fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
-@@ -535,7 +547,7 @@
+@@ -533,7 +547,7 @@
          params![id, title, task_type, input.capability_id, payload_json, now],
      )
      .map_err(|e| ApiError::internal(e.to_string()))?;
@@ -91,7 +91,7 @@
          &tx,
          &id,
          "task_created",
-@@ -544,6 +556,7 @@
+@@ -542,6 +556,7 @@
          now,
      )?;
      tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
@@ -99,7 +99,7 @@
  
      Ok((
          StatusCode::CREATED,
-@@ -622,6 +635,122 @@
+@@ -620,6 +635,142 @@
      Ok(Json(json!({"items": items, "count": items.len()})))
  }
  
@@ -126,7 +126,7 @@
 +    }
 +    let mut stmt = conn.prepare(
 +        "SELECT sequence, event_type, payload_json, actor, created_at
-+         FROM task_events WHERE task_id = ?1 AND sequence > ?2 ORDER BY sequence",
++         FROM task_events WHERE task_id = ?1 AND sequence > ?2 ORDER BY sequence LIMIT 1000",
 +    ).map_err(|e| ApiError::internal(e.to_string()))?;
 +    let rows = stmt.query_map(params![task_id, after_sequence], |row| {
 +        let encoded: String = row.get(2)?;
@@ -144,6 +144,30 @@
 +        events.push(row.map_err(|e| ApiError::internal(e.to_string()))?);
 +    }
 +    Ok(events)
++}
++
++async fn send_event_pages(
++    socket: &mut WebSocket,
++    state: &AppState,
++    task_id: &str,
++    last_sequence: &mut u64,
++) -> Result<(), String> {
++    loop {
++        let events = load_task_events_after(state, task_id, *last_sequence)
++            .map_err(|error| error.message)?;
++        let page_len = events.len();
++        for event in events {
++            *last_sequence = (*last_sequence).max(event.sequence);
++            let text = serde_json::to_string(&event).map_err(|error| error.to_string())?;
++            socket
++                .send(Message::Text(text.into()))
++                .await
++                .map_err(|error| error.to_string())?;
++        }
++        if page_len < 1000 {
++            return Ok(());
++        }
++    }
 +}
 +
 +async fn task_event_stream(
@@ -176,6 +200,11 @@
 +            return;
 +        }
 +    }
++    if let Err(message) = send_event_pages(&mut socket, &state, &task_id, &mut last_sequence).await {
++        let text = json!({"error": message}).to_string();
++        let _ = socket.send(Message::Text(text.into())).await;
++        return;
++    }
 +
 +    loop {
 +        tokio::select! {
@@ -197,19 +226,10 @@
 +                    }
 +                    Ok(_) => {}
 +                    Err(broadcast::error::RecvError::Lagged(_)) => {
-+                        match load_task_events_after(&state, &task_id, last_sequence) {
-+                            Ok(events) => {
-+                                for event in events {
-+                                    last_sequence = last_sequence.max(event.sequence);
-+                                    let Ok(text) = serde_json::to_string(&event) else { continue };
-+                                    if socket.send(Message::Text(text.into())).await.is_err() { return; }
-+                                }
-+                            }
-+                            Err(error) => {
-+                                let text = json!({"error": error.message}).to_string();
-+                                let _ = socket.send(Message::Text(text.into())).await;
-+                                break;
-+                            }
++                        if let Err(message) = send_event_pages(&mut socket, &state, &task_id, &mut last_sequence).await {
++                            let text = json!({"error": message}).to_string();
++                            let _ = socket.send(Message::Text(text.into())).await;
++                            break;
 +                        }
 +                    }
 +                    Err(broadcast::error::RecvError::Closed) => break,
@@ -222,7 +242,7 @@
  async fn approve_task(
      State(state): State<AppState>,
      Path(id): Path<String>,
-@@ -663,7 +792,7 @@
+@@ -661,7 +812,7 @@
              message: "Task is not awaiting approval".into(),
          });
      }
@@ -231,7 +251,7 @@
          &tx,
          &id,
          "task_approved",
-@@ -676,6 +805,7 @@
+@@ -674,6 +825,7 @@
           FROM tasks WHERE id = ?1", params![id], task_from_row
      ).map_err(|e| ApiError::internal(e.to_string()))?;
      tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
@@ -239,7 +259,7 @@
      Ok(Json(json!({"item": task, "execution_started": false})))
  }
  
-@@ -708,7 +838,7 @@
+@@ -706,7 +858,7 @@
              message: "Task cannot be cancelled in its current state".into(),
          });
      }
@@ -248,7 +268,7 @@
          &tx,
          &id,
          "task_cancelled",
-@@ -721,6 +851,7 @@
+@@ -719,6 +871,7 @@
           FROM tasks WHERE id = ?1", params![id], task_from_row
      ).map_err(|e| ApiError::internal(e.to_string()))?;
      tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
@@ -256,14 +276,15 @@
      Ok(Json(json!({"item": task, "execution_started": false})))
  }
  
-@@ -819,5 +950,6 @@
+@@ -817,6 +970,7 @@
+         .route("/api/tasks", get(list_tasks).post(create_task))
          .route("/api/tasks/{id}", get(get_task))
          .route("/api/tasks/{id}/events", get(task_events))
 +        .route("/api/tasks/{id}/stream", get(task_event_stream))
          .route("/api/tasks/{id}/approve", axum::routing::post(approve_task))
          .route("/api/tasks/{id}/cancel", axum::routing::post(cancel_task))
          .route("/api/gpu/{*path}", axum::routing::post(gpu_inference))
-@@ -861,9 +993,11 @@
+@@ -859,9 +1013,11 @@
      let db_path =
          env::var("DREAD_DB_PATH").unwrap_or_else(|_| "data/dread_registry.sqlite3".to_string());
      let db = open_database(&db_path)?;
@@ -275,7 +296,7 @@
      };
  
      let listener = tokio::net::TcpListener::bind(addr).await?;
-@@ -922,7 +1056,11 @@
+@@ -920,7 +1076,11 @@
              .unwrap()
      }
  
@@ -288,7 +309,7 @@
          let mock = Router::new()
              .route("/health", get(mock_health))
              .route("/v1/models", get(mock_models))
-@@ -938,14 +1076,42 @@
+@@ -936,13 +1096,41 @@
          let gpu = GpuGatewayClient::new(format!("http://{address}")).unwrap();
          let db = open_database(":memory:").unwrap();
  
