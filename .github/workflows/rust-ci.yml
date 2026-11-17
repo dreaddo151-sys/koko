@@ -18,19 +18,26 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Workspace availability
-        id: workspace
-        run: test -f Cargo.toml
-        continue-on-error: true
+      - name: Require complete workspace
+        run: test -f Cargo.toml && test -f crates/dread-api/src/main.rs && test -f crates/dread-discovery/src/lib.rs
+      - name: Resolve and lock dependencies
+        run: cargo generate-lockfile
       - name: Formatting
-        if: steps.workspace.outcome == 'success'
         run: cargo fmt --all -- --check
       - name: Clippy
-        if: steps.workspace.outcome == 'success'
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Tests
-        if: steps.workspace.outcome == 'success'
         run: cargo test --workspace --locked
       - name: Release build
-        if: steps.workspace.outcome == 'success'
         run: cargo build --workspace --release --locked
+      - name: API smoke test
+        shell: bash
+        run: |
+          DREAD_BIND=127.0.0.1:18765 cargo run -p dread-api --bin dread-universal > /tmp/dread-api.log 2>&1 &
+          api_pid=$!
+          trap 'kill "$api_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18765/health > /tmp/dread-health.json; then break; fi
+            sleep 1
+          done
+          grep -q '"inference_backend":"llama.cpp"' /tmp/dread-health.json
