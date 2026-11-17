@@ -87,7 +87,7 @@
           CREATE TABLE IF NOT EXISTS capabilities (
               id TEXT PRIMARY KEY NOT NULL,
               record_json TEXT NOT NULL,
-@@ -377,6 +441,168 @@
+@@ -377,6 +441,174 @@
      Ok(Json(json!({ "item": item })))
  }
  
@@ -354,7 +354,7 @@
      async fn gpu_health_route_uses_gateway() {
 --- a/docs/PROJECT_STATUS.md
 +++ b/docs/PROJECT_STATUS.md
-@@ -75,3 +75,13 @@
+@@ -75,3 +75,16 @@
  
  This candidate is pending remote cargo fmt, Clippy, workspace tests and release
  build. Do not treat it as verified until the matching CI run passes.
