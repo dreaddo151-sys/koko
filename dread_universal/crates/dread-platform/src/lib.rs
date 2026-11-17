@@ -146,6 +146,21 @@ fn nvidia_devices(binary: &Path) -> Vec<GpuDevice> {
         }
     }
 
+    // Older drivers may not expose compute_cap; preserve the full telemetry
+    // query before falling back to the minimal name/VRAM inventory.
+    if let Some(output) = run_probe(
+        binary,
+        &[
+            "--query-gpu=name,memory.total,memory.used,memory.free,driver_version,pcie.link.gen.current,pcie.link.width.current,pcie.link.gen.max,pcie.link.width.max,utilization.gpu,temperature.gpu,power.draw",
+            "--format=csv,noheader,nounits",
+        ],
+    ) {
+        let devices = parse_nvidia_csv(&output);
+        if !devices.is_empty() {
+            return devices;
+        }
+    }
+
     let Some(output) = run_probe(
         binary,
         &[
@@ -339,12 +354,16 @@ fn cpu_physical_cores(contents: &str) -> Option<usize> {
     (!cores.is_empty()).then_some(cores.len())
 }
 
-fn nvidia_cuda_version(binary: &Path) -> Option<String> {
-    run_probe(binary, &[])?.lines().find_map(|line| {
+fn parse_nvidia_cuda_version(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
         let (_, version) = line.split_once("CUDA Version:")?;
         let version = version.split_whitespace().next()?;
         (!version.is_empty() && version != "N/A").then(|| version.to_string())
     })
+}
+
+fn nvidia_cuda_version(binary: &Path) -> Option<String> {
+    parse_nvidia_cuda_version(&run_probe(binary, &[])?)
 }
 
 fn memory_info_mib(contents: &str, key: &str) -> Option<u64> {
@@ -558,14 +577,9 @@ mod tests {
 
     #[test]
     fn nvidia_cuda_banner_is_parsed_without_guessing() {
-        let binary = Path::new("/unused");
-        let _ = binary;
         let banner = "NVIDIA-SMI 550.90.07 Driver Version: 550.90.07 CUDA Version: 12.4\n";
-        let parsed = banner.lines().find_map(|line| {
-            let (_, version) = line.split_once("CUDA Version:")?;
-            version.split_whitespace().next().map(str::to_string)
-        });
-        assert_eq!(parsed.as_deref(), Some("12.4"));
+        assert_eq!(parse_nvidia_cuda_version(banner).as_deref(), Some("12.4"));
+        assert_eq!(parse_nvidia_cuda_version("CUDA Version: N/A"), None);
     }
 
     #[test]
