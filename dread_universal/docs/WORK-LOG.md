@@ -232,3 +232,17 @@ Next safe engineering sequence: wait for run #306 and repair any concrete CI fai
 - **Scope of evidence:** this is GitHub-hosted Ubuntu CI only. It does not prove installation, upgrade, reboot persistence, preservation of live DREAD/ComfyUI/Supervisor services, dual-RTX-3090 operation, real inference, agent task execution, image/video output, or workstation rollback.
 - Remaining product gaps are unchanged: live Python Hub parity/integration, concrete provider task adapters, mission DAG/delegation, transactional signed extensions, full inventory, live GPU concurrency, ComfyUI/H3/FlashVSR artifacts, complete permission/sandbox/self-repair lifecycle, signed updater and workstation acceptance.
 - PR #12 remains open and unmerged. No Ubuntu workstation services or user data were touched by this GitHub-only evidence refresh.
+
+
+## Workstation evidence reconciliation — 2026-11-18
+
+Recovered prior terminal/API evidence and corrected the acceptance accounting. This records historical checkpoints; it does not claim the current PR candidate is deployed.
+
+- **2026-11-08:** DREAD Hub :8080, ComfyUI :8188, Ollama API :11434 and OpenCode :4096 were exercised. Recorded endpoints included ComfyUI `/system_stats`, Ollama `/api/tags` and `/api/ps`, DREAD `/api/hub/vram` and `/api/telemetry`. `qwen3.8:27b` was resident (about 29.3 GB VRAM reported); two RTX 3090s were detected. This is historical API/hardware evidence; final architecture still requires llama.cpp, not Ollama as active inference server.
+- **2026-11-16:** Rust API `127.0.0.1:8765/health` returned HTTP 200, version 0.1.0; `/api/services` returned nine discovered services. ComfyUI, GPU Gateway, Hermes and OpenHands ingress/server were reported reachable. DREAD Hub :8080, Ollama :11434, llama.cpp :11501 and OpenCode :4096 were unreachable at that checkpoint. Health/reachability is not agent task-execution proof.
+- **2026-11-17:** dual-RTX-3090 inference through the Supervisor was previously proven. Rust API → authenticated bridge → Python GPU Supervisor lease → managed llama.cpp returned HTTP 200 and exact response `DREAD GPU INFERENCE OK`.
+- ComfyUI `/system_stats` and model/node presence were checked. A valid integrated image artifact, playable MiniMax H3 MP4 and FlashVSR output were not established by those checks.
+
+### Revised retest policy
+
+Do not repeat basic GPU enumeration, generic API health or standalone llama.cpp inference as if no prior tests existed. Before workstation deployment, capture a fresh preservation baseline. For the new candidate, perform a narrow integration regression through the existing authenticated bridge and Supervisor-owned inference path, including health responsiveness during inference. Test concurrent dual-GPU chat/ComfyUI/video only when the integrated media jobs are implemented. Preserve all existing service and GPU ownership boundaries.
