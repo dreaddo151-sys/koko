@@ -1795,9 +1795,107 @@ async fn approve_task(
         "SELECT id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, approval_reason, created_at, updated_at
          FROM tasks WHERE id = ?1", params![id], task_from_row
     ).map_err(|e| ApiError::internal(e.to_string()))?;
+    let mission_id = tx
+        .query_row(
+            "SELECT mission_id FROM mission_tasks WHERE task_id = ?1",
+            params![id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
     let _ = state.events.send(event);
+    if let Some(mission_id) = mission_id {
+        dispatch_ready_mission_tasks(state.clone(), mission_id).await;
+    }
     Ok(Json(json!({"item": task, "execution_started": false})))
+}
+
+fn ready_mission_task_ids(state: &AppState, mission_id: &str) -> Result<Vec<String>, ApiError> {
+    let conn = db_lock(state)?;
+    let mission_status = conn
+        .query_row(
+            "SELECT status FROM missions WHERE id = ?1",
+            params![mission_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if mission_status.as_deref() != Some("running") {
+        return Ok(Vec::new());
+    }
+
+    let mut statement = conn
+        .prepare(
+            "SELECT mt.node_id, mt.task_id, mt.depends_on_json, t.status
+             FROM mission_tasks mt
+             JOIN tasks t ON t.id = mt.task_id
+             WHERE mt.mission_id = ?1 ORDER BY mt.rowid",
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let rows = statement
+        .query_map(params![mission_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let mut entries = Vec::new();
+    let mut status_by_node = HashMap::new();
+    for row in rows {
+        let (node_id, task_id, dependencies_json, status) =
+            row.map_err(|error| ApiError::internal(error.to_string()))?;
+        status_by_node.insert(node_id.clone(), status.clone());
+        let dependencies: Vec<String> = serde_json::from_str(&dependencies_json).map_err(|error| {
+            ApiError::internal(format!("Stored mission dependencies are invalid: {error}"))
+        })?;
+        entries.push((task_id, dependencies, status));
+    }
+
+    let mut ready = Vec::new();
+    for (task_id, dependencies, status) in entries {
+        if status == "approved"
+            && dependencies
+                .iter()
+                .all(|dependency| status_by_node.get(dependency).is_some_and(|value| value == "completed"))
+        {
+            ready.push(task_id);
+        }
+    }
+    Ok(ready)
+}
+
+async fn dispatch_ready_mission_tasks(state: AppState, mission_id: String) {
+    let ready = match ready_mission_task_ids(&state, &mission_id) {
+        Ok(ready) => ready,
+        Err(error) => {
+            error!(mission_id = %mission_id, error = %error.message, "Could not inspect ready mission tasks");
+            return;
+        }
+    };
+
+    for task_id in ready {
+        if let Err(error) = run_task(State(state.clone()), Path(task_id.clone())).await {
+            if error.status != StatusCode::CONFLICT {
+                error!(
+                    mission_id = %mission_id,
+                    task_id = %task_id,
+                    error = %error.message,
+                    "Mission scheduler could not queue a ready task"
+                );
+                if let Ok(conn) = state.db.lock() {
+                    let _ = conn.execute(
+                        "UPDATE missions SET status = 'blocked' WHERE id = ?1 AND status = 'running'",
+                        params![mission_id],
+                    );
+                }
+                break;
+            }
+        }
+    }
 }
 
 async fn run_task(
