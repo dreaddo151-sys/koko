@@ -1313,6 +1313,11 @@ async fn get_mission(
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<u32>>(6)?,
+                row.get::<_, Option<u64>>(7)?,
+                row.get::<_, Option<u64>>(8)?,
             ))
         })
         .map_err(|error| ApiError::internal(error.to_string()))?;
@@ -1337,7 +1342,9 @@ async fn get_mission(
             .as_deref()
             .map(serde_json::from_str::<Value>)
             .transpose()
-            .map_err(|error| ApiError::internal(format!("Stored mission task result is invalid: {error}")))?
+            .map_err(|error| {
+                ApiError::internal(format!("Stored mission task result is invalid: {error}"))
+            })?
             .unwrap_or(Value::Null);
         tasks.push(json!({
             "node_id": node_id,
@@ -1365,15 +1372,6 @@ async fn get_mission(
     })))
 }
 
-        "graph": graph,
-            "execution_order": execution_order,
-            "tasks": tasks,
-            "status": stored.2,
-            "created_at": stored.3,
-            "execution_started": execution_started
-        }
-    })))
-}
 
 async fn create_task(
     State(state): State<AppState>,
