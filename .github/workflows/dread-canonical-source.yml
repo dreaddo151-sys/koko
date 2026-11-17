@@ -193,6 +193,14 @@ jobs:
           npm run build
         working-directory: dread_universal/web
 
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: dread_universal/web
+
+      - name: Browser-level operator/API acceptance
+        run: npm run test:e2e
+        working-directory: dread_universal/web
+
       - name: Test Python GPU Supervisor bridge
         run: python3 -m unittest discover -s scripts -p 'test_gpu_supervisor_bridge.py'
         working-directory: dread_universal
