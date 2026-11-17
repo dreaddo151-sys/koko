@@ -120,3 +120,19 @@ Do not describe the platform as complete until Master Plan acceptance gates pass
 - OpenHands Agent Server contract was rechecked against the current upstream Agent SDK OpenAPI schema. Local API surface includes `POST /api/conversations`, `GET /api/conversations/{id}`, `POST /api/conversations/{id}/events`, event search/count, run, pause, delete and WebSocket events. Local conversation creation requires an Agent configuration and a workspace; LLM and tool definitions are part of that request.
 - Security/design gate: OpenHands `LocalWorkspace` executes tools against a host working directory. Enabling TerminalTool/FileEditorTool without a constrained workspace and explicit DREAD policy would grant direct host filesystem/command access. Also, allowing OpenHands to configure its own LLM endpoint could bypass the Python GPU Supervisor. Therefore do not mark the OpenHands adapter enabled or dispatch host-mutating tasks until the workspace isolation, confirmation policy, credentials and Supervisor-routed LLM path are proven. Health-only probes remain discovery evidence, not execution acceptance.
 - The current branch has not been installed on the workstation. No local Ubuntu acceptance, real agent task, H3 MP4 or FlashVSR artifact is claimed by this continuation.
+
+
+### CI gate closed — 2026-11-17 (run #135)
+
+- GitHub Actions run `44145235574` completed successfully for the PR validation merge commit.
+- Rust / Ubuntu 24.04 job `134258451360`: formatting PASS, strict Clippy PASS, complete Rust test step PASS, release build PASS.
+- Web console / Ubuntu 24.04 job `134258452211`: production console build PASS.
+- This validates the tested PR merge-commit snapshot. It does not prove local workstation installation, browser-to-API integration, real external agent execution, media output, or clean-machine packaging.
+
+### Task execution audit — source inspection after CI
+
+- The Rust API has durable task records, approval, queued/running/completed/failed/cancelled states, event persistence/streaming, result persistence, bounded concurrency/admission and restart recovery logic.
+- Currently reviewed built-in runners are only `service_discovery` and `gpu_chat`. Capability-backed tasks are explicitly rejected until a reviewed adapter is registered. Unknown task types fail closed. GPU chat validates payloads and calls the authenticated Python GPU Supervisor client; no direct llama.cpp endpoint is used in this path.
+- Recovery marks interrupted running tasks failed without replay. It only considers approved queued `service_discovery` tasks eligible for recovery; other queued tasks are rejected for operator review. Verify the continuation/requeue behavior in the remaining startup code before claiming recovery execution.
+- No concrete Hermes/OpenHands/DeerFlow adapter is present yet. Agent discovery remains health-only. OpenHands remains gated on constrained workspace execution, tool policy and Supervisor-routed LLM configuration.
+- Immediate next engineering gate: implement a reviewed, testable provider-neutral agent execution adapter and API task lifecycle integration behind explicit opt-in, while preserving the fail-closed default. Start with a mock HTTP contract test; do not enable host-mutating tools or point an agent at an unrestricted local workspace.
