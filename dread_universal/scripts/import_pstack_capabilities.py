@@ -175,9 +175,29 @@ def load_import_records(project_root: Path) -> list[dict[str, Any]]:
     return records
 
 
-def _request(opener: urllib.request.OpenerDirector, url: str, method: str, payload: dict | None = None) -> tuple[int, dict | None]:
+def api_headers(token: str, has_payload: bool = False) -> dict[str, str]:
+    if len(token) < 32 or token.strip() != token or any(character.isspace() for character in token):
+        raise ImportErrorSafe("DREAD_API_TOKEN must be configured, contain at least 32 characters and contain no whitespace")
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
+    if has_payload:
+        headers["Content-Type"] = "application/json"
+    return headers
+
+
+def _request(
+    opener: urllib.request.OpenerDirector,
+    url: str,
+    method: str,
+    token: str,
+    payload: dict | None = None,
+) -> tuple[int, dict | None]:
     data = None if payload is None else json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(url, data=data, method=method, headers={"Accept": "application/json", **({"Content-Type": "application/json"} if data is not None else {})})
+    request = urllib.request.Request(
+        url,
+        data=data,
+        method=method,
+        headers=api_headers(token, data is not None),
+    )
     try:
         with opener.open(request, timeout=3) as response:
             body = response.read(1024 * 1024)
@@ -207,24 +227,25 @@ def _require_disabled_existing(body: dict | None, record: dict[str, Any]) -> Non
         raise ImportErrorSafe(f"Existing capability {capability_id} has different provenance; refusing to overwrite or skip it")
 
 
-def apply_records(records: list[dict[str, Any]], api_base: str) -> tuple[int, int]:
+def apply_records(records: list[dict[str, Any]], api_base: str, token: str) -> tuple[int, int]:
     base = validate_loopback_api_url(api_base)
+    api_headers(token)
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     created = skipped = 0
     for record in records:
         item_url = f"{base}/api/capabilities/{urllib.parse.quote(record['id'], safe='.-_')}"
-        status, body = _request(opener, item_url, "GET")
+        status, body = _request(opener, item_url, "GET", token)
         if status == 200:
             _require_disabled_existing(body, record)
             skipped += 1
             continue
         if status != 404:
             raise ImportErrorSafe(f"Capability lookup failed for {record['id']}: HTTP {status}")
-        status, body = _request(opener, f"{base}/api/capabilities", "POST", record)
+        status, body = _request(opener, f"{base}/api/capabilities", "POST", token, record)
         if status == 201:
             created += 1
         elif status == 409:
-            existing_status, existing_body = _request(opener, item_url, "GET")
+            existing_status, existing_body = _request(opener, item_url, "GET", token)
             if existing_status != 200:
                 raise ImportErrorSafe(f"Capability conflict could not be safely verified for {record['id']}")
             _require_disabled_existing(existing_body, record)
@@ -238,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--api-base", default="http://127.0.0.1:8765")
-    parser.add_argument("--apply", action="store_true", help="POST disabled capability metadata to the loopback API")
+    parser.add_argument("--apply", action="store_true", help="POST disabled capability metadata using DREAD_API_TOKEN")
     args = parser.parse_args(argv)
     try:
         records = load_import_records(args.root.resolve())
@@ -248,7 +269,8 @@ def main(argv: list[str] | None = None) -> int:
         if not args.apply:
             print("Dry run only. Re-run with --apply to register metadata; no imported content will execute.")
             return 0
-        created, skipped = apply_records(records, args.api_base)
+        token = os.environ.get("DREAD_API_TOKEN", "")
+        created, skipped = apply_records(records, args.api_base, token)
         print(f"Capability metadata import complete: created={created}, already_present={skipped}; execution=none.")
         return 0
     except (ImportErrorSafe, OSError, json.JSONDecodeError, urllib.error.URLError) as exc:
