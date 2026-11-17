@@ -2422,7 +2422,7 @@ async fn execute_approved_task(
     };
 
     let completed_at = now_epoch();
-    let completion_event = {
+    let (completion_event, mission_id, advance_mission) = {
         let Ok(mut conn) = state.db.lock() else {
             return;
         };
@@ -2477,7 +2477,7 @@ async fn execute_approved_task(
             Ok(mission_id) => mission_id,
             Err(_) => return,
         };
-        if let Some(mission_id) = mission_id {
+        if let Some(mission_id) = mission_id.as_ref() {
             if final_status == "completed" {
                 let incomplete: i64 = match tx.query_row(
                     "SELECT COUNT(*)
@@ -2533,11 +2533,17 @@ async fn execute_approved_task(
         if tx.commit().is_err() {
             return;
         }
-        event
+        let advance_mission = final_status == "completed" && mission_id.is_some();
+        (event, mission_id, advance_mission)
     };
     let _ = state.events.send(completion_event);
     if let Ok(mut cancellations) = state.cancellations.lock() {
         cancellations.remove(&task_id);
+    }
+    if advance_mission {
+        if let Some(mission_id) = mission_id {
+            dispatch_ready_mission_tasks(state.clone(), mission_id).await;
+        }
     }
 }
 
