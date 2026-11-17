@@ -19,6 +19,16 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+PINNED_REPOSITORY = "https://github.com/cursor/plugins"
+PINNED_COMMIT = "2f87c854fe3e2fcda44ca86b46ede35aad3c46b7"
+PINNED_TREE = "71d8e1d1d718e2149dc43b2535618064f29cba6b"
+PINNED_VERSION = "0.15.43"
+PINNED_LICENSE = "MIT"
+PINNED_CATALOG_SHA256 = "8e016f2e0d641d0e2aa8e8b042d8ea3b2a60b818c7621322fecff72cb8bfcc6f"
+PINNED_MARKER_SHA256 = "7995b0a25a19baff7307322a3e3bb2ddfffcac53b99d1fe2714bb346a005df7c"
+PINNED_MANIFEST_SHA256 = "656bb69215a4277e4ea67dcd2f7786bbad9d17d08e4717bb32c44ba5e404fcd7"
+PINNED_LICENSE_SHA256 = "bc957ca6bee02792566a1a028d105e02e247c6e77cf057061674273da77b200e"
+
 
 class ImportErrorSafe(RuntimeError):
     pass
@@ -78,16 +88,30 @@ def _sha256(path: Path) -> str:
 
 
 def load_import_records(project_root: Path) -> list[dict[str, Any]]:
+    project_root = project_root.resolve()
     integration_root = project_root / "integrations" / "pstack"
-    catalog_path = integration_root / "catalog.json"
     source_root = integration_root / "upstream"
+    catalog_path = integration_root / "catalog.json"
     marker_path = source_root / ".dread-import.json"
     manifest_path = source_root / "plugin.json"
     license_path = source_root / "LICENSE"
 
+    resolved_integration = integration_root.resolve()
+    resolved_source = source_root.resolve()
+    if not _is_within(resolved_integration, project_root) or not _is_within(resolved_source, resolved_integration):
+        raise ImportErrorSafe("Pstack integration or upstream source directory escapes the project root")
     for path in (catalog_path, marker_path, manifest_path, license_path):
-        if not path.is_file():
-            raise ImportErrorSafe(f"Required pinned Pstack file is missing: {path}")
+        if path.is_symlink() or not path.is_file():
+            raise ImportErrorSafe(f"Required pinned Pstack file is missing or unsafe: {path}")
+
+    if _sha256(catalog_path) != PINNED_CATALOG_SHA256:
+        raise ImportErrorSafe("Pstack catalog hash does not match the pinned inventory")
+    if _sha256(marker_path) != PINNED_MARKER_SHA256:
+        raise ImportErrorSafe("Pstack import marker hash does not match the pinned source snapshot")
+    if _sha256(manifest_path) != PINNED_MANIFEST_SHA256:
+        raise ImportErrorSafe("Pstack upstream manifest hash does not match the pinned source snapshot")
+    if _sha256(license_path) != PINNED_LICENSE_SHA256:
+        raise ImportErrorSafe("Pstack license file hash does not match the pinned source snapshot")
 
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
     marker = json.loads(marker_path.read_text(encoding="utf-8"))
@@ -99,12 +123,28 @@ def load_import_records(project_root: Path) -> list[dict[str, Any]]:
         raise ImportErrorSafe("Pstack source is missing the expected pinned-import verification marker")
 
     expected = {
+        "repository": PINNED_REPOSITORY,
+        "commit_sha": PINNED_COMMIT,
+        "tree_sha": PINNED_TREE,
+        "manifest_version": PINNED_VERSION,
+        "license": PINNED_LICENSE,
+    }
+    catalog_pins = {
         "repository": catalog.get("repository"),
         "commit_sha": catalog.get("upstream_commit_sha"),
         "tree_sha": catalog.get("upstream_tree_sha"),
         "manifest_version": catalog.get("upstream_manifest_version"),
         "license": catalog.get("license"),
     }
+    expected_catalog_pins = {
+        "repository": PINNED_REPOSITORY,
+        "commit_sha": PINNED_COMMIT,
+        "tree_sha": PINNED_TREE,
+        "manifest_version": PINNED_VERSION,
+        "license": PINNED_LICENSE,
+    }
+    if catalog_pins != expected_catalog_pins:
+        raise ImportErrorSafe("Pstack catalog metadata differs from the hard-pinned upstream revision")
     for key, value in expected.items():
         if not value or marker.get(key) != value:
             raise ImportErrorSafe(f"Pinned Pstack import metadata mismatch for {key}")
