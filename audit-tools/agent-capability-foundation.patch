@@ -1,0 +1,585 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 00ef05c..5f6bcda 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -170,12 +170,22 @@ dependencies = [
+  "syn 3.0.10",
+ ]
+ 
++[[package]]
++name = "dread-agents"
++version = "0.4.0"
++dependencies = [
++ "futures",
++ "serde",
++ "serde_json",
++]
++
+ [[package]]
+ name = "dread-api"
+ version = "0.4.0"
+ dependencies = [
+  "anyhow",
+  "axum",
++ "dread-agents",
+  "dread-discovery",
+  "dread-gpu",
+  "futures",
+diff --git a/Cargo.toml b/Cargo.toml
+index ce324ae..904e674 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,6 +1,6 @@
+ [workspace]
+ resolver = "2"
+-members = ["crates/dread-discovery", "crates/dread-api", "crates/dread-gpu"]
++members = ["crates/dread-discovery", "crates/dread-api", "crates/dread-gpu", "crates/dread-agents"]
+ 
+ [workspace.package]
+ version = "0.4.0"
+diff --git a/crates/dread-agents/Cargo.toml b/crates/dread-agents/Cargo.toml
+new file mode 100644
+index 0000000..c87c2f5
+--- /dev/null
++++ b/crates/dread-agents/Cargo.toml
+@@ -0,0 +1,10 @@
++[package]
++name = "dread-agents"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++
++[dependencies]
++futures.workspace = true
++serde.workspace = true
++serde_json.workspace = true
+diff --git a/crates/dread-agents/src/lib.rs b/crates/dread-agents/src/lib.rs
+new file mode 100644
+index 0000000..9631fe2
+--- /dev/null
++++ b/crates/dread-agents/src/lib.rs
+@@ -0,0 +1,280 @@
++//! Provider-neutral contracts for PROJECT DREAD agent adapters and capabilities.
++//!
++//! This crate deliberately contains no provider-specific HTTP clients and performs
++//! no discovery or execution. Concrete adapters must be reviewed and registered
++//! separately; imported capabilities start disabled.
++
++use futures::future::BoxFuture;
++use serde::{Deserialize, Serialize};
++use serde_json::Value;
++use std::fmt;
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum AgentHealthState {
++    Online,
++    Degraded,
++    Offline,
++    Unknown,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct AgentHealth {
++    pub state: AgentHealthState,
++    pub checked_at: u64,
++    pub detail: Option<String>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct AgentDescriptor {
++    pub id: String,
++    pub display_name: String,
++    pub adapter: String,
++    pub version: Option<String>,
++    pub endpoint: Option<String>,
++    pub enabled: bool,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct AgentCapability {
++    pub id: String,
++    pub name: String,
++    pub description: String,
++    pub input_schema: Value,
++    pub output_schema: Option<Value>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct StartTaskRequest {
++    pub task_id: String,
++    pub capability_id: String,
++    pub input: Value,
++    pub idempotency_key: String,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum AgentTaskState {
++    Queued,
++    Running,
++    Succeeded,
++    Failed,
++    Cancelled,
++    Unknown,
++}
++
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++pub struct AgentTask {
++    pub task_id: String,
++    pub state: AgentTaskState,
++    pub provider_task_id: Option<String>,
++    pub result: Option<Value>,
++    pub error: Option<String>,
++    pub updated_at: u64,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct AgentEvent {
++    pub task_id: String,
++    pub sequence: u64,
++    pub event_type: String,
++    pub payload: Value,
++    pub occurred_at: u64,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct AgentAdapterError {
++    pub code: String,
++    pub message: String,
++    pub retryable: bool,
++}
++
++impl fmt::Display for AgentAdapterError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(f, "{}: {}", self.code, self.message)
++    }
++}
++
++impl std::error::Error for AgentAdapterError {}
++
++pub type AdapterResult<T> = Result<T, AgentAdapterError>;
++pub type AdapterFuture<'a, T> = BoxFuture<'a, AdapterResult<T>>;
++
++/// Contract implemented by reviewed, provider-specific agent adapters.
++///
++/// Implementations must honor cancellation and timeouts, avoid implicit retries
++/// for non-idempotent operations, and report task state without hiding failures.
++pub trait AgentAdapter: Send + Sync {
++    fn descriptor(&self) -> &AgentDescriptor;
++    fn health<'a>(&'a self) -> AdapterFuture<'a, AgentHealth>;
++    fn capabilities<'a>(&'a self) -> AdapterFuture<'a, Vec<AgentCapability>>;
++    fn start_task<'a>(&'a self, request: StartTaskRequest) -> AdapterFuture<'a, AgentTask>;
++    fn task_status<'a>(&'a self, task_id: &'a str) -> AdapterFuture<'a, AgentTask>;
++    fn events<'a>(&'a self, task_id: &'a str, after_sequence: u64)
++        -> AdapterFuture<'a, Vec<AgentEvent>>;
++    fn cancel_task<'a>(&'a self, task_id: &'a str) -> AdapterFuture<'a, AgentTask>;
++    fn task_result<'a>(&'a self, task_id: &'a str) -> AdapterFuture<'a, AgentTask>;
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum CapabilityKind {
++    Agent,
++    Skill,
++    McpTool,
++    OpenApiTool,
++    CliTool,
++    Workflow,
++    ModelProvider,
++    Service,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum CapabilityStatus {
++    Discovered,
++    ReviewRequired,
++    Disabled,
++    Approved,
++    Enabled,
++    Rejected,
++}
++
++impl Default for CapabilityStatus {
++    fn default() -> Self {
++        Self::Disabled
++    }
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct CapabilityProvenance {
++    pub source_name: String,
++    pub source_uri: Option<String>,
++    pub source_version: Option<String>,
++    pub source_revision: Option<String>,
++    pub imported_at: u64,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct CapabilityRecord {
++    pub id: String,
++    pub name: String,
++    pub kind: CapabilityKind,
++    pub description: String,
++    pub version: Option<String>,
++    pub license: Option<String>,
++    pub provenance: CapabilityProvenance,
++    pub compatibility: String,
++    pub dependencies: Vec<String>,
++    pub adapter: Option<String>,
++    pub status: CapabilityStatus,
++    pub manifest: Value,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum ValidationError {
++    Empty(&'static str),
++    TooLong(&'static str),
++    InvalidIdentifier,
++    MissingProvenance,
++    EnabledWithoutApproval,
++}
++
++impl fmt::Display for ValidationError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::Empty(field) => write!(f, "{field} must not be empty"),
++            Self::TooLong(field) => write!(f, "{field} exceeds its maximum length"),
++            Self::InvalidIdentifier => write!(f, "id must contain only lowercase letters, digits, '-', '_' or '.'"),
++            Self::MissingProvenance => write!(f, "source_name provenance is required"),
++            Self::EnabledWithoutApproval => write!(f, "capability cannot be enabled without an approval record"),
++        }
++    }
++}
++
++impl std::error::Error for ValidationError {}
++
++impl CapabilityRecord {
++    /// Validate metadata and enforce the safe-import default.
++    pub fn validate(&self) -> Result<(), ValidationError> {
++        if self.id.trim().is_empty() || self.name.trim().is_empty() {
++            return Err(ValidationError::Empty("id/name"));
++        }
++        if self.id.len() > 160 || self.name.len() > 200 || self.description.len() > 8_000 {
++            return Err(ValidationError::TooLong("capability field"));
++        }
++        if !self.id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_.".contains(&b)) {
++            return Err(ValidationError::InvalidIdentifier);
++        }
++        if self.provenance.source_name.trim().is_empty() {
++            return Err(ValidationError::MissingProvenance);
++        }
++        if self.status == CapabilityStatus::Enabled {
++            let approved = self.manifest.get("approval").and_then(Value::as_object).is_some_and(|a| {
++                a.get("approved_by").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty())
++                    && a.get("approved_at").and_then(Value::as_u64).is_some()
++            });
++            if !approved {
++                return Err(ValidationError::EnabledWithoutApproval);
++            }
++        }
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    fn sample() -> CapabilityRecord {
++        CapabilityRecord {
++            id: "pstack.skill.example".into(),
++            name: "Example skill".into(),
++            kind: CapabilityKind::Skill,
++            description: "Imported for review".into(),
++            version: Some("1.0.0".into()),
++            license: Some("MIT".into()),
++            provenance: CapabilityProvenance {
++                source_name: "Pstack".into(),
++                source_uri: Some("https://example.invalid".into()),
++                source_version: Some("1.0.0".into()),
++                source_revision: Some("abc123".into()),
++                imported_at: 1,
++            },
++            compatibility: "review_required".into(),
++            dependencies: vec![],
++            adapter: None,
++            status: CapabilityStatus::Disabled,
++            manifest: json!({}),
++        }
++    }
++
++    #[test]
++    fn imported_capabilities_validate_disabled_by_default() {
++        assert!(sample().validate().is_ok());
++    }
++
++    #[test]
++    fn rejects_path_like_or_uppercase_ids() {
++        let mut item = sample();
++        item.id = "../RunMe".into();
++        assert_eq!(item.validate(), Err(ValidationError::InvalidIdentifier));
++    }
++
++    #[test]
++    fn enabled_requires_a_recorded_approval() {
++        let mut item = sample();
++        item.status = CapabilityStatus::Enabled;
++        assert_eq!(item.validate(), Err(ValidationError::EnabledWithoutApproval));
++        item.manifest = serde_json::json!({"approval": {"approved_by": "operator", "approved_at": 123}});
++        assert!(item.validate().is_ok());
++    }
++
++    #[test]
++    fn provenance_is_mandatory() {
++        let mut item = sample();
++        item.provenance.source_name.clear();
++        assert_eq!(item.validate(), Err(ValidationError::MissingProvenance));
++    }
++}
+diff --git a/crates/dread-api/Cargo.toml b/crates/dread-api/Cargo.toml
+index ee03246..ba3952e 100644
+--- a/crates/dread-api/Cargo.toml
++++ b/crates/dread-api/Cargo.toml
+@@ -13,6 +13,7 @@ path = "src/main.rs"
+ anyhow.workspace = true
+ axum.workspace = true
+ dread-discovery = { path = "../dread-discovery" }
++dread-agents = { path = "../dread-agents" }
+ dread-gpu = { path = "../dread-gpu" }
+ futures.workspace = true
+ reqwest.workspace = true
+diff --git a/crates/dread-api/src/main.rs b/crates/dread-api/src/main.rs
+index 2fb06cc..c6a1e2c 100644
+--- a/crates/dread-api/src/main.rs
++++ b/crates/dread-api/src/main.rs
+@@ -6,6 +6,7 @@ use axum::{
+     response::{IntoResponse, Response},
+     routing::get,
+ };
++use dread_agents::{CapabilityKind, CapabilityProvenance, CapabilityRecord, CapabilityStatus};
+ use dread_discovery::{discover, load_services};
+ use dread_gpu::GpuGatewayClient;
+ use futures::StreamExt;
+@@ -53,6 +54,30 @@ fn empty_object() -> Value {
+     json!({})
+ }
+ 
++#[derive(Debug, Deserialize)]
++struct CreateCapability {
++    id: String,
++    name: String,
++    kind: CapabilityKind,
++    #[serde(default)]
++    description: String,
++    version: Option<String>,
++    license: Option<String>,
++    provenance: CapabilityProvenance,
++    #[serde(default = "default_compatibility")]
++    compatibility: String,
++    #[serde(default)]
++    dependencies: Vec<String>,
++    adapter: Option<String>,
++    #[serde(default = "empty_object")]
++    manifest: Value,
++}
++
++fn default_compatibility() -> String {
++    "review_required".to_string()
++}
++
++
+ #[derive(Debug)]
+ struct ApiError {
+     status: StatusCode,
+@@ -113,6 +138,11 @@ fn open_database(path: &str) -> anyhow::Result<Connection> {
+              endpoint TEXT,
+              metadata TEXT NOT NULL DEFAULT '{}',
+              created_at INTEGER NOT NULL
++         );
++         CREATE TABLE IF NOT EXISTS capabilities (
++             id TEXT PRIMARY KEY NOT NULL,
++             record_json TEXT NOT NULL,
++             created_at INTEGER NOT NULL
+          );",
+     )?;
+     Ok(conn)
+@@ -267,6 +297,84 @@ async fn delete_registry_item(
+     Ok(StatusCode::NO_CONTENT)
+ }
+ 
++async fn list_capabilities(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
++    let conn = db_lock(&state)?;
++    let mut stmt = conn
++        .prepare("SELECT record_json FROM capabilities ORDER BY created_at DESC")
++        .map_err(|e| ApiError::internal(e.to_string()))?;
++    let rows = stmt
++        .query_map([], |row| row.get::<_, String>(0))
++        .map_err(|e| ApiError::internal(e.to_string()))?;
++    let mut items = Vec::new();
++    for row in rows {
++        let encoded = row.map_err(|e| ApiError::internal(e.to_string()))?;
++        let item: CapabilityRecord = serde_json::from_str(&encoded)
++            .map_err(|e| ApiError::internal(format!("Stored capability is invalid: {e}")))?;
++        items.push(item);
++    }
++    Ok(Json(json!({ "items": items, "count": items.len() })))
++}
++
++async fn create_capability(
++    State(state): State<AppState>,
++    Json(input): Json<CreateCapability>,
++) -> Result<(StatusCode, Json<Value>), ApiError> {
++    // Imported and discovered capabilities are always disabled. Activation is a
++    // separate approval workflow and is intentionally not exposed by this route.
++    let record = CapabilityRecord {
++        id: input.id,
++        name: input.name,
++        kind: input.kind,
++        description: input.description,
++        version: input.version,
++        license: input.license,
++        provenance: input.provenance,
++        compatibility: input.compatibility,
++        dependencies: input.dependencies,
++        adapter: input.adapter,
++        status: CapabilityStatus::Disabled,
++        manifest: input.manifest,
++    };
++    record
++        .validate()
++        .map_err(|e| ApiError::bad_request(e.to_string()))?;
++    let encoded = serde_json::to_string(&record)
++        .map_err(|e| ApiError::bad_request(format!("Could not encode capability: {e}")))?;
++    let created_at = record.provenance.imported_at;
++    let conn = db_lock(&state)?;
++    conn.execute(
++        "INSERT INTO capabilities (id, record_json, created_at) VALUES (?1, ?2, ?3)",
++        params![record.id, encoded, created_at],
++    )
++    .map_err(|e| {
++        if e.to_string().contains("UNIQUE constraint failed") {
++            ApiError { status: StatusCode::CONFLICT, message: "Capability id already exists".into() }
++        } else {
++            ApiError::internal(e.to_string())
++        }
++    })?;
++    Ok((StatusCode::CREATED, Json(json!({ "item": record }))))
++}
++
++async fn get_capability(
++    State(state): State<AppState>,
++    Path(id): Path<String>,
++) -> Result<Json<Value>, ApiError> {
++    let conn = db_lock(&state)?;
++    let encoded = conn
++        .query_row(
++            "SELECT record_json FROM capabilities WHERE id = ?1",
++            params![id],
++            |row| row.get::<_, String>(0),
++        )
++        .optional()
++        .map_err(|e| ApiError::internal(e.to_string()))?;
++    let encoded = encoded.ok_or_else(|| ApiError::not_found("Capability not found"))?;
++    let item: CapabilityRecord = serde_json::from_str(&encoded)
++        .map_err(|e| ApiError::internal(format!("Stored capability is invalid: {e}")))?;
++    Ok(Json(json!({ "item": item })))
++}
++
+ async fn gpu_health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+     let health = state.gpu.health().await.map_err(|e| ApiError {
+         status: StatusCode::SERVICE_UNAVAILABLE,
+@@ -361,6 +469,8 @@ fn app(state: AppState) -> Router {
+         .route("/api/gpu/models", get(gpu_models))
+         .route("/api/gpu/{*path}", axum::routing::post(gpu_inference))
+         .route("/api/services", get(services))
++        .route("/api/capabilities", get(list_capabilities).post(create_capability))
++        .route("/api/capabilities/{id}", get(get_capability))
+         .route("/api/registry", get(list_registry).post(create_registry))
+         .route(
+             "/api/registry/{id}",
+@@ -479,6 +589,61 @@ mod tests {
+         )
+     }
+ 
++    #[tokio::test]
++    async fn capability_create_is_persisted_disabled_and_listed() {
++        let (router, server) = test_app().await;
++        let payload = json!({
++            "id": "pstack.skill.sample",
++            "name": "Sample skill",
++            "kind": "skill",
++            "description": "Imported for review",
++            "version": "1.0.0",
++            "license": "MIT",
++            "provenance": {
++                "source_name": "Pstack",
++                "source_uri": "https://example.invalid",
++                "source_version": "1.0.0",
++                "source_revision": "abc123",
++                "imported_at": 100
++            },
++            "manifest": {"untrusted": true},
++            "status": "enabled"
++        });
++        let response = router.clone().oneshot(
++            Request::builder().method("POST").uri("/api/capabilities")
++                .header("content-type", "application/json")
++                .body(Body::from(payload.to_string())).unwrap()
++        ).await.unwrap();
++        assert_eq!(response.status(), StatusCode::CREATED);
++        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
++        let created: Value = serde_json::from_slice(&body).unwrap();
++        assert_eq!(created["item"]["status"], "disabled");
++
++        let response = router.oneshot(Request::builder().uri("/api/capabilities")
++            .body(Body::empty()).unwrap()).await.unwrap();
++        assert_eq!(response.status(), StatusCode::OK);
++        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
++        let listed: Value = serde_json::from_slice(&body).unwrap();
++        assert_eq!(listed["count"], 1);
++        assert_eq!(listed["items"][0]["id"], "pstack.skill.sample");
++        assert_eq!(listed["items"][0]["status"], "disabled");
++        server.abort();
++    }
++
++    #[tokio::test]
++    async fn capability_rejects_invalid_ids_and_missing_provenance() {
++        let (router, server) = test_app().await;
++        let payload = json!({
++            "id": "../unsafe", "name": "Unsafe", "kind": "skill",
++            "provenance": {"source_name": "Pstack", "imported_at": 100}
++        });
++        let response = router.oneshot(Request::builder().method("POST").uri("/api/capabilities")
++            .header("content-type", "application/json")
++            .body(Body::from(payload.to_string())).unwrap()).await.unwrap();
++        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
++        server.abort();
++    }
++
+     #[tokio::test]
+     async fn gpu_health_route_uses_gateway() {
+         let (router, server) = test_app().await;
+diff --git a/docs/PROJECT_STATUS.md b/docs/PROJECT_STATUS.md
+index 557739c..a47f523 100644
+--- a/docs/PROJECT_STATUS.md
++++ b/docs/PROJECT_STATUS.md
+@@ -63,3 +63,16 @@ The following capabilities are not implemented as complete Rust product features
+ 4. Build the React operator UI against the real API and WebSocket events.
+ 5. Port legacy Hub workflows incrementally behind adapters, verifying parity without interrupting existing services.
+ 6. Run end-to-end acceptance on the user's workstation before calling the platform complete.
++
++## Agent and capability foundation — candidate implementation
++
++The next implementation slice adds a `dread-agents` crate with provider-neutral
++agent/task/event contracts and typed capability metadata. The API adds a
++SQLite-backed `/api/capabilities` registry (list, create, get). New capability
++records retain source provenance, version, license, compatibility, dependencies,
++adapter identity and manifest data. API-created records are forced to `disabled`;
++activation is not exposed by these endpoints. The adapter contract is not yet
++wired to live providers, and no imported skill or agent is executed.
++
++This candidate is pending remote `cargo fmt`, Clippy, workspace tests and release
++build. Do not treat it as verified until the matching CI run passes.
