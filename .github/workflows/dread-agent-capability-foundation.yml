@@ -139,9 +139,32 @@ jobs:
           mkdir -p "$RUNNER_TEMP/dread-final"
           cp -a "$RUNNER_TEMP/dread-source/tmp/dread_zip_check/DREAD-UNIVERSAL" "$RUNNER_TEMP/dread-final/"
           cp -a "$RUNNER_TEMP/dread-source/tmp/dread_zip_check/legacy-reference" "$RUNNER_TEMP/dread-final/"
-          rm -rf "$RUNNER_TEMP/dread-final/DREAD-UNIVERSAL/dread_universal/target"
+          ROOT="$RUNNER_TEMP/dread-final/DREAD-UNIVERSAL"
+          rm -rf "$ROOT/dread_universal/target"
+          # Exclude nested historical bundles from the distributable; source and backup files remain intact.
+          rm -f "$ROOT/DREAD-UNIVERSAL.zip" "$ROOT/dread_universal/dread_universal_source.zip"
+          FILE_COUNT=$(find "$ROOT" "$RUNNER_TEMP/dread-final/legacy-reference" -type f | wc -l)
+          cat > "$ROOT/BUNDLE_MANIFEST.txt" <<EOF
+          PROJECT DREAD UNIVERSAL SOURCE BUNDLE
+          Package: DREAD_UNIVERSAL_AGENT_DISCOVERY_FOUNDATION
+          Project version: 0.4.0
+          Repository: dreaddo151-sys/koko
+          Branch: feature/agent-capability-foundation-2026-11-17
+          GitHub Actions run: $GITHUB_RUN_ID
+          Baseline archive SHA-256: 87a9f53911599a06d1501ed1c4ae5751f523be95184932fe3a446f7cd8927305
+          Files packaged: $FILE_COUNT
+
+          Includes the Rust workspace, configuration, documentation, legacy reference
+          sources and historical source backups. Nested old ZIP bundles and Rust target
+          directories are excluded to avoid shipping stale duplicate snapshots.
+
+          This package is a verified Rust foundation, not a complete Universal Hub.
+          Live workstation integration and remaining blueprint milestones are documented
+          in dread_universal/docs/PROJECT_STATUS.md.
+          EOF
           cd "$RUNNER_TEMP/dread-final"
           zip -qr "$RUNNER_TEMP/DREAD_UNIVERSAL_AGENT_DISCOVERY_FOUNDATION.zip" DREAD-UNIVERSAL legacy-reference
+          unzip -tq "$RUNNER_TEMP/DREAD_UNIVERSAL_AGENT_DISCOVERY_FOUNDATION.zip"
           sha256sum "$RUNNER_TEMP/DREAD_UNIVERSAL_AGENT_DISCOVERY_FOUNDATION.zip"
 
       - name: Upload verified candidate
