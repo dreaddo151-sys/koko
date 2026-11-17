@@ -1332,8 +1332,10 @@ fn validate_gpu_chat_payload(payload: &Value) -> Result<(), String> {
             .ok_or_else(|| "skill_ids must be an array of at most 8 enabled skill ids".to_string())?;
         for id in ids {
             let id = id.as_str().ok_or_else(|| "each skill id must be a string".to_string())?;
-            let suffix = id.strip_prefix("pstack.skill.")
-                .ok_or_else(|| "skill ids must use the pstack.skill.<name> format".to_string())?;
+            let suffix = id
+                .strip_prefix("pstack.skill.")
+                .or_else(|| id.strip_prefix("pstack.agent."))
+                .ok_or_else(|| "context ids must use pstack.skill.<name> or pstack.agent.<name>".to_string())?;
             if suffix.is_empty() || suffix.len() > 120 || !suffix.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_') {
                 return Err("skill id contains invalid characters".into());
             }
