@@ -50,14 +50,41 @@ def is_healthy(url: str = HEALTH_URL, timeout: float = 2.0) -> bool:
         return False
 
 
+def recent_attempts(state: dict, now: float) -> list[float]:
+    recent = []
+    raw = state.get("attempts", [])
+    if not isinstance(raw, list):
+        return recent
+    for item in raw:
+        try:
+            stamp = float(item)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= now - stamp < WINDOW_SECONDS:
+            recent.append(stamp)
+    return recent
+
+
 def restart_allowed(state: dict, now: float) -> tuple[bool, str]:
-    attempts = [float(x) for x in state.get("attempts", []) if now - float(x) < WINDOW_SECONDS]
+    attempts = recent_attempts(state, now)
     if len(attempts) >= MAX_RESTARTS:
         return False, "restart ceiling reached; operator intervention required"
     last = max(attempts, default=0.0)
     if last and now - last < COOLDOWN_SECONDS:
         return False, "restart cooldown active"
     return True, "bounded restart permitted"
+
+
+def append_incident(state_path: Path, incident: dict) -> None:
+    journal = state_path.with_name("incidents.jsonl")
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(incident, separators=(",", ":")) + "\\n"
+    descriptor = os.open(journal, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(descriptor, payload.encode("utf-8"))
+    finally:
+        os.close(descriptor)
+    os.chmod(journal, 0o600)
 
 
 def main() -> int:
@@ -67,21 +94,24 @@ def main() -> int:
     parser.add_argument("--state-file", type=Path, default=Path.home() / ".local/state/dread/watchdog.json")
     args = parser.parse_args()
 
+    now = time.time()
     if is_healthy(args.health_url):
+        append_incident(args.state_file, {"at_unix": now, "health": "ok", "action": "none"})
         print("DREAD API healthy; no action")
         return 0
 
     state = read_state(args.state_file)
-    now = time.time()
     allowed, reason = restart_allowed(state, now)
     print(f"DREAD API unhealthy; {reason}")
     if not allowed:
+        append_incident(args.state_file, {"at_unix": now, "health": "failed", "action": "escalate", "reason": reason})
         return 2
     if not args.apply:
+        append_incident(args.state_file, {"at_unix": now, "health": "failed", "action": "dry_run", "reason": reason})
         print(f"DRY RUN: would restart only {UNIT}")
         return 0
 
-    attempts = [float(x) for x in state.get("attempts", []) if now - float(x) < WINDOW_SECONDS]
+    attempts = recent_attempts(state, now)
     attempts.append(now)
     state["attempts"] = attempts
     state["last_action"] = "restart"
@@ -99,6 +129,13 @@ def main() -> int:
     state["last_result"] = "success" if result.returncode == 0 else "failed"
     state["last_exit_code"] = result.returncode
     write_state(args.state_file, state)
+    append_incident(args.state_file, {
+        "at_unix": time.time(),
+        "health": "failed",
+        "action": "restart",
+        "unit": UNIT,
+        "exit_code": result.returncode,
+    })
     if result.returncode:
         print("Allowlisted DREAD API restart failed; no other service was touched", file=sys.stderr)
         return 1
