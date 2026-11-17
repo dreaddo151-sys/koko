@@ -317,3 +317,14 @@ Do not repeat basic GPU enumeration, generic API health or standalone llama.cpp 
 - Commit `b23c1feba39a95e687f552a0746094766e20545f` exposed one rustfmt-only failure in the new batch importer; the formatting was corrected in commit `aa78e66c2c9228fa14416de7df0d84aeacf41127`.
 - GitHub Actions PR run #472 (`44195876703`) passed all three jobs on corrected head `aa78e66c2c9228fa14416de7df0d84aeacf41127`: Rust formatting, strict Clippy, workspace tests, optimized release build, installer syntax, portable migration/rollback, Python bridge/importer tests, single-owner GPU guard, React production build, package checksum/content validation, disposable Ubuntu 24.04 `.deb` installation, API health, production UI, unauthenticated 401 and authenticated host-profile smoke test.
 - CI proves repository/package behavior in a disposable runner. No current-candidate workstation install, ComfyUI/GPU workload, Hermes tool execution, media artifact or reboot acceptance was performed.
+
+
+## Approval-gated mission DAG auto-advance — 2026-11-18
+
+- Added a mission scheduler that finds approved nodes whose full dependency set is completed and queues them through the existing task queue and shared execution gate.
+- The first root task still requires explicit operator approval and an explicit start action. Once the mission is running, successful node completion advances all newly ready, already-approved nodes. Approving a dependent node after its prerequisites finish also dispatches it automatically.
+- Nodes that are still pending approval are never dispatched. Task failure or cancellation blocks the mission and prevents further automatic dispatch. Concurrent scheduler attempts are safe against duplicate queueing because the task transition is conditional and conflicts are ignored as races.
+- Added integration regressions for dependency-gated dispatch, auto-advancing a pre-approved dependent node, and late approval after prerequisite completion (including the database-lock/deadlock path).
+- CI run #509 (`44197296018`) passed all three jobs on code candidate `8c19a5b904fc32c0e811c55ed0d96bb5cd15cc1a`: Rust formatting, strict Clippy, workspace tests including the mission scheduler regressions, release build, installer syntax, portable migration/rollback, Python bridge/importer tests, GPU single-owner guard, React production build, package checksum/content checks, disposable Ubuntu 24.04 `.deb` install, API health, UI, unauthenticated 401 and authenticated host-profile smoke test.
+- Scheduler scope remains deliberately bounded: no priority/resource-aware queue policy, retry/backoff, mission-level aggregation strategy or interrupted-mission recovery has been claimed.
+- No live workstation deployment, service restart, GPU job or media generation was performed.
