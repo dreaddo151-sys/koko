@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-set -x
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
@@ -124,6 +123,11 @@ if HOME="$HOME" DREAD_INSTALL_DIR="$PREFIX" MOCK_SYSTEMD_STATE="$STATE" MOCK_FAI
 fi
 [[ "$("$PREFIX/bin/dread-universal")" == v2 ]]
 [[ "$(cat "$STATE")" == active ]]
-[[ -d "$PREFIX".failed.* ]]
+failed_install="$(find "$HOME/.local/opt" -maxdepth 1 -type d -name 'dread-universal.failed.*' -print -quit)"
+if [[ -z "$failed_install" ]]; then
+  printf 'Failed release tree was not retained for diagnosis.\n' >&2
+  find "$HOME/.local/opt" -maxdepth 1 -mindepth 1 -print >&2
+  exit 1
+fi
 
 printf 'Portable installer migration, permissions, backup and rollback: PASS\n'
