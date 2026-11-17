@@ -1470,6 +1470,49 @@ async fn gpu_health(State(state): State<AppState>) -> Result<Json<Value>, ApiErr
     Ok(Json(value))
 }
 
+async fn token_usage(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let mut statement = conn.prepare(
+        "SELECT r.result_json FROM task_results r
+         INNER JOIN tasks t ON t.id = r.task_id
+         WHERE t.task_type = 'gpu_chat' AND t.status = 'completed'
+         AND r.result_json IS NOT NULL ORDER BY r.completed_at DESC"
+    ).map_err(|error| ApiError::internal(error.to_string()))?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let mut prompt_tokens = 0_u64;
+    let mut completion_tokens = 0_u64;
+    let mut total_tokens = 0_u64;
+    let mut measured_responses = 0_u64;
+    let mut unreported_responses = 0_u64;
+    for row in rows {
+        let encoded = row.map_err(|error| ApiError::internal(error.to_string()))?;
+        let value: Value = serde_json::from_str(&encoded).unwrap_or(Value::Null);
+        if let Some(usage) = value.get("usage") {
+            let prompt = usage.get("prompt_tokens").and_then(Value::as_u64);
+            let completion = usage.get("completion_tokens").and_then(Value::as_u64);
+            let total = usage.get("total_tokens").and_then(Value::as_u64);
+            if let (Some(prompt), Some(completion), Some(total)) = (prompt, completion, total) {
+                prompt_tokens = prompt_tokens.saturating_add(prompt);
+                completion_tokens = completion_tokens.saturating_add(completion);
+                total_tokens = total_tokens.saturating_add(total);
+                measured_responses += 1;
+                continue;
+            }
+        }
+        unreported_responses += 1;
+    }
+    Ok(Json(json!({
+        "provider": "llama.cpp-compatible local gateway",
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "measured_responses": measured_responses,
+        "responses_without_usage": unreported_responses,
+        "note": "Only usage counters returned by completed inference responses are counted; no estimates are generated."
+    })))
+}
+
 async fn gpu_models(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let models = state.gpu.models().await.map_err(|e| ApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
@@ -1566,6 +1609,7 @@ fn app(state: AppState) -> Router {
     let protected = Router::new()
         .route("/api/gpu/health", get(gpu_health))
         .route("/api/gpu/models", get(gpu_models))
+        .route("/api/usage/tokens", get(token_usage))
         .route("/api/tasks", get(list_tasks).post(create_task))
         .route("/api/tasks/{id}", get(get_task))
         .route("/api/tasks/{id}/events", get(task_events))
