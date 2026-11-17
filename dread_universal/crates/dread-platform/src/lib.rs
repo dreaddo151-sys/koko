@@ -349,8 +349,8 @@ pub fn detect_host() -> HostProfile {
     }
 }
 
-/// Return a process-cached host profile so diagnostic utilities are not spawned
-/// on every API poll.
+/// Return a host profile cached for 15 seconds so live GPU telemetry refreshes
+/// without spawning diagnostic utilities on every API poll.
 pub fn cached_host_profile() -> HostProfile {
     static PROFILE: OnceLock<Mutex<Option<(Instant, HostProfile)>>> = OnceLock::new();
     let cache = PROFILE.get_or_init(|| Mutex::new(None));
@@ -424,6 +424,11 @@ mod tests {
                     vendor: "nvidia".into(),
                     name: name.trim().into(),
                     vram_mib: memory.trim().parse().ok(),
+                    driver_version: None,
+                    pcie_link_gen: None,
+                    pcie_link_width: None,
+                    utilization_percent: None,
+                    temperature_c: None,
                 })
             })
             .collect::<Vec<_>>();
