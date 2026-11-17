@@ -1,0 +1,57 @@
+name: DREAD uploaded archive audit
+
+on:
+  push:
+    branches:
+      - audit/dread-universal-uploaded-2026-11-17
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dread-uploaded-archive-audit
+  cancel-in-progress: true
+
+jobs:
+  rust-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout audit harness
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Download and verify the exact uploaded archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            "https://github.com/dreaddo151-sys/koko/releases/download/dread-universal-v0.4.0-test/DREAD_UNIVERSAL_COMPLETE_20261117_032111.zip" \
+            --output /tmp/dread-upload.zip
+          echo "87a9f53911599a06d1501ed1c4ae5751f523be95184932fe3a446f7cd8927305  /tmp/dread-upload.zip" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/dread-source"
+          unzip -q /tmp/dread-upload.zip -d "$RUNNER_TEMP/dread-source"
+          test -f "$RUNNER_TEMP/dread-source/DREAD-UNIVERSAL/dread_universal/Cargo.toml"
+          echo "WORKSPACE=$RUNNER_TEMP/dread-source/DREAD-UNIVERSAL/dread_universal" >> "$GITHUB_ENV"
+
+      - name: Install stable Rust, rustfmt and Clippy
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+        working-directory: ${{ env.WORKSPACE }}
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        working-directory: ${{ env.WORKSPACE }}
+
+      - name: Unit and integration tests
+        run: cargo test --workspace --locked
+        working-directory: ${{ env.WORKSPACE }}
+
+      - name: Optimized release build
+        run: cargo build --workspace --release --locked
+        working-directory: ${{ env.WORKSPACE }}
