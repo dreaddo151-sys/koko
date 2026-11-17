@@ -1083,12 +1083,23 @@ async fn create_mission(
                 "mission node identifiers, task types, or dependencies exceed their limits",
             ));
         }
+        let payload_size = serde_json::to_vec(&node.payload)
+            .map(|encoded| encoded.len())
+            .unwrap_or(usize::MAX);
+        if payload_size > 1_048_576 {
+            return Err(ApiError::bad_request(
+                "mission node payload exceeds 1 MiB",
+            ));
+        }
     }
     let execution_order = graph
         .execution_order()
         .map_err(|error| ApiError::bad_request(format!("Invalid mission graph: {error:?}")))?;
     let graph_json = serde_json::to_string(&graph)
         .map_err(|error| ApiError::bad_request(format!("Invalid mission graph: {error}")))?;
+    if graph_json.len() > 4 * 1024 * 1024 {
+        return Err(ApiError::bad_request("mission graph exceeds 4 MiB"));
+    }
     let order_json = serde_json::to_string(&execution_order)
         .map_err(|error| ApiError::internal(format!("Could not encode mission order: {error}")))?;
     let created_at = now_epoch();
@@ -1121,6 +1132,138 @@ async fn create_mission(
     ))
 }
 
+async fn instantiate_mission(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    if id.trim().is_empty() || id.len() > 160 {
+        return Err(ApiError::bad_request("mission id must contain 1 to 160 characters"));
+    }
+    let now = now_epoch();
+    let mut conn = db_lock(&state)?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let stored = tx
+        .query_row(
+            "SELECT graph_json, status FROM missions WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Mission not found"))?;
+    if stored.1 != "planned" {
+        return Err(ApiError::conflict(
+            "Only a planned mission can be instantiated; tasks may already exist",
+        ));
+    }
+    let graph: MissionGraph = serde_json::from_str(&stored.0)
+        .map_err(|error| ApiError::internal(format!("Stored mission graph is invalid: {error}")))?;
+    let order = graph
+        .execution_order()
+        .map_err(|error| ApiError::internal(format!("Stored mission graph is invalid: {error:?}")))?;
+    let nodes = graph
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect::<HashMap<_, _>>();
+    let mut created_tasks = Vec::with_capacity(order.len());
+    let mut emitted_events = Vec::with_capacity(order.len());
+
+    for node_id in order {
+        let node = nodes
+            .get(node_id.as_str())
+            .ok_or_else(|| ApiError::internal("Stored mission node is missing"))?;
+        match node.task_type.as_str() {
+            "service_discovery" => {
+                if !node.payload.is_null()
+                    && !node.payload.as_object().is_some_and(|object| object.is_empty())
+                {
+                    return Err(ApiError::bad_request(
+                        "service_discovery mission nodes accept only an empty payload",
+                    ));
+                }
+            }
+            "gpu_chat" => {
+                validate_gpu_chat_payload(&node.payload).map_err(ApiError::bad_request)?;
+                if state.supervisor.is_none() {
+                    return Err(ApiError {
+                        status: StatusCode::SERVICE_UNAVAILABLE,
+                        message: "GPU mission nodes require the authenticated Python GPU Supervisor bridge".into(),
+                    });
+                }
+            }
+            task_type => {
+                return Err(ApiError::conflict(format!(
+                    "Mission node '{}' has no reviewed runner for task type '{task_type}'",
+                    node.id
+                )));
+            }
+        }
+
+        let task_id = Uuid::new_v4().to_string();
+        let title = format!("Mission node {}", node.id);
+        let payload_json = serde_json::to_string(&node.payload)
+            .map_err(|error| ApiError::bad_request(format!("Invalid mission node payload: {error}")))?;
+        let dependencies_json = serde_json::to_string(&node.depends_on)
+            .map_err(|error| ApiError::internal(format!("Could not encode mission dependencies: {error}")))?;
+        tx.execute(
+            "INSERT INTO tasks (id, title, task_type, capability_id, payload_json, status, approval_required, created_at, updated_at)
+             VALUES (?1, ?2, ?3, NULL, ?4, 'pending_approval', 1, ?5, ?5)",
+            params![task_id, title, node.task_type, payload_json, now],
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+        tx.execute(
+            "INSERT INTO mission_tasks (mission_id, node_id, task_id, depends_on_json)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![id, node.id, task_id, dependencies_json],
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+        emitted_events.push(append_task_event(
+            &tx,
+            &task_id,
+            "task_created",
+            &json!({
+                "status": "pending_approval",
+                "mission_id": id,
+                "mission_node_id": node.id,
+                "depends_on": node.depends_on
+            }),
+            "mission",
+            now,
+        )?);
+        created_tasks.push(json!({
+            "node_id": node.id,
+            "task_id": task_id,
+            "task_type": node.task_type,
+            "depends_on": node.depends_on,
+            "status": "pending_approval"
+        }));
+    }
+    tx.execute(
+        "UPDATE missions SET status = 'awaiting_approval' WHERE id = ?1 AND status = 'planned'",
+        params![id],
+    )
+    .map_err(|error| ApiError::internal(error.to_string()))?;
+    tx.commit().map_err(|error| ApiError::internal(error.to_string()))?;
+    for event in emitted_events {
+        let _ = state.events.send(event);
+    }
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "item": {
+                "mission_id": id,
+                "status": "awaiting_approval",
+                "tasks": created_tasks,
+                "execution_started": false
+            }
+        })),
+    ))
+}
+
 async fn get_mission(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1147,14 +1290,46 @@ async fn get_mission(
         .map_err(|error| ApiError::internal(format!("Stored mission graph is invalid: {error}")))?;
     let execution_order: Vec<String> = serde_json::from_str(&stored.1)
         .map_err(|error| ApiError::internal(format!("Stored mission order is invalid: {error}")))?;
+    let mut statement = conn
+        .prepare(
+            "SELECT mt.node_id, mt.task_id, mt.depends_on_json, t.status
+             FROM mission_tasks mt JOIN tasks t ON t.id = mt.task_id
+             WHERE mt.mission_id = ?1 ORDER BY mt.rowid",
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let rows = statement
+        .query_map(params![id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let mut tasks = Vec::new();
+    for row in rows {
+        let (node_id, task_id, dependencies_json, status) =
+            row.map_err(|error| ApiError::internal(error.to_string()))?;
+        let depends_on: Vec<String> = serde_json::from_str(&dependencies_json)
+            .map_err(|error| ApiError::internal(format!("Stored mission dependencies are invalid: {error}")))?;
+        tasks.push(json!({
+            "node_id": node_id,
+            "task_id": task_id,
+            "depends_on": depends_on,
+            "status": status
+        }));
+    }
+    let execution_started = matches!(stored.2.as_str(), "running" | "completed" | "blocked");
     Ok(Json(json!({
         "item": {
             "mission_id": graph.mission_id,
             "graph": graph,
             "execution_order": execution_order,
+            "tasks": tasks,
             "status": stored.2,
             "created_at": stored.3,
-            "execution_started": false
+            "execution_started": execution_started
         }
     })))
 }
