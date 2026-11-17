@@ -341,11 +341,15 @@ fn cpu_physical_cores(contents: &str) -> Option<usize> {
     for block in contents.split("\n\n") {
         let physical_id = block.lines().find_map(|line| {
             let (key, value) = line.split_once(':')?;
-            (key.trim() == "physical id").then(|| value.trim().parse::<u32>().ok()).flatten()
+            (key.trim() == "physical id")
+                .then(|| value.trim().parse::<u32>().ok())
+                .flatten()
         });
         let core_id = block.lines().find_map(|line| {
             let (key, value) = line.split_once(':')?;
-            (key.trim() == "core id").then(|| value.trim().parse::<u32>().ok()).flatten()
+            (key.trim() == "core id")
+                .then(|| value.trim().parse::<u32>().ok())
+                .flatten()
         });
         if let (Some(physical_id), Some(core_id)) = (physical_id, core_id) {
             cores.insert((physical_id, core_id));
@@ -608,8 +612,7 @@ mod tests {
 
     #[test]
     fn nvidia_csv_parser_includes_driver_pcie_and_live_telemetry() {
-        let sample =
-            "NVIDIA GeForce RTX 3090, 24576, 12000, 12576, 550.90.07, 1, 1, 4, 16, 37, 52, 280.5, 8.6\n";
+        let sample = "NVIDIA GeForce RTX 3090, 24576, 12000, 12576, 550.90.07, 1, 1, 4, 16, 37, 52, 280.5, 8.6\n";
         let parsed = parse_nvidia_csv(sample);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].vram_used_mib, Some(12000));
