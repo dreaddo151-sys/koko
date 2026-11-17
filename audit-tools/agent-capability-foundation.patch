@@ -562,24 +562,3 @@ index 2fb06cc..c6a1e2c 100644
      #[tokio::test]
      async fn gpu_health_route_uses_gateway() {
          let (router, server) = test_app().await;
-diff --git a/docs/PROJECT_STATUS.md b/docs/PROJECT_STATUS.md
-index 557739c..a47f523 100644
---- a/docs/PROJECT_STATUS.md
-+++ b/docs/PROJECT_STATUS.md
-@@ -63,3 +63,16 @@ The following capabilities are not implemented as complete Rust product features
- 4. Build the React operator UI against the real API and WebSocket events.
- 5. Port legacy Hub workflows incrementally behind adapters, verifying parity without interrupting existing services.
- 6. Run end-to-end acceptance on the user's workstation before calling the platform complete.
-+
-+## Agent and capability foundation — candidate implementation
-+
-+The next implementation slice adds a `dread-agents` crate with provider-neutral
-+agent/task/event contracts and typed capability metadata. The API adds a
-+SQLite-backed `/api/capabilities` registry (list, create, get). New capability
-+records retain source provenance, version, license, compatibility, dependencies,
-+adapter identity and manifest data. API-created records are forced to `disabled`;
-+activation is not exposed by these endpoints. The adapter contract is not yet
-+wired to live providers, and no imported skill or agent is executed.
-+
-+This candidate is pending remote `cargo fmt`, Clippy, workspace tests and release
-+build. Do not treat it as verified until the matching CI run passes.
