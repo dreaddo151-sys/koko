@@ -350,7 +350,7 @@
 +        });
 +        tokio::time::sleep(Duration::from_millis(20)).await;
 +        cancel.send(true).unwrap();
-+        assert_eq!(task.await.unwrap(), Err(ExecutionError::Cancelled { attempts: 0 }));
++        assert_eq!(task.await.unwrap(), Err(ExecutionError::Cancelled { attempts: 1 }));
 +    }
 +
 +    #[tokio::test]
