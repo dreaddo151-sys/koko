@@ -2,14 +2,14 @@
 
 ## Automated Rust gates — canonical source branch passed
 
-Canonical-source workflow run `44021546750` validated the tracked workspace on `integration/dread-canonical-source-run81` after bounded task execution and bearer authentication, without downloading or reapplying the baseline archive patches:
+Canonical-source workflow run `44023186920` validated the tracked workspace on `integration/dread-canonical-source-run81` after bounded task execution, bearer authentication, authenticated Pstack apply-token integration and startup queue recovery, without downloading or reapplying the baseline archive patches:
 
 1. Pstack provenance pin/tree and all 60 `files_sha256` entries — PASS
-2. Pstack importer unit tests — PASS, 9 tests
+2. Pstack importer unit tests — PASS, 11 tests
 3. Pstack importer dry-run — PASS, 58 skills and 2 agents, all disabled
 4. `cargo fmt --all -- --check` — PASS
 5. `cargo clippy --workspace --all-targets --locked -- -D warnings` — PASS
-6. `cargo test --workspace --locked` — PASS — 38 Rust tests, including task dispatch/result and bearer-authentication tests
+6. `cargo test --workspace --locked` — PASS — 39 Rust tests, including task dispatch/result, bearer-authentication and startup-recovery tests
 7. `cargo build --workspace --release --locked` — PASS
 
 The canonical branch contains the source at `dread_universal/`; the CI job checked out that branch and ran the gates directly in that directory. Draft PR #3 is open against the feature branch and has not been merged.
@@ -59,7 +59,7 @@ Run #77 passed all nine standard-library importer unit tests, fetched the exact 
 
 The `dread-orchestrator` crate passed formatting, Clippy, workspace tests and optimized release build in run #77. Its six unit tests cover concurrency, admission overflow, retry limits, cancellation and timeout. It bounds admitted work and concurrent runner futures, limits attempts, applies per-attempt timeouts and observes watch-channel cancellation.
 
-It is wired to the SQLite task API for one allowlisted read-only service-discovery runner. Two API tests verify that an approved service-discovery task runs, persists a result and success event, and that unsupported task types cannot be dispatched. It still has no provider/agent adapters, restart-recoverable worker queue, priority policy, process launch or GPU ownership. The Python GPU Supervisor remains authoritative. Approval alone still does not execute anything; the separate explicit run endpoint is required.
+It is wired to the SQLite task API for one allowlisted read-only service-discovery runner. Two API tests verify that an approved service-discovery task runs, persists a result and success event, and that unsupported task types cannot be dispatched. Startup recovery resumes only queued, approved, capability-free service-discovery tasks. Tasks found running after restart are marked failed with a persisted interruption result and are not replayed; unsupported/capability-backed queued tasks fail closed. It still has no provider/agent adapters, priority policy, process launch or GPU ownership. The Python GPU Supervisor remains authoritative. Approval alone still does not execute anything; the separate explicit run endpoint is required.
 
 ## Artifact integrity
 
@@ -83,9 +83,9 @@ The existing Python GPU Supervisor remains the only GPU lease authority. Rust ma
 | Phase | Current evidence | Acceptance still required |
 |---|---|---|
 | 0 Baseline | Historical paths/endpoints and GPU policy documented | Confirm only changed prerequisites; current local Rust toolchain and exact Supervisor adapter contract remain unverified |
-| 1 Rust foundation | Canonical source committed in `dread_universal/`; run `44021546750` passes fmt, Clippy, 38 tests and release build; loopback Bearer auth verified | Live non-conflicting workstation health smoke test |
+| 1 Rust foundation | Canonical source committed in `dread_universal/`; run `44023186920` passes fmt, Clippy, 39 tests and release build; loopback Bearer auth and startup recovery verified | Live non-conflicting workstation health smoke test |
 | 2 Service adapters | Generic read-only configured agent health probing | Dedicated Hermes/OpenHands/OpenCode/Ollama/llama.cpp/ComfyUI/DREAD adapters; one read-only request each |
-| 3 Capability registry | Disabled-by-default registry plus pinned Pstack dry-run, 9 tests | Cursor manifest/agent ingestion, compatibility taxonomy, MCP/OpenAPI/CLI inventory and representative provenance checks |
+| 3 Capability registry | Disabled-by-default registry plus pinned Pstack dry-run, 11 importer tests | Cursor manifest/agent ingestion, compatibility taxonomy, MCP/OpenAPI/CLI inventory and representative provenance checks |
 | 4 Orchestration | Task state/approval audit, event stream, bounded runner integrated with one allowlisted service-discovery task; fail-closed startup queue recovery is CI verified | Planner, provider/agent delegation, priority scheduling, result aggregation, provider cancellation and multi-agent end-to-end test |
 | 5 GPU/resources | Existing gateway boundary documented | Python GPU Supervisor adapter, resource discovery, lease ownership and one controlled inference/handoff test |
 | 6 UI | No frontend acceptance evidence | React/TypeScript/Tailwind/shadcn production build and live API/WebSocket interaction |

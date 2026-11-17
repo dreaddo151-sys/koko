@@ -25,8 +25,8 @@ The old snapshot must not be relabelled or silently substituted for the pinned s
 - Catalog inventory: 58 skills and 2 agents.
 - Provenance marker: 60 per-file SHA-256 entries.
 - Recomputed SHA-256 for every catalogued skill and agent: PASS.
-- `python3 scripts/test_import_pstack_capabilities.py`: PASS, 9 tests.
-- `python3 scripts/import_pstack_capabilities.py --root <source-root>`: PASS, dry-run validates 58 skills and 2 agents; all start disabled.
+- `python3 scripts/test_import_pstack_capabilities.py`: PASS, 11 tests, including Bearer-token header and minimum-token-length checks.
+- `python3 scripts/import_pstack_capabilities.py --root <source-root>`: PASS, dry-run validates 58 skills and 2 agents; all start disabled. Canonical-source run `44023186920` passed the authenticated importer tests and dry-run.
 - No imported skill, agent, hook, or script was executed. Live API `--apply` was not run.
 
 ## Correct interpretation

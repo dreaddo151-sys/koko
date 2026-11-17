@@ -16,7 +16,7 @@ The canonical-source branch passed the direct-source quality workflow in GitHub 
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: PASS
 - `cargo test --workspace --locked`: PASS — 34 Rust tests
 - `cargo build --workspace --release --locked`: PASS
-- Pstack importer unit tests: PASS — 9 tests
+- Pstack importer unit tests: PASS — 11 tests
 - Pinned upstream Pstack fetch/tree verification and dry-run: PASS — 58 skills and 2 agents, all disabled by default.
 - Source packaging, ZIP integrity test and artifact upload: PASS.
 
@@ -60,7 +60,7 @@ The run applied the candidate patches to the exact uploaded baseline archive bef
   - The active pinned source is `integrations/pstack/upstream/` at `0.15.43`, verified against the commit/tree and all 60 provenance hashes. The separate `integrations/pstack-upstream/` directory is a retained older `0.15.42` snapshot; it is not the importer source and has not been relabelled or overwritten.
   - `scripts/import-pstack.sh` verifies the pinned commit/tree and manifest before writing a provenance marker with per-file SHA-256 values.
   - `scripts/import_pstack_capabilities.py` defaults to dry-run; `--apply` is required to POST metadata to the explicit-port loopback API and now requires `DREAD_API_TOKEN` (at least 32 characters), sent as a Bearer token for every API request. It refuses missing/mismatched markers, changed files, unsafe paths, redirects and existing capabilities not confirmed disabled.
-  - Run #77 passed nine importer tests, fetched the pinned remote source and completed the dry-run. Canonical-source run `44019266094` independently passed the same nine tests and dry-run against the committed workspace; it also verified the pinned version, commit, tree and 60 `files_sha256` entries. Imported metadata starts disabled. No skills, agents, scripts or hooks are executed. The live API `--apply` operation has not been run.
+  - Historical run #77 passed nine importer tests. Canonical-source run `44023186920` passed 11 importer tests, verified the pinned version/commit/tree and all 60 `files_sha256` entries, and completed the dry-run for 58 skills and 2 agents. Imported metadata starts disabled. No skills, agents, scripts or hooks are executed. The live API `--apply` operation has not been run; it now requires `DREAD_API_TOKEN`.
 - Bounded execution kernel (`dread-orchestrator`) is now wired to the durable task API for one safe built-in runner:
   - Enforces a maximum of two active runners and eight admitted tasks by default.
   - Applies a 120-second per-attempt timeout, one attempt by default, and watch-channel cancellation.
@@ -137,5 +137,5 @@ The original archive/patch workflow remains historical provenance. New Rust deve
 - The Python GPU Supervisor remains the single GPU lease authority. Rust must use a defined adapter and must not independently start/stop GPU workloads or acquire another GPU lock.
 - Rust API remains loopback-only even with Bearer authentication; remote exposure is not authorized.
 - Capability ingestion is metadata-only and disabled by default; unknown code/hooks are not executed.
-- Approval currently records task state only; it is not authenticated identity and does not start execution.
+- Approval identity is derived from server-configured `DREAD_OPERATOR_ID`; approval alone does not execute a task, and explicit run dispatch remains restricted to the built-in service-discovery runner.
 - A bounded runner primitive is not yet a main orchestrator.
