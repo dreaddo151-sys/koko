@@ -460,8 +460,8 @@ mod tests {
     #[test]
     fn service_config_rejects_duplicate_ids_and_too_many_endpoints() {
         let service = super::Service {
-            id: "ollama".into(),
-            name: "Ollama".into(),
+            id: "llama-cpp".into(),
+            name: "llama.cpp".into(),
             url: "http://127.0.0.1:11434/api/tags".into(),
             role: "local-inference".into(),
         };
@@ -478,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn ollama_adapter_summarizes_model_metadata_without_returning_raw_payload() {
+    fn local_inference_adapter_summarizes_model_metadata_without_returning_raw_payload() {
         let body = br#"{"models":[{"name":"qwen3.8:27b"},{"name":"llama3:8b"}]}"#;
         assert_eq!(
             super::service_summary("local-inference", body).as_deref(),
