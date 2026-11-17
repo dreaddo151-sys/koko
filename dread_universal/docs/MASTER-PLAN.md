@@ -395,3 +395,34 @@ CI evidence is not live agent or workstation acceptance. Keep release blocked an
 ## Phase 2 mounted-storage acceptance update — 2026-11-18
 
 The host profile now enumerates persistent and network-mounted filesystems via a bounded, read-only `df` probe and exposes source/type/mount point/total/used/available MiB to the console. Pseudo-filesystems are filtered. Parser regression and the full Ubuntu 24.04 CI pipeline passed in run #403 (`44192143563`), candidate `78c8d4db95686edfe8fbb5c0bc9b86de42da3d4b`. This closes the mount-capacity inventory slice only; it does not establish physical device topology, SMART, RAID, NVMe health or complete CPU/storage discovery. Phase 2 remains partial.
+
+
+## Acceptance refresh — 2026-11-18, PR run #472
+
+**Latest validated candidate:** `aa78e66c2c9228fa14416de7df0d84aeacf41127`.
+
+### Newly closed sub-gates
+- **Mission result visibility:** the mission read API returns persisted node results, errors, attempts, elapsed time and completion time. Autonomous DAG scheduling, dependency-triggered dispatch, aggregation policy and retry remain incomplete.
+- **Hermes adapter contract:** local DREAD task identity is now kept distinct from provider run identity across status, SSE events, stop and result methods. Strict input allowlisting and a loopback HTTP lifecycle test pass. The adapter is not wired to task execution; Hermes host-tool sandbox/isolation must be independently verified before enabling it.
+- **Pstack provenance and import atomicity:** catalog, marker, manifest and license SHA-256 pins are enforced by the runtime importer; source paths reject traversal/symlink escape and every imported source file is checked against the pinned marker. The authenticated batch import endpoint is bounded, idempotent for exact disabled records, and transactional; conflicts roll back all rows. The Python importer submits one batch and validates a complete response.
+- **Installer rollback:** earlier acceptance remains; failed upgrades restore application, credentials, systemd unit and enabled/active state; failed first installs remove the newly enabled unit.
+- **GPU console:** actual host telemetry is displayed independently of Supervisor inference-lease status.
+
+### Current candidate CI evidence
+GitHub Actions PR run #472 (`44195876703`) passed all three jobs:
+1. Rust / Ubuntu 24.04 — formatting, strict Clippy, workspace tests, release build, installer syntax, portable migration/rollback tests, Python bridge/importer regressions and GPU single-owner boundary.
+2. Web console / Ubuntu 24.04 — lockfile validation, dependency install and production build.
+3. Ubuntu packages / smoke test — `.deb` and portable package assembly, checksums/content verification, disposable Ubuntu 24.04 package installation, API health, production UI, unauthenticated 401 and authenticated host-profile.
+
+### Remaining gates (release still blocked)
+- **Phase 1:** no live migration/handoff/rollback with the installed Python Master Hub; the legacy Hub source is not present in this repository.
+- **Phase 2:** complete CPU topology, all physical/mounted storage, CUDA/runtime/model/tool inventory and live current-candidate discovery.
+- **Phase 3:** autonomous dependency scheduler, resource-aware parallel dispatch, mission-level result aggregation policy, retry/timeout/cancel propagation and mission recovery.
+- **Phase 4:** verified Hermes/OpenHands/DeerFlow task adapters wired into the DREAD task lifecycle; tool sandbox, workspace isolation, cancellation and recovery acceptance.
+- **Phase 5:** signed source provenance beyond pinned hashes, transactional extension update/remove and atomic activation/rollback.
+- **Phase 6:** current-candidate physical dual-3090 inference and concurrent GPU lease contention with ComfyUI/video.
+- **Phase 7:** integrated image/video adapters, actual image artifact, playable MiniMax H3 MP4 and FlashVSR artifact, progress/cancel/download.
+- **Phase 8:** complete PASS/DENY/ASK authorization, sandbox isolation, repair simulation/postconditions and live recovery drills.
+- **Release:** signed updater/SBOM/license inventory and physical Ubuntu install/upgrade/reboot/preservation/rollback acceptance.
+
+CI run #472 is repository and disposable-runner evidence only. It does not certify a live workstation deployment. Keep PR #12 open and unmerged; preserve the existing Python Hub, ComfyUI and Python GPU Supervisor until a controlled workstation acceptance session is available.
