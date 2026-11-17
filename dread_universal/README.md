@@ -88,6 +88,8 @@ Never commit API or Supervisor tokens. Store them outside the repository with re
 | GET | `/api/capabilities/{id}/preview` | Preview source |
 | POST | `/api/capabilities/{id}/enable` | Explicit operator approval |
 | POST | `/api/capabilities/{id}/disable` | Disable profile |
+| POST | `/api/missions` | Validate and persist a dependency-aware mission plan (planning only; no auto-execution) |
+| GET | `/api/missions/{id}` | Retrieve a persisted mission plan |
 | GET/POST | `/api/tasks` | List/create tasks |
 | POST | `/api/tasks/{id}/approve` | Record approval; does not itself execute |
 | POST | `/api/tasks/{id}/run` | Queue supported approved task |
@@ -158,3 +160,18 @@ bash scripts/capture-workstation-baseline.sh
 ```
 
 The read-only baseline records Ubuntu/kernel identity, user service states, the legacy Hub/ComfyUI/Supervisor/API port status, NVIDIA driver and current-versus-maximum PCIe link data, and workspace filesystem capacity. It saves a private report under `~/.local/share/dread-universal/baselines/`. It does not start, stop or restart any service and does not dump HTTP response bodies or authentication tokens. Review and retain the report before any live migration.
+
+
+## Mission planning API
+
+Create a bounded, dependency-validated mission plan with:
+
+```http
+POST /api/missions
+Content-Type: application/json
+Authorization: Bearer <DREAD_API_TOKEN>
+```
+
+The request body contains `mission_id` and `nodes`; each node has `id`, `task_type`, optional `depends_on`, and optional numeric `priority`. Plans are limited to 128 nodes, reject missing dependencies and cycles, and are persisted in SQLite. Retrieve a plan with `GET /api/missions/{id}`.
+
+**Safety boundary:** creating a plan only stores its validated graph and deterministic execution order. It does not create or dispatch tasks, start agents, invoke tools, or bypass per-task approval. Mission execution and provider adapters remain separate unfinished acceptance gates.
