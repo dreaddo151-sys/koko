@@ -24,7 +24,9 @@ jobs:
         run: test -f Cargo.toml && test -f crates/dread-api/src/main.rs && test -f crates/dread-discovery/src/lib.rs
       - name: Resolve and lock dependencies
         run: cargo generate-lockfile
-      - name: Formatting
+      - name: Normalize Rust formatting
+        run: cargo fmt --all
+      - name: Formatting validation
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
