@@ -145,3 +145,49 @@ Do not describe the platform as complete until Master Plan acceptance gates pass
 - Commits: `ddb79ea` (workspace dependency), `6858aec` (crate dependency), `0913242` (implementation and regression test), `b214ed4` (lockfile).
 - CI run #143 (`44146062714`) was triggered for SHA `b214ed450b62406561bf1d050e835c8c68b091bb` and was pending at the time of this log update. Do not call the SHA-256 change validated until this run completes.
 - This is a content fingerprint, not a digital signature. Extension installation still needs signed/pinned catalog verification, staged activation, rollback and audit logging.
+
+
+### Exhaustive phase-gap audit — 2026-11-17 (candidate source review)
+
+The current candidate was reviewed against all phases in `MASTER-PLAN.md`. This is a source audit, not a claim of workstation acceptance.
+
+#### Newly found and corrected
+- The Python GPU Supervisor bridge used the single-threaded `HTTPServer`. A long-running inference request could block `/health` and every other bridge request for the full generation duration. Replaced it with `ThreadingHTTPServer`; the Python GPU lease remains the sole serialization/ownership mechanism.
+- Added an HTTP-level regression test that holds a mocked inference open and proves `GET /health` still returns while that request is active.
+- Added Python bridge/importer regression tests and the static single-owner GPU boundary check to Ubuntu CI. These checks were present in the repository but were not previously part of the main CI gate.
+- Removed 22 accidental tracked `*.backup_*` / `*.orig` working copies from the active source tree and added `dread_universal/.gitignore` for local backup snapshots, secrets, runtime data, Rust output and web build output. Git history remains available for recovery.
+
+#### Phase-by-phase findings
+
+- **Phase 0 — Preservation:** historical service evidence exists, but there is no fresh, machine-readable baseline generated from the live workstation in this candidate. Must verify current Hub, ComfyUI, Supervisor, bridge, Rust API, model paths, user data and systemd state before installation.
+- **Phase 1 — Hub continuity:** Rust API and React console exist, but the React console is not yet embedded into the existing Python Master Hub. No full legacy feature-parity matrix or migration/rollback rehearsal exists.
+- **Phase 2 — Discovery:** host profile currently reports OS/architecture, CPU thread count, selected GPU metadata/utilities and llama-server path. RAM, storage capacity/free space, kernel, driver/CUDA versions, PCIe link state, GPU utilization/temperature/power and model-file inventory are not yet implemented. Host profile is process-cached and therefore will not reflect hardware changes until restart.
+- **Phase 3 — Task kernel:** SQLite tasks, approval, events, bounded execution, cancellation signalling and conservative recovery exist. Mission dependency DAGs, priorities, durable schedules, operator identity/auth integration with the legacy Hub, and long-payload round-trip tests remain incomplete. Cancellation of GPU chat cancels the Rust request, but the synchronous Python bridge/upstream may continue holding the GPU lease until its request completes or times out; this must be resolved or explicitly exposed as cancellation-pending.
+- **Phase 4 — Agent adapters:** only provider-neutral traits and health-only discovery exist. No Hermes/OpenHands/DeerFlow start/status/events/cancel/result adapter is registered. OpenHands must use an isolated workspace, strict tool allowlist, session-key authentication, stable secret handling and DREAD-controlled LLM routing before activation. Current official Agent Server guidance confirms the session-key header and warns that workspace tools can read/write files and execute commands; see official OpenHands Agent Server guide: https://github.com/OpenHands/docs/blob/main/sdk/arch/agent-server.mdx
+- **Phase 5 — Extensions:** Pstack profiles are discovered/imported, previewed, enabled/disabled and loaded as bounded untrusted model context; SHA-256 fingerprints now detect source changes. There is no transactional install/update/remove lifecycle, atomic activation/rollback, signed publisher/catalog verification, or reviewed executable tool/MCP manifest runtime. SHA-256 content hashing is not a publisher signature.
+- **Phase 6 — GPU:** Rust submits chat through the authenticated bridge; Python Supervisor owns the lease and managed tensor process. Bridge now serves requests concurrently while the existing lease controls GPU access. Actual dual-3090 concurrent workload, fairness, lease timeout/recovery and current workstation inference must be re-tested. The Rust gateway health/models path and bridge upstream must be kept distinct to avoid nested lease acquisition.
+- **Phase 7 — Media:** ComfyUI discovery exists, but no integrated DREAD image/video job adapter, MiniMax H3 validation, FlashVSR integration, progress/cancel path, or real playable MP4 artifact acceptance is present in this candidate.
+- **Phase 8 — Security/self-repair:** loopback-only API, bearer auth, explicit approval and disabled-by-default imported Markdown exist. No complete PASS/DENY/ASK permission engine, least-privilege sandbox, repair simulation/postcondition engine, signed update trust chain or restore/rollback drill is implemented.
+- **Phase 9 — Unified UI:** the React console exposes system/task/GPU/model/agent/capability views, but no integrated legacy Hub parity, multi-session/project/checkpoint experience, agent execution UX, media output controls or complete telemetry.
+- **Phase 10 — Installer/updater:** release workflow currently assembles a portable API + static-web bundle and SHA-256 checksum only. It is not an installer. No `.deb`, systemd unit, first-run setup, configuration migration, user-data backup/restore, transactional updater or rollback package exists. `web/package-lock.json` is absent, so frontend transitive dependency resolution is not yet locked/reproducible.
+- **Phase 11 — Acceptance:** current CI previously passed Rust formatting, strict Clippy, Rust tests, release build and web build on run #147 at SHA `d51f488`. The newer CI now additionally runs Python bridge/importer tests and the GPU ownership boundary guard; its result must be checked before considering that expanded gate green. No current workstation acceptance or release artifacts have been produced.
+
+#### Additional regression/acceptance cases required before release
+
+1. Clean Ubuntu 24.04 install and in-place upgrade with existing Hub/ComfyUI/Supervisor left running.
+2. Reboot persistence for all systemd user services; no duplicate llama-server or second GPU lease owner.
+3. API auth missing/invalid/valid, WebSocket auth/reconnect, loopback bind rejection, oversized bodies and malformed JSON.
+4. Task approval single-use, cancellation at each state, process restart during inference, duplicate dispatch prevention and recovery audit.
+5. 5 KB / 10 KB / 20 KB prompt round trips and response truncation/size boundaries.
+6. Two concurrent inference requests with lease fairness, ComfyUI image generation during inference, video generation while the Supervisor manages model lifecycle, and bridge health responsiveness.
+7. Imported skill symlink/path traversal, TOCTOU, oversize, invalid UTF-8, tampered source, stale revision, malicious prompt injection, disabled/enable/disable and restart persistence.
+8. OpenHands adapter mock contract tests for auth, timeout, unknown event kinds, idempotency, cancel, result retrieval, workspace escape attempts and forbidden tools before any live endpoint is enabled.
+9. Real image file validation, playable MP4 decode/metadata validation, interrupted render cleanup and FlashVSR output comparison.
+10. Installer signature/checksum verification, interrupted install/update, DB migration failure, rollback, uninstall preserving user data, and no Vite server in production.
+
+#### Current implementation activity after this audit
+- Bridge threading fix: commit `72c05aaf85e1e5d45c132bb9bdb5764607a4e458`.
+- Health-during-inference integration regression test: commit `2546afb723475a6375b1525c6410ae90a98f9e7f`.
+- CI expansion (Python tests + GPU ownership boundary): commit `52b770c8f83a7f21f313c20764a9df1c5c0e7b32`.
+- Source-tree cleanup and ignore rules: commits `41dba3afaf406b4c986382567a06d22f7a9339ba` and subsequent cleanup commits through `fc811b466dfa847776eebd5c8ecf657eddd22935`.
+- Latest test run for bridge concurrency and expanded CI is pending; do not report the new test as passed until CI completes.
