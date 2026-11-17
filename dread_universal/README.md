@@ -73,9 +73,9 @@ Creating a task only creates a durable `pending_approval` record. Approval recor
 
 ## Pstack catalog import
 
-The catalog pins Pstack `0.15.43` (commit `2f87c854fe3e2fcda44ca86b46ede35aad3c46b7`, subtree `71d8e1d1d718e2149dc43b2535618064f29cba6b`, MIT): 58 skills and 2 agents. The bundled `integrations/pstack-upstream` copy is version `0.15.42` and is not accepted as the pinned source.
+The catalog pins Pstack `0.15.43` (commit `2f87c854fe3e2fcda44ca86b46ede35aad3c46b7`, subtree `71d8e1d1d718e2149dc43b2535618064f29cba6b`, MIT): 58 skills and 2 agents. The active pinned source is `integrations/pstack/upstream/` at version `0.15.43`. The separate `integrations/pstack-upstream/` copy is an older retained `0.15.42` snapshot and is not used by the importer.
 
-CI run `44014112205` fetched and verified the pinned upstream commit/tree, passed nine importer unit tests and completed a metadata dry-run. First run `scripts/import-pstack.sh` to fetch and verify the exact catalog commit/tree. Then run `python3 scripts/import_pstack_capabilities.py` for validation/dry-run. Only add `--apply` when the loopback Rust API is running and metadata registration is intended. The live API `--apply` operation remains unverified. Existing entries must be confirmed disabled. This importer records metadata only: it never executes skill contents, agents, hooks or scripts.
+Canonical-source CI run `44019266094` verified the committed Pstack pin/tree and all 60 provenance hashes, passed nine importer unit tests and completed a metadata dry-run for 58 skills and 2 agents. First run `scripts/import-pstack.sh` to fetch and verify the exact catalog commit/tree. Then run `python3 scripts/import_pstack_capabilities.py` for validation/dry-run. Only add `--apply` when the loopback Rust API is running and metadata registration is intended. The live API `--apply` operation remains unverified. Existing entries must be confirmed disabled. This importer records metadata only: it never executes skill contents, agents, hooks or scripts.
 
 ## GPU ownership and service safety
 
@@ -83,7 +83,7 @@ The Python GPU Supervisor remains the only GPU ownership, VRAM lease and process
 
 ## Scope
 
-This is a tested Rust foundation, not the complete Universal Hub. WebSocket task-event streaming, read-only agent discovery, disabled-by-default capability metadata and the Pstack pinned metadata dry-run have CI evidence. The bounded orchestration kernel exists as an isolated crate but is not connected to the durable task API or a provider adapter. Remaining milestones include an end-to-end WebSocket client handshake/reconnect test, live Pstack API `--apply`, authentication, provider-specific adapters, React operator UI, legacy Hub parity, installer/upgrade/rollback and live dual-RTX-3090 acceptance.
+This is a tested Rust foundation with a canonical tracked source branch, not the complete Universal Hub. WebSocket task-event streaming, read-only agent discovery, disabled-by-default capability metadata and the Pstack pinned metadata dry-run have CI evidence. The bounded orchestration kernel exists as an isolated crate but is not connected to the durable task API or a provider adapter. Remaining milestones include an end-to-end WebSocket client handshake/reconnect test, live Pstack API `--apply`, authentication, provider-specific adapters, React operator UI, legacy Hub parity, installer/upgrade/rollback and live dual-RTX-3090 acceptance.
 
 See [project status](docs/PROJECT_STATUS.md) and [verification gates](docs/VERIFICATION.md).
 
