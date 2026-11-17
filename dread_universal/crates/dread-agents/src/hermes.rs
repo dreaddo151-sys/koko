@@ -669,12 +669,8 @@ mod tests {
 
     #[test]
     fn maps_provider_run_id_without_overwriting_local_task_identity() {
-        let adapter = HermesApiAdapter::new(
-            "http://127.0.0.1:8642",
-            "test-api-key",
-            "Hermes",
-        )
-        .unwrap();
+        let adapter =
+            HermesApiAdapter::new("http://127.0.0.1:8642", "test-api-key", "Hermes").unwrap();
         let task = adapter.to_task(
             "dread-task-42",
             &json!({"run_id":"run_provider-9","status":"completed","output":"done"}),
