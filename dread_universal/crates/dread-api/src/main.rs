@@ -786,7 +786,7 @@ async fn enable_capability(
     }
 
     let now = now_epoch();
-    let mut conn = db_lock(&state)?;
+    let conn = db_lock(&state)?;
     let encoded = conn
         .query_row(
             "SELECT record_json FROM capabilities WHERE id = ?1",
@@ -868,7 +868,7 @@ async fn disable_capability(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut conn = db_lock(&state)?;
+    let conn = db_lock(&state)?;
     let encoded = conn
         .query_row(
             "SELECT record_json FROM capabilities WHERE id = ?1",
@@ -3254,6 +3254,7 @@ mod tests {
                 "model": "not-allowed",
                 "messages": [{"role": "user", "content": "hello"}]
             }),
+            &[],
         )
         .await
         .unwrap_err();
