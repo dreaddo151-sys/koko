@@ -725,13 +725,13 @@ mod tests {
 
     #[test]
     fn nvidia_cuda_umd_banner_is_parsed_as_driver_cuda_compatibility() {
-        let banner = "NVIDIA-SMI 615.78.08 KMD Version: 615.78.08 CUDA UMD Version: 13.4\\n";
+        let banner = "NVIDIA-SMI 615.78.08 KMD Version: 615.78.08 CUDA UMD Version: 13.4\n";
         assert_eq!(parse_nvidia_cuda_version(banner).as_deref(), Some("13.4"));
     }
 
     #[test]
     fn nvcc_release_is_parsed_independently_from_driver_cuda_version() {
-        let output = "Cuda compilation tools, release 13.0, V13.0.48\\n";
+        let output = "Cuda compilation tools, release 13.0, V13.0.48\n";
         assert_eq!(parse_nvcc_version(output).as_deref(), Some("13.0"));
         assert_eq!(parse_nvcc_version("no compiler version"), None);
     }
