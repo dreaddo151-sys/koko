@@ -672,6 +672,24 @@ mod tests {
     }
 
     #[test]
+    fn maps_provider_run_id_without_overwriting_local_task_identity() {
+        let adapter = HermesApiAdapter::new(
+            "http://127.0.0.1:8642",
+            "test-api-key",
+            "Hermes",
+        )
+        .unwrap();
+        let task = adapter.to_task(
+            "dread-task-42",
+            &json!({"run_id":"run_provider-9","status":"completed","output":"done"}),
+        );
+        assert_eq!(task.task_id, "dread-task-42");
+        assert_eq!(task.provider_task_id.as_deref(), Some("run_provider-9"));
+        assert_eq!(task.state, AgentTaskState::Succeeded);
+        assert_eq!(task.result.unwrap()["output"], "done");
+    }
+
+    #[test]
     fn maps_documented_hermes_terminal_statuses_without_success_bias() {
         assert_eq!(run_state("completed"), AgentTaskState::Succeeded);
         assert_eq!(run_state("cancelled"), AgentTaskState::Cancelled);
