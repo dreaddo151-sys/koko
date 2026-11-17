@@ -1,0 +1,74 @@
+name: DREAD Universal Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dread-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: dread_universal
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build portable API executable
+        run: cargo build --release --locked --bin dread-universal
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: dread-universal-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            dread_universal/target/release/dread-universal
+            dread_universal/target/release/dread-universal.exe
+          if-no-files-found: error
+
+  web:
+    name: Build web console
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dread_universal/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dread-universal-web
+          path: dread_universal/web/dist/
+
+  publish:
+    name: Publish checksummed release assets
+    needs: [build, web]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create SHA-256 manifest
+        run: |
+          cd dist
+          find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/**/*
