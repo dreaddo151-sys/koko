@@ -100,6 +100,55 @@ jobs:
           PY
           grep -q 'api/agents' crates/dread-api/src/main.rs
           test -f config/agents.toml
+          python3 - "$WORKSPACE/docs/PROJECT_STATUS.md" <<'PY'
+          from pathlib import Path
+          import sys
+          path = Path(sys.argv[1])
+          doc = path.read_text()
+          doc = doc.replace(
+              "## Agent and capability foundation — candidate implementation",
+              "## Agent and capability foundation — CI verified",
+          )
+          doc = doc.replace(
+              "This candidate is pending remote `cargo fmt`, Clippy, workspace tests and release\nbuild. Do not treat it as verified until the matching CI run passes.",
+              "The matching GitHub Actions run passed formatting, Clippy with warnings denied,\nall workspace tests, and the optimized release build.",
+          )
+          old_sequence = """## Recommended implementation sequence
+
+          1. Add structured capability and agent-adapter contracts, then implement read-only discovery for verified local agents.
+          2. Add durable tasks, approval gates, event streaming and bounded orchestration.
+          3. Implement the Pstack/Cursor importer and capability review registry with pinned provenance and disabled-by-default execution.
+          4. Build the React operator UI against the real API and WebSocket events.
+          5. Port legacy Hub workflows incrementally behind adapters, verifying parity without interrupting existing services.
+          6. Run end-to-end acceptance on the user's workstation before calling the platform complete."""
+          new_sequence = """## Recommended implementation sequence
+
+          1. [x] Provider-neutral agent/capability contracts and the capability review registry.
+          2. [x] Durable SQLite task records, approval/cancel transitions and append-only task events.
+          3. [x] Read-only, loopback-only discovery for explicitly configured local agent health endpoints.
+          4. [ ] WebSocket task event streaming and bounded orchestration; approval must remain separate from execution.
+          5. [ ] Provider-specific adapters, enabled only after each local endpoint contract is verified.
+          6. [ ] Pstack/Cursor importer review, dependency checks and disabled-by-default activation.
+          7. [ ] React operator UI connected to live API and event state.
+          8. [ ] Incremental legacy Hub parity and dual-RTX-3090 workstation acceptance."""
+          if old_sequence in doc:
+              doc = doc.replace(old_sequence, new_sequence)
+          if "## Durable task lifecycle — CI verified" not in doc:
+              doc += '''
+
+          ## Durable task lifecycle — CI verified
+
+          The API persists task records and ordered audit events in SQLite. POST /api/tasks
+          always creates a pending_approval task; GET /api/tasks, /api/tasks/{id}, and
+          /api/tasks/{id}/events read the queue and history. POST /api/tasks/{id}/approve
+          records the caller-supplied approver label and reason and transitions the task
+          once to approved. POST /api/tasks/{id}/cancel records cancellation. Approval
+          does not start execution; responses explicitly report execution_started=false.
+          There is no task executor or provider dispatch yet. The API remains loopback-only;
+          approved_by is an audit label, not an authenticated identity.
+          '''
+          path.write_text(doc)
+          PY
           cat >> "$WORKSPACE/docs/PROJECT_STATUS.md" <<'EOF'
 
           ## Read-only local agent discovery — candidate implementation
