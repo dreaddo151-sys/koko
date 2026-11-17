@@ -2,10 +2,11 @@ use axum::body::Body;
 use axum::{
     Json, Router,
     extract::{
-        DefaultBodyLimit, Path, Query, State, WebSocketUpgrade,
+        DefaultBodyLimit, Path, Query, Request, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
-    http::StatusCode,
+    http::{StatusCode, header::AUTHORIZATION},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -38,6 +39,9 @@ struct AppState {
     events: broadcast::Sender<TaskEvent>,
     execution: ExecutionGate,
     cancellations: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    api_token: Option<String>,
+    operator_id: String,
+    auth_required: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -111,7 +115,6 @@ struct CreateTask {
 
 #[derive(Debug, Deserialize)]
 struct ApproveTask {
-    approved_by: String,
     reason: String,
 }
 
@@ -800,7 +803,7 @@ async fn approve_task(
     Path(id): Path<String>,
     Json(input): Json<ApproveTask>,
 ) -> Result<Json<Value>, ApiError> {
-    let approved_by = input.approved_by.trim();
+    let approved_by = state.operator_id.trim();
     let reason = input.reason.trim();
     if approved_by.is_empty() || reason.is_empty() {
         return Err(ApiError::bad_request("approved_by and reason are required"));
@@ -1282,9 +1285,50 @@ async fn gpu_inference(
         .map_err(|e| ApiError::internal(format!("Could not forward GPU response: {e}")))
 }
 
+fn constant_time_eq(expected: &[u8], actual: &[u8]) -> bool {
+    if expected.len() != actual.len() {
+        return false;
+    }
+    expected
+        .iter()
+        .zip(actual)
+        .fold(0_u8, |difference, (left, right)| difference | (left ^ right))
+        == 0
+}
+
+async fn require_api_token(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !state.auth_required {
+        return next.run(request).await;
+    }
+
+    let Some(expected) = state.api_token.as_deref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "DREAD_API_TOKEN is not configured"})),
+        )
+            .into_response();
+    };
+    let supplied = request
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    if !supplied.is_some_and(|token| constant_time_eq(expected.as_bytes(), token.as_bytes())) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "A valid Bearer token is required"})),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
 fn app(state: AppState) -> Router {
-    Router::new()
-        .route("/health", get(health))
+    let protected = Router::new()
         .route("/api/gpu/health", get(gpu_health))
         .route("/api/gpu/models", get(gpu_models))
         .route("/api/tasks", get(list_tasks).post(create_task))
@@ -1309,13 +1353,18 @@ fn app(state: AppState) -> Router {
             get(get_registry_item).delete(delete_registry_item),
         )
         .layer(DefaultBodyLimit::max(MAX_API_BODY_BYTES))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_api_token));
+
+    Router::new()
+        .route("/health", get(health))
+        .merge(protected)
         .with_state(state)
 }
 
 fn validate_bind_address(addr: SocketAddr) -> anyhow::Result<()> {
     anyhow::ensure!(
         addr.ip().is_loopback(),
-        "DREAD_BIND must be a loopback address until API authentication is implemented"
+        "DREAD_BIND must remain loopback until remote access policy is separately reviewed"
     );
     Ok(())
 }
@@ -1343,6 +1392,9 @@ async fn main() -> anyhow::Result<()> {
         execution: ExecutionGate::new(ExecutionConfig::default())
             .map_err(|error| anyhow::anyhow!("Invalid execution configuration: {error:?}"))?,
         cancellations: Arc::new(Mutex::new(HashMap::new())),
+        api_token: env::var("DREAD_API_TOKEN").ok().filter(|token| !token.trim().is_empty()),
+        operator_id: env::var("DREAD_OPERATOR_ID").unwrap_or_else(|_| "local-operator".to_string()),
+        auth_required: true,
     };
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -1406,6 +1458,21 @@ mod tests {
         broadcast::Receiver<TaskEvent>,
         tokio::task::JoinHandle<()>,
     ) {
+        test_app_with_auth_mode(false).await
+    }
+
+    async fn test_app_with_auth() -> (Router, tokio::task::JoinHandle<()>) {
+        let (router, _receiver, server) = test_app_with_auth_mode(true).await;
+        (router, server)
+    }
+
+    async fn test_app_with_auth_mode(
+        auth_required: bool,
+    ) -> (
+        Router,
+        broadcast::Receiver<TaskEvent>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let mock = Router::new()
             .route("/health", get(mock_health))
             .route("/v1/models", get(mock_models))
@@ -1430,6 +1497,9 @@ mod tests {
                 events,
                 execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
                 cancellations: Arc::new(Mutex::new(HashMap::new())),
+                api_token: Some("test-token".to_string()),
+                operator_id: "test-operator".to_string(),
+                auth_required,
             }),
             receiver,
             server,
@@ -1439,6 +1509,61 @@ mod tests {
     async fn test_app() -> (Router, tokio::task::JoinHandle<()>) {
         let (router, _receiver, server) = test_app_with_events().await;
         (router, server)
+    }
+
+    #[tokio::test]
+    async fn api_requires_valid_bearer_token_when_authentication_is_enabled() {
+        let (router, server) = test_app_with_auth().await;
+
+        let health = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+
+        let missing = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+        let invalid = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks")
+                    .header(AUTHORIZATION, "Bearer incorrect-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+
+        let valid = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks")
+                    .header(AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(valid.status(), StatusCode::OK);
+        server.abort();
     }
 
     #[tokio::test]
