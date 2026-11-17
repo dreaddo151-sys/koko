@@ -236,6 +236,7 @@ dependencies = [
  "dread-discovery",
  "dread-gpu",
  "dread-orchestrator",
+ "dread-platform",
  "dread-skills",
  "futures",
  "reqwest",
@@ -279,6 +280,13 @@ version = "0.4.0"
 dependencies = [
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "dread-platform"
+version = "0.4.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
