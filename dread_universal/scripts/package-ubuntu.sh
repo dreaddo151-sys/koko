@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "\${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-for command in cargo npm dpkg dpkg-deb sha256sum python3 tar; do
+for command in dpkg dpkg-deb sha256sum python3 tar install; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'Missing packaging prerequisite: %s\n' "$command" >&2
     exit 1
