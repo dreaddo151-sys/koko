@@ -35,12 +35,12 @@ The run applied the candidate patches to the exact uploaded baseline archive bef
   - `POST /api/tasks` creates a task in `pending_approval`.
   - `GET /api/tasks`, `GET /api/tasks/{id}` and `GET /api/tasks/{id}/events` read task state/history.
   - `POST /api/tasks/{id}/approve` records an approver label and reason and allows a single transition to `approved`; approval alone never starts execution.
-  - `POST /api/tasks/{id}/run` explicitly queues only the reviewed built-in `service_discovery` runner, and only for approved tasks without a capability ID.
+  - `POST /api/tasks/{id}/run` explicitly queues only reviewed built-in `service_discovery` and `gpu_chat` runners, and only for approved tasks without a capability ID.
   - `GET /api/tasks/{id}/result` reads persisted execution results.
   - `POST /api/tasks/{id}/cancel` cancels pending, approved, queued or running tasks and signals the active runner.
   - The runner uses the bounded `dread-orchestrator` gate (default max concurrency 2, max admitted 8, one attempt, 120-second per-attempt timeout). It performs configured loopback-only HTTP health probes; it does not execute shell commands, imported skills, plugins or agent code.
   - Results and lifecycle events are persisted. API CI verifies successful execution, result retrieval, terminal task state and success-event history.
-  - This is deliberately narrow: there is no provider/agent dispatch, capability-backed runner or priority policy. Startup recovery resumes only queued approved capability-free `service_discovery` tasks; interrupted `running` tasks are marked failed and never replayed. Unsupported or capability-linked queued work is failed closed.
+  - This is deliberately narrow: there is no provider/agent delegation, capability-backed runner or priority policy. Startup recovery resumes only queued approved capability-free `service_discovery` tasks. Queued `gpu_chat` work is failed closed after restart to avoid duplicate inference; interrupted `running` tasks are marked failed and never replayed. Unsupported or capability-linked queued work is failed closed.
 - Read-only local agent health discovery at `GET /api/agents`:
   - Reads `config/agents.toml` or `DREAD_AGENTS_CONFIG`.
   - Empty configuration by default; at most 32 entries and unique IDs.
@@ -64,7 +64,7 @@ The run applied the candidate patches to the exact uploaded baseline archive bef
 - Bounded execution kernel (`dread-orchestrator`) is now wired to the durable task API for one safe built-in runner:
   - Enforces a maximum of two active runners and eight admitted tasks by default.
   - Applies a 120-second per-attempt timeout, one attempt by default, and watch-channel cancellation.
-  - The API queues and runs only `service_discovery` tasks after explicit approval; tasks linked to a capability or using any other task type are rejected.
+  - The API queues and runs only approved capability-free `service_discovery` and `gpu_chat` tasks. `gpu_chat` validates bounded text-only messages, checks model availability through the local GPU gateway, forces non-streaming inference and stores a bounded JSON result. It does not acquire GPU leases or bypass the Python GPU Supervisor.
   - Execution results are stored in SQLite; task queued/started/succeeded/failed/cancelled events are appended transactionally and broadcast after commit.
   - Cancellation can signal a running task. Startup recovery resumes only queued approved capability-free `service_discovery` tasks; interrupted running tasks are marked failed and not replayed. Unsupported or capability-linked queued tasks fail closed.
   - Orchestrator unit tests cover concurrency, admission overflow, retry bounds, active cancellation and timeout. API tests cover the allowlisted dispatch, persisted result and rejection of unsupported task types.
@@ -93,7 +93,7 @@ The run applied the candidate patches to the exact uploaded baseline archive bef
 6. [x] Loopback API Bearer authentication, fail-closed token configuration and server-derived approval identity (CI verified); [ ] role-based authorization, token rotation and any remote-access policy.
 7. [ ] Provider-specific adapters, enabled only after each local endpoint contract is verified.
 8. [x] Pstack pinned metadata importer, authenticated live API apply, persisted readback, disabled-state verification and idempotent re-import (run `44025427057` passed).
-9. [x] Bounded execution kernel primitive, one allowlisted read-only service-discovery runner, and fail-closed startup queue recovery integrated with durable task lifecycle (CI verified); [ ] priority/resource-aware policy and provider/agent adapters.
+9. [x] Bounded execution kernel integrated with the durable task lifecycle: read-only service discovery and approval-gated local GPU chat through the existing gateway; fail-closed restart recovery (CI verified); [ ] priority/resource-aware policy and provider/agent adapters.
 10. [ ] React/TypeScript operator UI driven by real API and event state.
 11. [ ] Incremental legacy Python Hub workflow parity, installer/upgrade/rollback, backup/restore tests and dual-RTX-3090 workstation acceptance.
 
@@ -107,10 +107,10 @@ The master architecture plan is the target specification, not a declaration of c
 | Master-plan phase | Status | Evidence / remaining gate |
 |---|---|---|
 | 0 — Baseline | PARTIAL | Historical workstation map exists. Current local Rust/rustup installation, current service states and GPU Supervisor adapter contract have not been revalidated in this GitHub workflow. Do not repeat a full workstation audit. |
-| 1 — Rust foundation | CANONICAL SOURCE / CI PASS | The complete Rust workspace is committed at `dread_universal/`; run `44025427057` (run #30) passed Pstack provenance, 11 importer tests, formatting, Clippy, 40 Rust tests, optimized release build and the authenticated live Pstack import/readback/idempotency check. Loopback Bearer auth, server-derived approval identity and startup recovery are included. A live non-conflicting workstation health smoke test remains outstanding. |
+| 1 — Rust foundation | CANONICAL SOURCE / CI PASS | The complete Rust workspace is committed at `dread_universal/`; run `44068498087` (run #35) passed Pstack provenance, 11 importer tests, formatting, Clippy, 43 Rust tests, optimized release build and authenticated live Pstack import/readback/idempotency. Loopback Bearer auth, server-derived approval identity and startup recovery are included. A live non-conflicting workstation health smoke test remains outstanding. |
 | 2 — Existing service adapters | NOT VERIFIED | No completed Hermes, OpenHands, OpenCode, Ollama, llama.cpp gateway, ComfyUI or DREAD Hub adapter contract and representative read-only request is evidenced by this workflow. Agent health discovery is generic configured HTTP probing, not those dedicated adapters. |
 | 3 — Capability registry | PARTIAL | Capability metadata registry and pinned Pstack dry-run/importer tests pass. Full Cursor plugin ingestion, compatibility classification, MCP/OpenAPI/CLI/service inventory and representative sample reconciliation remain outstanding. |
-| 4 — Agent orchestration | PARTIAL | Durable task lifecycle, approval audit, WebSocket replay/live stream with authenticated handshake and reconnect test, bounded runner, one allowlisted read-only service-discovery task and fail-closed startup queue recovery pass CI. No planner, provider/agent delegation, priority scheduling, result aggregation or multi-agent end-to-end test yet. |
+| 4 — Agent orchestration | PARTIAL | Durable task lifecycle, approval audit, authenticated WebSocket replay/live stream, bounded runner with service-discovery and GPU-chat tasks, and fail-closed restart handling pass CI. No planner, provider/agent delegation, priority scheduling, result aggregation or multi-agent end-to-end test yet. |
 | 5 — GPU/resource coordination | NOT VERIFIED | The documented GPU gateway boundary exists, but no Rust adapter to the existing Python GPU Supervisor, resource inventory, lease/handoff test or controlled inference verification is evidenced here. Do not create a second scheduler. |
 | 6 — Modern interface | NOT STARTED / NOT VERIFIED | No React/TypeScript/Tailwind/shadcn frontend or production UI build is evidenced. |
 | 7 — Diagnostics and controlled repair | NOT STARTED | No diagnosis/repair workflow, simulation, approval-gated patch application, backup/rollback executor or reversible repair test is evidenced. |

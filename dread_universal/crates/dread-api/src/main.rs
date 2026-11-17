@@ -1899,6 +1899,7 @@ mod tests {
                 ("queued-safe", "service_discovery", "queued", None),
                 ("running-interrupted", "service_discovery", "running", None),
                 ("queued-unsupported", "arbitrary_command", "queued", None),
+                ("queued-gpu-chat", "gpu_chat", "queued", None),
                 (
                     "queued-capability",
                     "service_discovery",
@@ -1958,6 +1959,7 @@ mod tests {
         for id in [
             "running-interrupted",
             "queued-unsupported",
+            "queued-gpu-chat",
             "queued-capability",
         ] {
             let status: String = conn

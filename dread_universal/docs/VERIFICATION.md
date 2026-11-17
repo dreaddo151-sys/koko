@@ -2,14 +2,14 @@
 
 ## Automated Rust gates — canonical source branch passed
 
-Canonical-source workflow run `44025427057` (run #30) validated the tracked workspace on `integration/dread-canonical-source-run81` after bounded task execution, bearer authentication, authenticated Pstack apply-token integration and startup queue recovery, without downloading or reapplying the baseline archive patches:
+Canonical-source workflow run `44068498087` (run #35) validated the tracked workspace on `integration/dread-canonical-source-run81` after bounded task execution, bearer authentication, authenticated Pstack apply-token integration and startup queue recovery, without downloading or reapplying the baseline archive patches:
 
 1. Pstack provenance pin/tree and all 60 `files_sha256` entries — PASS
 2. Pstack importer unit tests — PASS, 11 tests
 3. Pstack importer dry-run — PASS, 58 skills and 2 agents, all disabled
 4. `cargo fmt --all -- --check` — PASS
 5. `cargo clippy --workspace --all-targets --locked -- -D warnings` — PASS
-6. `cargo test --workspace --locked` — PASS — 40 Rust tests, including task dispatch/result, bearer-authentication, WebSocket handshake/replay/reconnect and startup-recovery tests
+6. `cargo test --workspace --locked` — PASS — 43 Rust tests, including GPU-chat gateway dispatch/result, unsafe-payload/model-allowlist rejection, bearer authentication, WebSocket handshake/replay/reconnect and startup-recovery tests
 7. `cargo build --workspace --release --locked` — PASS
 8. Authenticated API integration — PASS: unauthenticated capability request returned 401; 58 skills + 2 agents imported; 60 records read back with `disabled` status; second import created 0 and found 60 already present.
 
@@ -39,10 +39,10 @@ The historical run #77 workflow applied candidate patches to the exact uploaded 
 - Agent status mapping: 2xx ONLINE; 3xx REDIRECTED; 4xx REACHABLE; 5xx DEGRADED; connection failure OFFLINE; timeout UNKNOWN.
 - Disabled agent entries make no network request.
 - Task creation enters `pending_approval`; approval alone records state/audit and does not start execution.
-- Explicit `POST /api/tasks/{id}/run` dispatches only approved, capability-free `service_discovery` tasks. Unsupported task types and capability-backed tasks return conflict.
-- The built-in runner performs only configured loopback HTTP service probes through the existing discovery client; no shell, plugin, skill or agent code is executed.
+- Explicit `POST /api/tasks/{id}/run` dispatches only approved, capability-free `service_discovery` and `gpu_chat` tasks. Unsupported task types and capability-backed tasks return conflict. `gpu_chat` accepts bounded text-only messages, verifies model availability through the local gateway, and forces non-streaming inference.
+- The service-discovery runner performs configured loopback HTTP probes. The `gpu_chat` runner uses only the loopback GPU gateway at `127.0.0.1:11500`, verifies model availability and stores a bounded JSON result; it does not acquire GPU leases or call upstream model servers directly. No shell, plugin, skill or agent code is executed.
 - Execution uses the bounded gate (2 concurrent, 8 admitted by default, 1 attempt, 120-second timeout); results are persisted at `GET /api/tasks/{id}/result`.
-- Startup recovery resumes only queued, approved, capability-free service-discovery tasks. Interrupted running tasks are marked failed and not replayed; unsupported or capability-linked queued tasks fail closed. This behavior is covered by the recovery test.
+- Startup recovery resumes only queued, approved, capability-free service-discovery tasks. Queued `gpu_chat` inference is failed closed after restart to avoid duplicate compute; interrupted running tasks are marked failed and not replayed. Unsupported or capability-linked queued tasks fail closed. This behavior is covered by the recovery test.
 - `DREAD_API_TOKEN` must be configured and at least 32 characters; missing server token configuration fails closed with 503, and missing/invalid request credentials return 401.
 - Approval identity is derived from server-side `DREAD_OPERATOR_ID`; request-supplied approver names are not trusted.
 - Authentication is single-operator bearer-token authentication. Role-based authorization, token rotation and remote-access policy are not implemented; API binding remains loopback-only.
@@ -56,11 +56,11 @@ The historical run #77 workflow applied candidate patches to the exact uploaded 
 
 Run #77 passed all nine standard-library importer unit tests, fetched the exact catalog-pinned upstream commit/tree and completed the 58-skill/2-agent dry-run. The pinned catalog is Pstack `0.15.43`, commit `2f87c854fe3e2fcda44ca86b46ede35aad3c46b7`, subtree `71d8e1d1d718e2149dc43b2535618064f29cba6b`, MIT. The active importer reads `integrations/pstack/upstream/` at `0.15.43`; the separate `integrations/pstack-upstream/` snapshot remains `0.15.42` and is retained as historical/reference content. Run `44025427057` started a temporary loopback Rust API with a CI-only token, verified missing credentials return 401, applied the importer, read back all 60 records and verified every record remained disabled. A second apply created zero records and reported all 60 already present. The importer requires `DREAD_API_TOKEN` for `--apply`; dry-run remains offline and token-free. This is an isolated CI integration, not a workstation import.
 
-## Bounded execution kernel (CI verified; integration pending)
+## Bounded execution kernel (CI verified; gateway mock integration passed)
 
 The `dread-orchestrator` crate passed formatting, Clippy, workspace tests and optimized release build in run #77. Its six unit tests cover concurrency, admission overflow, retry limits, cancellation and timeout. It bounds admitted work and concurrent runner futures, limits attempts, applies per-attempt timeouts and observes watch-channel cancellation.
 
-It is wired to the SQLite task API for one allowlisted read-only service-discovery runner. Two API tests verify that an approved service-discovery task runs, persists a result and success event, and that unsupported task types cannot be dispatched. Startup recovery resumes only queued, approved, capability-free service-discovery tasks. Tasks found running after restart are marked failed with a persisted interruption result and are not replayed; unsupported/capability-backed queued tasks fail closed. It still has no provider/agent adapters, priority policy, process launch or GPU ownership. The Python GPU Supervisor remains authoritative. Approval alone still does not execute anything; the separate explicit run endpoint is required.
+It is wired to the SQLite task API for two reviewed runners: read-only service discovery and bounded non-streaming GPU chat through the existing loopback gateway. API tests verify approved service-discovery execution, GPU-chat execution through a mock gateway, persisted results, rejection of unsupported task types and rejection of invalid or unadvertised GPU models. Startup recovery resumes only queued, approved, capability-free service-discovery tasks. Tasks found running after restart are marked failed with a persisted interruption result and are not replayed; unsupported/capability-backed queued tasks fail closed. GPU inference is not automatically replayed after restart. This CI test uses a mock gateway only; it does not verify the operator's live GPUs or Supervisor lease handoff. It still has no provider/agent adapters, priority policy, process launch or GPU ownership. The Python GPU Supervisor remains authoritative. Approval alone still does not execute anything; the separate explicit run endpoint is required.
 
 ## Artifact integrity
 
@@ -73,7 +73,7 @@ Run #77 uploaded artifact `DREAD_UNIVERSAL_AGENT_DISCOVERY_FOUNDATION` (artifact
 - Hermes/OpenHands/other agent endpoint contracts and provider-specific adapters.
 - Role-based authorization, token rotation and any future remote-access security review.
 - Priority/resource-aware scheduling, cancellation of a live provider task and provider-specific execution adapters. Startup queue recovery is implemented and covered by the current canonical CI run.
-- Frontend, GPU contention/lease handoff, installer/upgrade/rollback and dual-RTX-3090 acceptance.
+- Frontend, live GPU contention/lease handoff and dual-RTX-3090 inference, installer/upgrade/rollback and workstation acceptance.
 
 The existing Python GPU Supervisor remains the only GPU lease authority. Rust may use only its local gateway at `127.0.0.1:11500`; it must not contact the upstream model server directly or acquire a second GPU lock. Do not stop or modify the existing DREAD Hub, ComfyUI, Ollama or GPU Supervisor as part of Rust development.
 
@@ -83,10 +83,10 @@ The existing Python GPU Supervisor remains the only GPU lease authority. Rust ma
 | Phase | Current evidence | Acceptance still required |
 |---|---|---|
 | 0 Baseline | Historical paths/endpoints and GPU policy documented | Confirm only changed prerequisites; current local Rust toolchain and exact Supervisor adapter contract remain unverified |
-| 1 Rust foundation | Canonical source committed in `dread_universal/`; run `44025427057` passes fmt, Clippy, 40 tests, release build and authenticated Pstack API apply/readback/idempotency; loopback Bearer auth and startup recovery verified | Live non-conflicting workstation health smoke test |
+| 1 Rust foundation | Canonical source committed in `dread_universal/`; run `44068498087` passes fmt, Clippy, 43 tests, release build, authenticated Pstack API apply/readback/idempotency and mock GPU-chat integration; loopback Bearer auth and startup recovery verified | Live non-conflicting workstation health smoke test |
 | 2 Service adapters | Generic read-only configured agent health probing | Dedicated Hermes/OpenHands/OpenCode/Ollama/llama.cpp/ComfyUI/DREAD adapters; one read-only request each |
 | 3 Capability registry | Disabled-by-default registry plus pinned Pstack dry-run, 11 importer tests | Cursor manifest/agent ingestion, compatibility taxonomy, MCP/OpenAPI/CLI inventory and representative provenance checks |
-| 4 Orchestration | Task state/approval audit, event stream, bounded runner integrated with one allowlisted service-discovery task; fail-closed startup queue recovery is CI verified | Planner, provider/agent delegation, priority scheduling, result aggregation, provider cancellation and multi-agent end-to-end test |
+| 4 Orchestration | Task state/approval audit, event stream, bounded runner integrated with service-discovery and GPU-chat tasks; fail-closed restart handling is CI verified | Planner, provider/agent delegation, priority scheduling, result aggregation, live provider cancellation and multi-agent end-to-end test |
 | 5 GPU/resources | Existing gateway boundary documented | Python GPU Supervisor adapter, resource discovery, lease ownership and one controlled inference/handoff test |
 | 6 UI | No frontend acceptance evidence | React/TypeScript/Tailwind/shadcn production build and live API/WebSocket interaction |
 | 7 Repair | No repair executor acceptance evidence | Diagnose/plan/simulate/approve/apply/monitor/rollback with a safe reversible test |
