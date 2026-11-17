@@ -33,12 +33,24 @@ jobs:
           test -f "$RUNNER_TEMP/dread-source/tmp/dread_zip_check/DREAD-UNIVERSAL/dread_universal/Cargo.toml"
           echo "WORKSPACE=$RUNNER_TEMP/dread-source/tmp/dread_zip_check/DREAD-UNIVERSAL/dread_universal" >> "$GITHUB_ENV"
 
+      - name: Apply hardening patches to isolated archive copy
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          patch --batch --forward -p0 < "$GITHUB_WORKSPACE/audit-tools/discovery-hardening.patch"
+          patch --batch --forward -p0 < "$GITHUB_WORKSPACE/audit-tools/gpu-api-hardening.patch"
+
       - name: Install stable Rust, rustfmt and Clippy
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
           rustup default stable
           rustc --version
           cargo --version
+
+      - name: Format patched workspace
+        run: cargo fmt --all
+        working-directory: ${{ env.WORKSPACE }}
 
       - name: Formatting
         run: cargo fmt --all -- --check
