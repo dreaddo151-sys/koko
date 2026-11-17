@@ -39,7 +39,7 @@ function App() {
   const [connected,setConnected]=useState(false); const [supervisorOnline,setSupervisorConfigured]=useState(false); const [error,setError]=useState(""); const [busy,setBusy]=useState(false);
   const [models,setModels]=useState<Model[]>([]); const [model,setModel]=useState(""); const [tokenUsage,setTokenUsage]=useState<TokenUsage|null>(null);
   const [tasks,setTasks]=useState<Task[]>([]); const [agents,setAgents]=useState<Agent[]>([]); const [capabilities,setCapabilities]=useState<Capability[]>([]); const [services,setServices]=useState<Service[]>([]);
-  const [prompt,setPrompt]=useState(""); const [active,setActive]=useState("");
+  const [prompt,setPrompt]=useState(""); const [enhancedPrompt,setEnhancedPrompt]=useState(""); const [enhancing,setEnhancing]=useState(false); const [active,setActive]=useState("");
   const [events,setEvents]=useState<Event[]>([]); const [result,setResult]=useState<Result|null>(null);
   const [page,setPage]=useState<Page>("overview"); const [lastRefresh,setLastRefresh]=useState<number|null>(null);
 
@@ -77,6 +77,15 @@ function App() {
       const out=await api<{item:Task}>("/api/tasks",token,{method:"POST",body:JSON.stringify({title:type==="gpu_chat"?`Chat · ${model}`:"Local service discovery",task_type:type,payload})});
       setTasks(x=>[out.item,...x]);setActive(out.item.id);setPage("tasks");if(type==="gpu_chat")setPrompt("");
     }catch(e){setError(e instanceof Error?e.message:"Task creation failed");}finally{setBusy(false);}
+  };
+  const enhance=async()=>{
+    if(!token||!model||!prompt.trim())return;
+    setEnhancing(true);setError("");
+    try{
+      const out=await api<{enhanced_prompt:string}>("/api/prompt/enhance",token,{method:"POST",body:JSON.stringify({model,prompt:prompt.trim()})});
+      setEnhancedPrompt(out.enhanced_prompt);
+    }catch(e){setError(e instanceof Error?e.message:"Prompt enhancement failed");}
+    finally{setEnhancing(false);}
   };
   const action=async(task:Task,verb:"approve"|"run"|"cancel")=>{
     setBusy(true);setError("");
@@ -129,9 +138,9 @@ function App() {
           <div className="composer-bar">
             <select className="composer-model" value={model} onChange={e=>setModel(e.target.value)} disabled={!token||!models.length} aria-label="Model route"><option value="">Connect to discover local models</option>{models.map(x=><option key={x.id} value={x.id}>{x.id}</option>)}</select>
             <textarea className="composer-input" rows={2} value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder="Message your local model… (task creation is approval-gated)" disabled={!token} aria-label="Message your local model"/>
-            <button className="primary composer-send" disabled={!token||!supervisorOnline||busy||!model||!prompt.trim()} onClick={()=>void create("gpu_chat")}><Plus size={14}/>QUEUE TASK</button>
+            <div className="composer-actions"><button className="secondary composer-enhance" disabled={!token||!supervisorOnline||enhancing||!model||!prompt.trim()} onClick={()=>void enhance()}>{enhancing?"ENHANCING…":"ENHANCE PROMPT"}</button><button className="primary composer-send" disabled={!token||!supervisorOnline||busy||!model||!prompt.trim()} onClick={()=>void create("gpu_chat")}><Plus size={14}/>QUEUE TASK</button></div>
           </div>
-          <div className="composer-status"><ShieldCheck size={13}/>{!token?"Authenticate the command link above to enable local tasks.":supervisorOnline?"Tasks require operator approval before execution.":"GPU inference is locked until the authenticated Python Supervisor bridge is available."}</div>
+          {enhancedPrompt&&<div className="enhance-preview"><div><b>ENHANCED PROMPT / REVIEW BEFORE APPLYING</b><button className="link" onClick={()=>setEnhancedPrompt("")}>DISCARD</button></div><textarea value={enhancedPrompt} readOnly aria-label="Enhanced prompt preview"/><button className="secondary" onClick={()=>{setPrompt(enhancedPrompt);setEnhancedPrompt("");}}>APPLY TO COMPOSER</button></div>}<div className="composer-status"><ShieldCheck size={13}/>{!token?"Authenticate the command link above to enable local tasks.":supervisorOnline?"Tasks require operator approval before execution.":"GPU inference is locked until the authenticated Python Supervisor bridge is available."}</div>
         </div>
       </section>
     </main>
