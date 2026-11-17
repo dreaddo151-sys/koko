@@ -23,8 +23,6 @@ struct ChatRequest {
     messages: Vec<Value>,
     #[serde(default)]
     model: Option<String>,
-    #[serde(default)]
-    stream: Option<bool>,
     #[serde(flatten)]
     options: std::collections::HashMap<String, Value>,
 }
