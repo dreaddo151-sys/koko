@@ -1804,6 +1804,7 @@ async fn approve_task(
         .optional()
         .map_err(|error| ApiError::internal(error.to_string()))?;
     tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
+    drop(conn);
     let _ = state.events.send(event);
     if let Some(mission_id) = mission_id {
         dispatch_ready_mission_tasks(state.clone(), mission_id).await;
