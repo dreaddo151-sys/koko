@@ -42,18 +42,17 @@ async fn tokenize(State(s):State<Arc<AppState>>,Json(q):Json<TokenizeRequest>)->
 #[derive(Deserialize)] struct BoostRequest { prompt:String, #[serde(default)] max_tokens:Option<usize> }
 async fn boost_prompt(State(s):State<Arc<AppState>>,Json(q):Json<BoostRequest>)->Result<Json<Value>,(StatusCode,String)> {
  let original_tokens=tokenize_text(&s,&q.prompt).await?;
- // Lossless normalization only: preserve wording and order; collapse repeated horizontal
- // whitespace and excessive blank lines. No semantic deletion or invented instructions.
- let normalized=q.prompt.lines().map(|line|line.split_whitespace().collect::<Vec<_>>().join(" "))
-  .collect::<Vec<_>>().join("\n").trim().to_string();
+ // Conservative formatting cleanup: preserve leading indentation and line structure.
+ // Trailing spaces are removed; Markdown hard-break semantics may change, so preview first.
+ let normalized=q.prompt.lines().map(str::trim_end).collect::<Vec<_>>().join("\n");
  let boosted_tokens=tokenize_text(&s,&normalized).await?;
  let budget=q.max_tokens.unwrap_or(usize::MAX);
  Ok(Json(json!({"original_prompt":q.prompt,"boosted_prompt":normalized,
   "original_tokens":original_tokens,"boosted_tokens":boosted_tokens,
   "tokens_saved":original_tokens.saturating_sub(boosted_tokens),
   "budget":if budget==usize::MAX {Value::Null}else{json!(budget)},
-  "within_budget":boosted_tokens<=budget,"method":"lossless_whitespace_normalization",
-  "semantic_compression":false,"note":"No content was intentionally removed. This is a safe baseline booster, not semantic compression."})))
+  "within_budget":boosted_tokens<=budget,"method":"trailing_whitespace_cleanup",
+  "semantic_compression":false,"requires_user_review":true,"note":"Leading indentation and line breaks are preserved. Trailing-space Markdown hard breaks may change; inspect before applying. No semantic compression is performed."})))
 }
 
 #[derive(Deserialize)] struct OptimizeRequest { prompt:String, #[serde(default)] max_tokens:Option<usize> }
