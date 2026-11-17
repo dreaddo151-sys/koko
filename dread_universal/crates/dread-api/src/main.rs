@@ -12,18 +12,20 @@ use axum::{
 use dread_agents::{CapabilityKind, CapabilityProvenance, CapabilityRecord, CapabilityStatus};
 use dread_discovery::{discover, discover_agents, load_agents, load_services};
 use dread_gpu::GpuGatewayClient;
+use dread_orchestrator::{ExecutionConfig, ExecutionError, ExecutionGate};
 use futures::StreamExt;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    collections::HashMap,
     env, fs,
     net::SocketAddr,
     path::Path as FsPath,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -34,6 +36,8 @@ struct AppState {
     db: Arc<Mutex<Connection>>,
     gpu: GpuGatewayClient,
     events: broadcast::Sender<TaskEvent>,
+    execution: ExecutionGate,
+    cancellations: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -211,6 +215,14 @@ fn open_database(path: &str) -> anyhow::Result<Connection> {
              id TEXT PRIMARY KEY NOT NULL,
              record_json TEXT NOT NULL,
              created_at INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS task_results (
+             task_id TEXT PRIMARY KEY NOT NULL REFERENCES tasks(id),
+             result_json TEXT,
+             error TEXT,
+             attempts INTEGER NOT NULL DEFAULT 0,
+             elapsed_ms INTEGER NOT NULL DEFAULT 0,
+             completed_at INTEGER NOT NULL
          );",
     )?;
     Ok(conn)
@@ -841,6 +853,288 @@ async fn approve_task(
     Ok(Json(json!({"item": task, "execution_started": false})))
 }
 
+async fn run_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let now = now_epoch();
+    let mut conn = db_lock(&state)?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let task = tx
+        .query_row(
+            "SELECT id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, approval_reason, created_at, updated_at
+             FROM tasks WHERE id = ?1",
+            params![id],
+            task_from_row,
+        )
+        .optional()
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Task not found"))?;
+
+    if task.status != "approved" || !task.approval_required || task.approved_by.is_none() {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: "Task must have a recorded approval before it can be queued".into(),
+        });
+    }
+    if task.capability_id.is_some() {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: "Capability-backed tasks remain disabled until a reviewed adapter is registered".into(),
+        });
+    }
+    if task.task_type != "service_discovery" {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: format!("No reviewed built-in runner is registered for task type '{}'", task.task_type),
+        });
+    }
+
+    let changed = tx
+        .execute(
+            "UPDATE tasks SET status = 'queued', updated_at = ?2 WHERE id = ?1 AND status = 'approved'",
+            params![id, now],
+        )
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    if changed != 1 {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: "Task changed before it could be queued".into(),
+        });
+    }
+    let event = append_task_event(
+        &tx,
+        &id,
+        "task_queued",
+        &json!({"status": "queued", "runner": "builtin.service_discovery"}),
+        "operator",
+        now,
+    )?;
+    let task = tx
+        .query_row(
+            "SELECT id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, approval_reason, created_at, updated_at
+             FROM tasks WHERE id = ?1",
+            params![id],
+            task_from_row,
+        )
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
+    let _ = state.events.send(event);
+
+    let (cancel_sender, cancel_receiver) = watch::channel(false);
+    state
+        .cancellations
+        .lock()
+        .map_err(|_| ApiError::internal("Task cancellation registry is unavailable"))?
+        .insert(id.clone(), cancel_sender);
+    tokio::spawn(execute_approved_task(
+        state.clone(),
+        id,
+        task.task_type,
+        cancel_receiver,
+    ));
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"item": task, "execution_started": true})),
+    ))
+}
+
+async fn execute_approved_task(
+    state: AppState,
+    task_id: String,
+    task_type: String,
+    cancellation: watch::Receiver<bool>,
+) {
+    let started_at = now_epoch();
+    let started_event = {
+        let Ok(mut conn) = state.db.lock() else {
+            return;
+        };
+        let Ok(tx) = conn.transaction() else {
+            return;
+        };
+        let Ok(changed) = tx.execute(
+            "UPDATE tasks SET status = 'running', updated_at = ?2 WHERE id = ?1 AND status = 'queued'",
+            params![task_id, started_at],
+        ) else {
+            return;
+        };
+        if changed != 1 {
+            return;
+        }
+        let Ok(event) = append_task_event(
+            &tx,
+            &task_id,
+            "task_started",
+            &json!({"runner": "builtin.service_discovery"}),
+            "executor",
+            started_at,
+        ) else {
+            return;
+        };
+        if tx.commit().is_err() {
+            return;
+        }
+        event
+    };
+    let _ = state.events.send(started_event);
+
+    let runner_type = task_type.clone();
+    let execution = state
+        .execution
+        .run(task_id.clone(), cancellation, move |_, cancellation| {
+            let runner_type = runner_type.clone();
+            async move {
+                if *cancellation.borrow() {
+                    return Err("Task cancelled before runner start".to_string());
+                }
+                match runner_type.as_str() {
+                    "service_discovery" => {
+                        let Json(result) = services().await.map_err(|error| error.message)?;
+                        Ok(result)
+                    }
+                    _ => Err(format!("No reviewed runner for task type '{runner_type}'")),
+                }
+            }
+        })
+        .await;
+
+    let (status, result_json, error, attempts, elapsed_ms) = match execution {
+        Ok(result) => (
+            "completed",
+            Some(result.result.to_string()),
+            None,
+            result.attempts,
+            result.elapsed_ms,
+        ),
+        Err(error) => {
+            let attempts = match &error {
+                ExecutionError::Cancelled { attempts }
+                | ExecutionError::TimedOut { attempts }
+                | ExecutionError::RunnerFailed { attempts, .. } => *attempts,
+                _ => 0,
+            };
+            let status = if matches!(error, ExecutionError::Cancelled { .. }) {
+                "cancelled"
+            } else {
+                "failed"
+            };
+            (status, None, Some(format!("{error:?}")), attempts, 0)
+        }
+    };
+
+    let completed_at = now_epoch();
+    let completion_event = {
+        let Ok(mut conn) = state.db.lock() else {
+            return;
+        };
+        let Ok(tx) = conn.transaction() else {
+            return;
+        };
+        let current_status: Option<String> = match tx.query_row(
+            "SELECT status FROM tasks WHERE id = ?1",
+            params![task_id],
+            |row| row.get(0),
+        ) {
+            Ok(status) => Some(status),
+            Err(_) => None,
+        };
+        let Some(current_status) = current_status else {
+            return;
+        };
+        let final_status = if current_status == "cancelled" {
+            "cancelled"
+        } else if current_status == "running" {
+            status
+        } else {
+            return;
+        };
+        if final_status != "cancelled"
+            && tx.execute(
+                "UPDATE tasks SET status = ?2, updated_at = ?3 WHERE id = ?1 AND status = 'running'",
+                params![task_id, final_status, completed_at],
+            ).is_err()
+        {
+            return;
+        }
+        if tx.execute(
+            "INSERT OR REPLACE INTO task_results (task_id, result_json, error, attempts, elapsed_ms, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![task_id, result_json, error, attempts, elapsed_ms, completed_at],
+        ).is_err()
+        {
+            return;
+        }
+        let event_type = match final_status {
+            "completed" => "task_succeeded",
+            "cancelled" => "task_execution_cancelled",
+            _ => "task_failed",
+        };
+        let payload = json!({
+            "status": final_status,
+            "error": error,
+            "attempts": attempts,
+            "elapsed_ms": elapsed_ms
+        });
+        let Ok(event) = append_task_event(
+            &tx,
+            &task_id,
+            event_type,
+            &payload,
+            "executor",
+            completed_at,
+        ) else {
+            return;
+        };
+        if tx.commit().is_err() {
+            return;
+        }
+        event
+    };
+    let _ = state.events.send(completion_event);
+    if let Ok(mut cancellations) = state.cancellations.lock() {
+        cancellations.remove(&task_id);
+    }
+}
+
+async fn get_task_result(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let row = conn
+        .query_row(
+            "SELECT result_json, error, attempts, elapsed_ms, completed_at FROM task_results WHERE task_id = ?1",
+            params![id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, u64>(2)?,
+                    row.get::<_, u64>(3)?,
+                    row.get::<_, u64>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Task result is not available"))?;
+    let result = row
+        .0
+        .map(|encoded| serde_json::from_str(&encoded).unwrap_or(Value::Null));
+    Ok(Json(json!({
+        "task_id": id,
+        "result": result,
+        "error": row.1,
+        "attempts": row.2,
+        "elapsed_ms": row.3,
+        "completed_at": row.4
+    })))
+}
+
 async fn cancel_task(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -851,7 +1145,7 @@ async fn cancel_task(
         .transaction()
         .map_err(|e| ApiError::internal(e.to_string()))?;
     let changed = tx.execute(
-        "UPDATE tasks SET status = 'cancelled', updated_at = ?2 WHERE id = ?1 AND status IN ('pending_approval', 'approved', 'queued')",
+        "UPDATE tasks SET status = 'cancelled', updated_at = ?2 WHERE id = ?1 AND status IN ('pending_approval', 'approved', 'queued', 'running')",
         params![id, now],
     ).map_err(|e| ApiError::internal(e.to_string()))?;
     if changed == 0 {
@@ -884,6 +1178,11 @@ async fn cancel_task(
     ).map_err(|e| ApiError::internal(e.to_string()))?;
     tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
     let _ = state.events.send(event);
+    if let Ok(cancellations) = state.cancellations.lock()
+        && let Some(sender) = cancellations.get(&id)
+    {
+        let _ = sender.send(true);
+    }
     Ok(Json(json!({"item": task, "execution_started": false})))
 }
 
@@ -983,7 +1282,9 @@ fn app(state: AppState) -> Router {
         .route("/api/tasks/{id}", get(get_task))
         .route("/api/tasks/{id}/events", get(task_events))
         .route("/api/tasks/{id}/stream", get(task_event_stream))
+        .route("/api/tasks/{id}/result", get(get_task_result))
         .route("/api/tasks/{id}/approve", axum::routing::post(approve_task))
+        .route("/api/tasks/{id}/run", axum::routing::post(run_task))
         .route("/api/tasks/{id}/cancel", axum::routing::post(cancel_task))
         .route("/api/gpu/{*path}", axum::routing::post(gpu_inference))
         .route("/api/services", get(services))
@@ -1030,6 +1331,9 @@ async fn main() -> anyhow::Result<()> {
         db: Arc::new(Mutex::new(db)),
         gpu: GpuGatewayClient::local()?,
         events,
+        execution: ExecutionGate::new(ExecutionConfig::default())
+            .map_err(|error| anyhow::anyhow!("Invalid execution configuration: {error:?}"))?,
+        cancellations: Arc::new(Mutex::new(HashMap::new())),
     };
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -1115,6 +1419,8 @@ mod tests {
                 db: Arc::new(Mutex::new(db)),
                 gpu,
                 events,
+                execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
+                cancellations: Arc::new(Mutex::new(HashMap::new())),
             }),
             receiver,
             server,
