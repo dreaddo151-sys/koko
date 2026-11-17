@@ -1123,9 +1123,8 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
 
     let interrupted: Vec<String> = {
         let mut statement = tx.prepare("SELECT id FROM tasks WHERE status = 'running'")?;
-        statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     for task_id in interrupted {
         tx.execute(
@@ -1153,17 +1152,16 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
             "SELECT id, task_type, capability_id, approval_required, approved_by
              FROM tasks WHERE status = 'queued'",
         )?;
-        statement
-            .query_map([], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get::<_, i64>(3)? != 0,
-                    row.get(4)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get::<_, i64>(3)? != 0,
+                row.get(4)?,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
 
     let mut resumable = Vec::new();
@@ -1525,10 +1523,9 @@ async fn main() -> anyhow::Result<()> {
         auth_required: true,
     };
 
+    let listener = tokio::net::TcpListener::bind(addr).await?;
     let recovered_tasks = recover_task_queue(&state)?;
     info!(recovered_tasks, "Recovered eligible queued tasks; interrupted running tasks were marked failed");
-    
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(address = %addr, database = %db_path, "PROJECT DREAD Universal API listening");
     axum::serve(listener, app(state))
         .with_graceful_shutdown(async {
@@ -1742,7 +1739,7 @@ mod tests {
         }
         let (events, _) = broadcast::channel(256);
         let state = AppState {
-            db,
+            db: Arc::new(Mutex::new(db)),
             gpu: GpuGatewayClient::new("http://127.0.0.1:1").unwrap(),
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
