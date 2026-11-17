@@ -272,11 +272,19 @@ async fn services() -> Result<Json<Value>, ApiError> {
     let config_path =
         env::var("DREAD_SERVICES_CONFIG").unwrap_or_else(|_| "config/services.toml".to_string());
 
-    let configured = match load_services(&config_path) {
+    let mut configured = match load_services(&config_path) {
         Ok(items) => items,
         Err(_) if !FsPath::new(&config_path).exists() => Vec::new(),
         Err(error) => return Err(ApiError::bad_request(error)),
     };
+
+    if let Ok(endpoint) = env::var("DREAD_GPU_GATEWAY_URL") {
+        GpuGatewayClient::new(&endpoint)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        if let Some(service) = configured.iter_mut().find(|item| item.id == "llama-cpp") {
+            service.url = format!("{}/api/tags", endpoint.trim_end_matches('/'));
+        }
+    }
 
     let results = discover(configured).await;
     serde_json::to_value(results).map(Json).map_err(|error| {
