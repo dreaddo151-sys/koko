@@ -665,6 +665,7 @@ mod tests {
                 Some(GpuDevice {
                     vendor: "nvidia".into(),
                     name: name.trim().into(),
+                    compute_capability: None,
                     vram_mib: memory.trim().parse().ok(),
                     vram_used_mib: None,
                     vram_free_mib: None,
