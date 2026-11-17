@@ -118,6 +118,18 @@ class PstackCapabilityImportTests(unittest.TestCase):
         with self.assertRaises(importer.ImportErrorSafe):
             importer._require_disabled_existing(stale, record)
 
+    def test_api_requests_require_bearer_token_of_minimum_length(self):
+        with self.assertRaises(importer.ImportErrorSafe):
+            importer.api_headers("too-short")
+        with self.assertRaises(importer.ImportErrorSafe):
+            importer.api_headers("x" * 32 + " ")
+
+    def test_api_request_headers_include_bearer_token(self):
+        headers = importer.api_headers("x" * 32, has_payload=True)
+        self.assertEqual(headers["Authorization"], f"Bearer {'x' * 32}")
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(headers["Accept"], "application/json")
+
     def test_redirects_are_not_followed(self):
         self.assertIsNone(importer.NoRedirect().redirect_request(None, None, 302, "Found", {}, "http://example.com"))
 
