@@ -1372,7 +1372,6 @@ async fn get_mission(
     })))
 }
 
-
 async fn create_task(
     State(state): State<AppState>,
     Json(input): Json<CreateTask>,
