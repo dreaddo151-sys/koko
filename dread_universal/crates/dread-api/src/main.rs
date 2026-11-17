@@ -12,7 +12,7 @@ use axum::{
 };
 use dread_agents::{CapabilityKind, CapabilityProvenance, CapabilityRecord, CapabilityStatus};
 use dread_discovery::{discover, discover_agents, load_agents, load_services};
-use dread_gpu::GpuGatewayClient;
+use dread_gpu::{GpuGatewayClient, GpuSupervisorClient};
 use dread_orchestrator::{ExecutionConfig, ExecutionError, ExecutionGate};
 use futures::StreamExt;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -36,6 +36,7 @@ const MAX_API_BODY_BYTES: usize = 32 * 1024 * 1024;
 struct AppState {
     db: Arc<Mutex<Connection>>,
     gpu: GpuGatewayClient,
+    supervisor: Option<GpuSupervisorClient>,
     events: broadcast::Sender<TaskEvent>,
     execution: ExecutionGate,
     cancellations: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
@@ -902,6 +903,12 @@ async fn run_task(
         "service_discovery" => "builtin.service_discovery",
         "gpu_chat" => {
             validate_gpu_chat_payload(&task.payload).map_err(ApiError::bad_request)?;
+            if state.supervisor.is_none() {
+                return Err(ApiError {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    message: "GPU chat is disabled until the authenticated Python GPU Supervisor bridge is configured".into(),
+                });
+            }
             "builtin.gpu_chat"
         }
         _ => {
@@ -1038,59 +1045,83 @@ fn validate_gpu_chat_payload(payload: &Value) -> Result<(), String> {
     Ok(())
 }
 
-async fn execute_gpu_chat(gpu: &GpuGatewayClient, payload: &Value) -> Result<Value, String> {
+async fn execute_gpu_chat(
+    gpu: &GpuGatewayClient,
+    supervisor: &GpuSupervisorClient,
+    payload: &Value,
+) -> Result<Value, String> {
     validate_gpu_chat_payload(payload)?;
-    let model = payload["model"].as_str().unwrap_or_default();
-    let available = gpu
-        .models()
+    let lease = supervisor
+        .acquire_tensor_lease()
         .await
-        .map_err(|error| format!("GPU model discovery failed: {error}"))?;
-    if !available.data.iter().any(|item| item.id == model) {
-        return Err(format!(
-            "Requested model '{model}' is not exposed by the local GPU gateway"
-        ));
-    }
-    let mut request = json!({
-        "model": model,
-        "messages": payload["messages"],
-        "stream": false
-    });
-    if let Some(temperature) = payload.get("temperature") {
-        request["temperature"] = temperature.clone();
-    }
-    if let Some(max_tokens) = payload.get("max_tokens") {
-        request["max_tokens"] = max_tokens.clone();
-    }
-    let response = gpu
-        .post_v1("/v1/chat/completions", &request)
-        .await
-        .map_err(|error| format!("GPU inference request failed: {error}"))?;
-    let status = response.status();
-    if response
-        .content_length()
-        .is_some_and(|length| length > 1_048_576)
-    {
-        return Err("GPU inference response exceeds the 1 MiB task-result limit".to_string());
-    }
-    let mut stream = response.bytes_stream();
-    let mut body = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk =
-            chunk.map_err(|error| format!("Could not read GPU inference response: {error}"))?;
-        if body.len().saturating_add(chunk.len()) > 1_048_576 {
+        .map_err(|error| format!("Python GPU Supervisor lease acquisition failed: {error}"))?;
+
+    let inference = async {
+        let model = payload["model"].as_str().unwrap_or_default();
+        let available = gpu
+            .models()
+            .await
+            .map_err(|error| format!("GPU model discovery failed: {error}"))?;
+        if !available.data.iter().any(|item| item.id == model) {
+            return Err(format!(
+                "Requested model '{model}' is not exposed by the local GPU gateway"
+            ));
+        }
+        let mut request = json!({
+            "model": model,
+            "messages": payload["messages"],
+            "stream": false
+        });
+        if let Some(temperature) = payload.get("temperature") {
+            request["temperature"] = temperature.clone();
+        }
+        if let Some(max_tokens) = payload.get("max_tokens") {
+            request["max_tokens"] = max_tokens.clone();
+        }
+        let response = gpu
+            .post_v1("/v1/chat/completions", &request)
+            .await
+            .map_err(|error| format!("GPU inference request failed: {error}"))?;
+        let status = response.status();
+        if response
+            .content_length()
+            .is_some_and(|length| length > 1_048_576)
+        {
             return Err("GPU inference response exceeds the 1 MiB task-result limit".to_string());
         }
-        body.extend_from_slice(&chunk);
+        let mut stream = response.bytes_stream();
+        let mut body = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk
+                .map_err(|error| format!("Could not read GPU inference response: {error}"))?;
+            if body.len().saturating_add(chunk.len()) > 1_048_576 {
+                return Err("GPU inference response exceeds the 1 MiB task-result limit".to_string());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        if !status.is_success() {
+            return Err(format!(
+                "GPU gateway returned HTTP {}: {}",
+                status.as_u16(),
+                String::from_utf8_lossy(&body)
+            ));
+        }
+        serde_json::from_slice(&body)
+            .map_err(|error| format!("GPU gateway returned invalid JSON: {error}"))
     }
-    if !status.is_success() {
-        return Err(format!(
-            "GPU gateway returned HTTP {}: {}",
-            status.as_u16(),
-            String::from_utf8_lossy(&body)
-        ));
+    .await;
+
+    let release = lease.release().await;
+    match (inference, release) {
+        (Ok(result), Ok(())) => Ok(result),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(format!(
+            "Inference completed but GPU Supervisor lease release failed: {error}"
+        )),
+        (Err(inference_error), Err(release_error)) => Err(format!(
+            "{inference_error}; GPU Supervisor lease release also failed: {release_error}"
+        )),
     }
-    serde_json::from_slice(&body)
-        .map_err(|error| format!("GPU gateway returned invalid JSON: {error}"))
 }
 
 async fn execute_approved_task(
@@ -1137,12 +1168,14 @@ async fn execute_approved_task(
     let runner_type = task_type.clone();
     let runner_payload = payload.clone();
     let runner_gpu = state.gpu.clone();
+    let runner_supervisor = state.supervisor.clone();
     let execution = state
         .execution
         .run(task_id.clone(), cancellation, move |_, cancellation| {
             let runner_type = runner_type.clone();
             let runner_payload = runner_payload.clone();
             let runner_gpu = runner_gpu.clone();
+            let runner_supervisor = runner_supervisor.clone();
             async move {
                 if *cancellation.borrow() {
                     return Err("Task cancelled before runner start".to_string());
@@ -1152,7 +1185,12 @@ async fn execute_approved_task(
                         let Json(result) = services().await.map_err(|error| error.message)?;
                         Ok(result)
                     }
-                    "gpu_chat" => execute_gpu_chat(&runner_gpu, &runner_payload).await,
+                    "gpu_chat" => match runner_supervisor.as_ref() {
+                        Some(supervisor) => {
+                            execute_gpu_chat(&runner_gpu, supervisor, &runner_payload).await
+                        }
+                        None => Err("GPU chat is disabled until the Python GPU Supervisor bridge is configured".into()),
+                    },
                     _ => Err(format!("No reviewed runner for task type '{runner_type}'")),
                 }
             }
@@ -1465,9 +1503,10 @@ async fn gpu_health(State(state): State<AppState>) -> Result<Json<Value>, ApiErr
         message: format!("GPU gateway unavailable: {e}"),
     })?;
 
-    serde_json::to_value(health)
-        .map(Json)
-        .map_err(|e| ApiError::internal(e.to_string()))
+    let mut value =
+        serde_json::to_value(health).map_err(|e| ApiError::internal(e.to_string()))?;
+    value["supervisor_configured"] = json!(state.supervisor.is_some());
+    Ok(Json(value))
 }
 
 async fn gpu_models(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -1492,6 +1531,17 @@ async fn gpu_inference(
         ));
     }
 
+    let supervisor = state.supervisor.as_ref().ok_or_else(|| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        message: "GPU inference is disabled until the authenticated Python GPU Supervisor bridge is configured".into(),
+    })?;
+    let lease = supervisor
+        .acquire_tensor_lease()
+        .await
+        .map_err(|error| ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: format!("Python GPU Supervisor lease acquisition failed: {error}"),
+        })?;
     let gateway_path = format!("/{path}");
 
     let upstream = state
@@ -1525,9 +1575,24 @@ async fn gpu_inference(
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
 
-    let stream = upstream
-        .bytes_stream()
-        .map(|chunk| chunk.map_err(std::io::Error::other));
+    let body_stream = Box::pin(
+        upstream
+            .bytes_stream()
+            .map(|chunk| chunk.map_err(std::io::Error::other)),
+    );
+    let stream = futures::stream::unfold((body_stream, Some(lease)), |(mut body, mut lease)| async move {
+        match body.next().await {
+            Some(chunk) => Some((chunk, (body, lease))),
+            None => {
+                if let Some(lease) = lease.take()
+                    && let Err(error) = lease.release().await
+                {
+                    eprintln!("[DREAD GPU] Supervisor lease release after streamed inference failed: {error}");
+                }
+                None
+            }
+        }
+    });
 
     let mut builder = Response::builder()
         .status(status)
@@ -1664,11 +1729,24 @@ async fn main() -> anyhow::Result<()> {
         !operator_id.trim().is_empty() && operator_id.len() <= 160,
         "DREAD_OPERATOR_ID must be non-empty and at most 160 characters"
     );
+    let supervisor_url = env::var("DREAD_GPU_SUPERVISOR_URL").ok();
+    let supervisor_token = env::var("DREAD_GPU_SUPERVISOR_TOKEN").ok();
+    let supervisor = match (supervisor_url, supervisor_token) {
+        (Some(url), Some(token)) => Some(GpuSupervisorClient::new(url, token)?),
+        (None, None) => None,
+        _ => anyhow::bail!(
+            "DREAD_GPU_SUPERVISOR_URL and DREAD_GPU_SUPERVISOR_TOKEN must be configured together"
+        ),
+    };
+    if supervisor.is_none() {
+        info!("GPU inference is disabled until the Python GPU Supervisor bridge is configured");
+    }
     let db = open_database(&db_path)?;
     let (events, _) = broadcast::channel(256);
     let state = AppState {
         db: Arc::new(Mutex::new(db)),
         gpu: GpuGatewayClient::local()?,
+        supervisor,
         events,
         execution: ExecutionGate::new(ExecutionConfig::default())
             .map_err(|error| anyhow::anyhow!("Invalid execution configuration: {error:?}"))?,
@@ -1710,6 +1788,18 @@ mod tests {
     use serde_json::json;
     use tokio::net::TcpListener;
     use tower::ServiceExt;
+
+    async fn mock_supervisor_acquire() -> Json<Value> {
+        Json(json!({"id":"test-lease","status":"active","error":null}))
+    }
+
+    async fn mock_supervisor_status(Path(id): Path<String>) -> Json<Value> {
+        Json(json!({"id":id,"status":"active","error":null}))
+    }
+
+    async fn mock_supervisor_release(Path(id): Path<String>) -> Json<Value> {
+        Json(json!({"id":id,"status":"released","error":null}))
+    }
 
     async fn mock_health() -> Json<Value> {
         Json(json!({"status": "ok", "gpu": "on-demand"}))
@@ -1783,7 +1873,12 @@ mod tests {
         let mock = Router::new()
             .route("/health", get(mock_health))
             .route("/v1/models", get(mock_models))
-            .route("/v1/chat/completions", post(mock_completion));
+            .route("/v1/chat/completions", post(mock_completion))
+            .route("/v1/leases", post(mock_supervisor_acquire))
+            .route(
+                "/v1/leases/{id}",
+                get(mock_supervisor_status).delete(mock_supervisor_release),
+            );
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1801,6 +1896,13 @@ mod tests {
             app(AppState {
                 db: Arc::new(Mutex::new(db)),
                 gpu,
+                supervisor: Some(
+                    GpuSupervisorClient::new(
+                        format!("http://{address}"),
+                        "test-supervisor-token-that-is-long-enough",
+                    )
+                    .unwrap(),
+                ),
                 events,
                 execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
                 cancellations: Arc::new(Mutex::new(HashMap::new())),
@@ -1919,6 +2021,7 @@ mod tests {
         let state = AppState {
             db,
             gpu: GpuGatewayClient::new("http://127.0.0.1:1").unwrap(),
+            supervisor: None,
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
