@@ -68,18 +68,17 @@ class PstackCapabilityImportTests(unittest.TestCase):
 
     def test_rejects_path_traversal(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = self.make_fixture(Path(tmp))
-            catalog_path = root / "integrations/pstack/catalog.json"
-            data = json.loads(catalog_path.read_text())
-            data["skills"][0]["path"] = "skills/../../outside/SKILL.md"
-            catalog_path.write_text(json.dumps(data))
+            source_root = Path(tmp) / "upstream"
+            source_root.mkdir()
+            outside = Path(tmp) / "outside.md"
+            outside.write_text("# outside")
             with self.assertRaises(importer.ImportErrorSafe):
-                importer.load_import_records(root)
+                importer._safe_source_file(source_root, "skills/../../outside.md")
 
     def test_rejects_source_file_changed_after_pinned_import(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.make_fixture(Path(tmp))
-            source = root / "integrations/pstack/upstream/skills/example-skill/SKILL.md"
+            source = root / "integrations/pstack/upstream/skills/architect/SKILL.md"
             source.write_text("# Tampered after import")
             with self.assertRaises(importer.ImportErrorSafe):
                 importer.load_import_records(root)
