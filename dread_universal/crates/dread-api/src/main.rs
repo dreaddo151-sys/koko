@@ -13,7 +13,9 @@ use dread_agents::{CapabilityKind, CapabilityProvenance, CapabilityRecord, Capab
 use dread_discovery::{discover, discover_agents, load_agents, load_services};
 use dread_gpu::{GpuGatewayClient, GpuSupervisorClient};
 use dread_orchestrator::{ExecutionConfig, ExecutionError, ExecutionGate};
-use dread_skills::{discover_skills, load_skill_context};
+use dread_skills::{
+    discover_agent_profiles, discover_skills, load_agent_profile_context, load_skill_context,
+};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -525,22 +527,45 @@ fn pstack_skills_root() -> Result<PathBuf, ApiError> {
 
 async fn discover_pstack_skills() -> Result<Json<Value>, ApiError> {
     let root = pstack_skills_root()?;
-    let items = discover_skills(&root).map_err(|e| ApiError::bad_request(e.to_string()))?;
-    let values = items.iter().map(|item| json!({
-        "id": item.id,
-        "name": item.name,
-        "description": item.description,
-        "relative_path": item.relative_path,
-        "bytes": item.bytes,
-        "fingerprint": item.fingerprint,
-        "status": "not_imported",
-        "execution": "never"
-    })).collect::<Vec<_>>();
+    let skills = discover_skills(&root).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let agents = discover_agent_profiles(&root).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let skill_values = skills
+        .iter()
+        .map(|item| json!({
+            "id": item.id,
+            "name": item.name,
+            "description": item.description,
+            "relative_path": item.relative_path,
+            "bytes": item.bytes,
+            "fingerprint": item.fingerprint,
+            "kind": "skill",
+            "status": "not_imported",
+            "execution": "never"
+        }))
+        .collect::<Vec<_>>();
+    let agent_values = agents
+        .iter()
+        .map(|item| json!({
+            "id": item.id,
+            "name": item.name,
+            "description": item.description,
+            "relative_path": item.relative_path,
+            "bytes": item.bytes,
+            "fingerprint": item.fingerprint,
+            "kind": "agent",
+            "status": "not_imported",
+            "execution": "never",
+            "note": "Prompt profile only; not a live AgentAdapter process"
+        }))
+        .collect::<Vec<_>>();
     Ok(Json(json!({
         "source": "Pstack",
         "root_configured": true,
-        "count": values.len(),
-        "items": values
+        "skill_count": skill_values.len(),
+        "agent_profile_count": agent_values.len(),
+        "count": skill_values.len() + agent_values.len(),
+        "skills": skill_values,
+        "agent_profiles": agent_values
     })))
 }
 
@@ -548,22 +573,44 @@ async fn import_discovered_skills(
     State(state): State<AppState>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let root = pstack_skills_root()?;
-    let items = discover_skills(&root).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let skills = discover_skills(&root).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let agents = discover_agent_profiles(&root).map_err(|e| ApiError::bad_request(e.to_string()))?;
     let now = now_epoch();
     let source_revision = env::var("DREAD_PSTACK_REVISION")
         .unwrap_or_else(|_| "unverified-local-copy".to_string());
     let source_version = env::var("DREAD_PSTACK_VERSION")
         .unwrap_or_else(|_| "0.15.43".to_string());
+    let mut discovered = Vec::new();
+    for item in skills {
+        discovered.push((
+            CapabilityKind::Skill,
+            item.id,
+            item.name,
+            item.description,
+            item.relative_path,
+            item.fingerprint,
+        ));
+    }
+    for item in agents {
+        discovered.push((
+            CapabilityKind::Agent,
+            item.id,
+            item.name,
+            item.description,
+            item.relative_path,
+            item.fingerprint,
+        ));
+    }
     let mut conn = db_lock(&state)?;
     let tx = conn.transaction().map_err(|e| ApiError::internal(e.to_string()))?;
     let mut imported = 0usize;
     let mut already_present = 0usize;
-    for item in &items {
+    for (kind, id, name, description, relative_path, fingerprint) in &discovered {
         let record = CapabilityRecord {
-            id: item.id.clone(),
-            name: item.name.clone(),
-            kind: CapabilityKind::Skill,
-            description: item.description.clone(),
+            id: id.clone(),
+            name: name.clone(),
+            kind: *kind,
+            description: description.clone(),
             version: Some(source_version.clone()),
             license: Some("MIT".into()),
             provenance: CapabilityProvenance {
@@ -578,8 +625,8 @@ async fn import_discovered_skills(
             adapter: Some("local.markdown_context".into()),
             status: CapabilityStatus::Disabled,
             manifest: json!({
-                "source_relative_path": item.relative_path,
-                "fingerprint": item.fingerprint,
+                "source_relative_path": relative_path,
+                "fingerprint": fingerprint,
                 "fingerprint_algorithm": "fnv1a64_non_cryptographic",
                 "trust": "untrusted_context",
                 "execution": "never",
@@ -589,21 +636,30 @@ async fn import_discovered_skills(
         record.validate().map_err(|e| ApiError::bad_request(e.to_string()))?;
         let encoded = serde_json::to_string(&record)
             .map_err(|e| ApiError::internal(e.to_string()))?;
-        let changed = tx.execute(
-            "INSERT OR IGNORE INTO capabilities (id, record_json, created_at) VALUES (?1, ?2, ?3)",
-            params![record.id, encoded, now],
-        ).map_err(|e| ApiError::internal(e.to_string()))?;
-        if changed == 1 { imported += 1; } else { already_present += 1; }
+        let changed = tx
+            .execute(
+                "INSERT OR IGNORE INTO capabilities (id, record_json, created_at) VALUES (?1, ?2, ?3)",
+                params![record.id, encoded, now],
+            )
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        if changed == 1 {
+            imported += 1;
+        } else {
+            already_present += 1;
+        }
     }
     tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
-    Ok((StatusCode::CREATED, Json(json!({
-        "source": "Pstack",
-        "discovered": items.len(),
-        "imported": imported,
-        "already_present": already_present,
-        "status": "disabled",
-        "execution": "never"
-    }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "source": "Pstack",
+            "discovered": discovered.len(),
+            "imported": imported,
+            "already_present": already_present,
+            "status": "disabled",
+            "execution": "never"
+        })),
+    ))
 }
 
 async fn preview_capability(
