@@ -35,7 +35,7 @@ jobs:
       - name: Build production web console
         working-directory: dread_universal/web
         run: |
-          npm install --ignore-scripts --no-audit --no-fund
+          npm ci --ignore-scripts --no-audit --no-fund
           npm run build
       - name: Validate packaging scripts
         working-directory: dread_universal
