@@ -2043,7 +2043,7 @@ async fn main() -> anyhow::Result<()> {
     let (events, _) = broadcast::channel(256);
     let state = AppState {
         db: Arc::new(Mutex::new(db)),
-        gpu: GpuGatewayClient::local()?,
+        gpu: GpuGatewayClient::from_env()?,
         supervisor,
         events,
         execution: ExecutionGate::new(ExecutionConfig::default())
