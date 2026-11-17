@@ -43,8 +43,10 @@ The API rejects non-loopback bind addresses because authentication/authorization
 | GET | `/api/tasks/{id}` | Read task state |
 | GET | `/api/tasks/{id}/events` | Read ordered task audit events |
 | GET (WebSocket upgrade) | `/api/tasks/{id}/stream?after_sequence=N` | Stream live events and replay persisted history after a sequence cursor |
-| POST | `/api/tasks/{id}/approve` | Record approval; does not execute the task |
-| POST | `/api/tasks/{id}/cancel` | Record cancellation |
+| POST | `/api/tasks/{id}/approve` | Record approval; approval alone does not execute |
+| POST | `/api/tasks/{id}/run` | Queue the approved built-in read-only service-discovery task |
+| GET | `/api/tasks/{id}/result` | Read persisted execution result |
+| POST | `/api/tasks/{id}/cancel` | Cancel pending/queued/running task and signal active runner |
 | GET | `/api/gpu/health` | Read GPU gateway health |
 | GET | `/api/gpu/models` | List models exposed by the gateway |
 | POST | `/api/gpu/v1/{path}` | Forward OpenAI-compatible inference/SSE through the gateway |
@@ -69,7 +71,7 @@ Agent health states distinguish 2xx ONLINE, 3xx REDIRECTED, 4xx REACHABLE, 5xx D
 
 ### Task approval and event-stream boundary
 
-Creating a task only creates a durable `pending_approval` record. Approval records a caller-supplied approver label and reason, and changes the state to `approved`; it does not start a worker, invoke an agent or execute commands. The approver label is not authenticated identity. The WebSocket stream emits committed task events, replays persisted history using `after_sequence`, bounds replay pages and recovers missed notifications from SQLite when a subscriber falls behind. A full browser/client WebSocket handshake and reconnect test remains outstanding. There is no task executor or provider dispatch yet.
+Creating a task creates a durable `pending_approval` record. Approval records a caller-supplied label and reason and changes the state to `approved`; approval alone does not start execution. The explicit `POST /api/tasks/{id}/run` endpoint currently accepts only approved tasks with no capability ID and task type `service_discovery`. That built-in runner performs configured loopback-only HTTP health probes, runs through the bounded execution gate (2 concurrent, 8 admitted by default, one attempt, 120-second timeout), and persists the result for `GET /api/tasks/{id}/result`. Running tasks can be cancelled through the cancellation watch channel. No shell commands, Pstack skills, plugins, imported agents or arbitrary capabilities are executed. Unsupported task types are rejected. The approval label is not authenticated identity; the API remains loopback-only. The worker queue is not yet recovered after process restart, and provider/agent dispatch is not implemented. The WebSocket stream emits committed task events, replays persisted history using `after_sequence`, bounds replay pages and recovers missed notifications from SQLite when a subscriber falls behind. A full browser/client WebSocket handshake and reconnect test remains outstanding.
 
 ## Pstack catalog import
 
@@ -89,4 +91,4 @@ See [project status](docs/PROJECT_STATUS.md) and [verification gates](docs/VERIF
 
 ## Bounded orchestration kernel
 
-The `dread-orchestrator` crate supplies a bounded execution gate for a caller-selected runner: max concurrent operations, max admitted work, retry count, per-attempt timeout and watch-channel cancellation. It is a foundation, not yet connected to the durable task API or a provider adapter. It has no persistent queue, priority scheduling, process launching or GPU lease ownership. The Python GPU Supervisor remains the only GPU owner. Do not treat approval as execution; the task API still records approval only.
+The `dread-orchestrator` crate supplies a bounded execution gate for a caller-selected runner: max concurrent operations, max admitted work, retry count, per-attempt timeout and watch-channel cancellation. It is connected to the durable task API for one reviewed, read-only service-discovery runner. It has no restart-recoverable worker queue, priority scheduling, provider/agent adapters, process launching or GPU lease ownership. The Python GPU Supervisor remains the only GPU owner. Approval does not execute a task; the separate run endpoint is required and rejects unsupported task types.
