@@ -28,6 +28,12 @@ impl Store {
   tx.execute("INSERT INTO token_usage(conversation_id,model,prompt_tokens,completion_tokens,total_tokens) VALUES(?1,?2,?3,?4,?5)",params![c,m,t.0,t.1,t.2]).map_err(|e|e.to_string())?;
   tx.commit().map_err(|e|e.to_string())
  }
+ pub fn conversation_messages(&self,id:&str,limit:i64)->Result<serde_json::Value,String>{
+  let c=self.0.lock().map_err(|e|e.to_string())?;
+  let mut s=c.prepare("SELECT role,content,model,created_at FROM messages WHERE conversation_id=?1 ORDER BY id DESC LIMIT ?2").map_err(|e|e.to_string())?;
+  let rows=s.query_map(params![id,limit.clamp(1,500)],|r|Ok(serde_json::json!({"role":r.get::<_,String>(0)?,"content":r.get::<_,String>(1)?,"model":r.get::<_,String>(2)?,"created_at":r.get::<_,String>(3)?}))).map_err(|e|e.to_string())?;
+  let mut v=rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;v.reverse();Ok(serde_json::json!({"conversation_id":id,"messages":v}))
+ }
  pub fn usage_totals(&self)->Result<serde_json::Value,String>{
   let c=self.0.lock().map_err(|e|e.to_string())?;
   let r:(i64,i64,i64,i64)=c.query_row("SELECT COUNT(*),COALESCE(SUM(prompt_tokens),0),COALESCE(SUM(completion_tokens),0),COALESCE(SUM(total_tokens),0) FROM token_usage",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(|e|e.to_string())?;
