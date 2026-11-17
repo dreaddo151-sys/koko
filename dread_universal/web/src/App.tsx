@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { Activity, AlertCircle, Bot, Check, ChevronRight, Cpu, KeyRound, LockKeyhole, MessageSquare, Play, Plus, RefreshCw, Search, Server, ShieldCheck, TerminalSquare, X } from "lucide-react";
 
 type Model = { id: string };
@@ -113,7 +114,7 @@ function App() {
             <div className="approval"><ShieldCheck size={14}/>Creating a task does not execute inference. Approve it first.</div>
           </section>
           <section className="panel"><PanelTitle icon={<Activity/>} title="Task queue" meta="5 SEC POLL"/><TaskList tasks={tasks.slice(0,6)} active={active} select={setActive} action={action} busy={busy}/><button className="link" onClick={()=>setPage("tasks")}>Open all tasks <ChevronRight size={14}/></button></section>
-          <section className="panel"><PanelTitle icon={<Bot/>} title="Agent health" meta="READ-ONLY PROBES"/>{agents.length?agents.map(x=><div className="row" key={x.id}><div><b>{x.name}</b><small>{x.adapter??x.id}</small></div><Pill value={x.status}/></div>):<Empty text="No agent health endpoints configured."/ >}</section>
+          <section className="panel"><PanelTitle icon={<Bot/>} title="Agent health" meta="READ-ONLY PROBES"/>{agents.length?agents.map(x=><div className="row" key={x.id}><div><b>{x.name}</b><small>{x.adapter??x.id}</small></div><Pill value={x.status}/></div>):<Empty text="No agent health endpoints configured."/>}</section>
           <section className="panel"><PanelTitle icon={<Search/>} title="Service discovery" meta="OPERATOR-INITIATED"/><p className="muted">Create a read-only scan of explicitly configured local service endpoints.</p><button className="secondary" disabled={!token||busy} onClick={()=>void create("service_discovery")}><Plus size={14}/>Create discovery task</button></section>
         </div>}
         {page==="tasks"&&<div className="task-layout"><section className="panel"><PanelTitle icon={<Activity/>} title="All tasks" meta={`${tasks.length} RECORDED`}/><TaskList tasks={tasks} active={active} select={setActive} action={action} busy={busy}/><button className="secondary full" disabled={!token||busy} onClick={()=>void create("service_discovery")}><Plus size={14}/>Create service discovery task</button></section>
@@ -124,8 +125,8 @@ function App() {
     </main>
   </div>;
 }
-function Metric({icon,label,value,detail}:{icon:React.ReactNode;label:string;value:string;detail:string}){return <div className="metric"><div>{icon}</div><small>{label}</small><b>{value}</b><span>{detail}</span></div>}
-function PanelTitle({icon,title,meta}:{icon:React.ReactNode;title:string;meta:string}){return <div className="panel-title"><div>{icon}<b>{title}</b></div><small>{meta}</small></div>}
+function Metric({icon,label,value,detail}:{icon:ReactNode;label:string;value:string;detail:string}){return <div className="metric"><div>{icon}</div><small>{label}</small><b>{value}</b><span>{detail}</span></div>}
+function PanelTitle({icon,title,meta}:{icon:ReactNode;title:string;meta:string}){return <div className="panel-title"><div>{icon}<b>{title}</b></div><small>{meta}</small></div>}
 function Empty({text}:{text:string}){return <div className="empty">{text}</div>}
 function TaskList({tasks,active,select,action,busy}:{tasks:Task[];active:string;select:(id:string)=>void;action:(task:Task,verb:"approve"|"run"|"cancel")=>void;busy:boolean}){
   if(!tasks.length)return <Empty text="No tasks have been created yet."/>;
