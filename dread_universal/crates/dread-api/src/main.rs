@@ -1722,7 +1722,7 @@ mod tests {
 
     #[tokio::test]
     async fn startup_recovery_resumes_only_safe_queued_tasks_and_marks_running_tasks_failed() {
-        let db = open_database(":memory:").unwrap();
+        let db = Arc::new(Mutex::new(open_database(":memory:").unwrap()));
         let now = now_epoch();
         {
             let conn = db.lock().unwrap();
@@ -1747,7 +1747,7 @@ mod tests {
         }
         let (events, _) = broadcast::channel(256);
         let state = AppState {
-            db: Arc::new(Mutex::new(db)),
+            db,
             gpu: GpuGatewayClient::new("http://127.0.0.1:1").unwrap(),
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
