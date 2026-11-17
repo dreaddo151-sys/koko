@@ -195,8 +195,8 @@ pub fn discover_agent_profiles(root: impl AsRef<Path>) -> Result<Vec<AgentProfil
     let root = root.as_ref().canonicalize()
         .map_err(|e| SkillError::InvalidRoot(e.to_string()))?;
     let agents = root.join("agents");
-    let metadata = fs::symlink_metadata(&agents).map_err(|_| SkillError::MissingSkillsDirectory)?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+    let agents_meta = fs::symlink_metadata(&agents).map_err(|_| SkillError::MissingSkillsDirectory)?;
+    if !agents_meta.is_dir() || agents_meta.file_type().is_symlink() {
         return Err(SkillError::MissingSkillsDirectory);
     }
     let mut profiles = Vec::new();
@@ -208,8 +208,8 @@ pub fn discover_agent_profiles(root: impl AsRef<Path>) -> Result<Vec<AgentProfil
         }
         let Some(stem) = entry.path().file_stem().and_then(|v| v.to_str()) else { continue };
         if !safe_id(stem) { continue; }
-        let metadata = fs::symlink_metadata(entry.path()).map_err(|e| SkillError::Io(e.to_string()))?;
-        if metadata.len() > MAX_SKILL_BYTES as u64 { return Err(SkillError::TooLarge); }
+        let file_meta = fs::symlink_metadata(entry.path()).map_err(|e| SkillError::Io(e.to_string()))?;
+        if file_meta.len() > MAX_SKILL_BYTES as u64 { return Err(SkillError::TooLarge); }
         let canonical = entry.path().canonicalize().map_err(|e| SkillError::Io(e.to_string()))?;
         if !canonical.starts_with(&root) { return Err(SkillError::UnsafePath); }
         let bytes = fs::read(&canonical).map_err(|e| SkillError::Io(e.to_string()))?;
