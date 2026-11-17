@@ -13,7 +13,7 @@ url = "http://127.0.0.1:8188/system_stats"
 role = "image-video-runtime"
 
 [[services]]
-id = "ollama"
-name = "Ollama"
-url = "http://127.0.0.1:11434/api/tags"
+id = "llama-cpp"
+name = "llama.cpp GPU Gateway"
+url = "http://127.0.0.1:11500/api/tags"
 role = "local-inference"
