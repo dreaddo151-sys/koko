@@ -10,6 +10,7 @@ type Result = { result?: unknown; error?: string | null; attempts?: number; elap
 type Capability = { id: string; name: string; kind: string; description: string; version?: string | null; license?: string | null; compatibility: string; dependencies: string[]; adapter?: string | null; status: string; provenance: { source_name: string; source_version?: string | null } };
 type SkillPreview = { id: string; name: string; description: string; content: string; trust: string; execution: string };
 type Service = { id: string; name: string; role: string; status: string; http_status?: number | null; latency_ms?: number; summary?: string | null; detail?: string };
+type HostProfile = { os: string; architecture: string; cpu_threads: number; gpu_devices: { vendor: string; name: string; vram_mib: number | null }[]; llama_server: string | null; nvidia_smi_available: boolean; rocm_smi_available: boolean; xpu_smi_available: boolean; inference_backend: string };
 type Page = "overview" | "tasks" | "agents" | "capabilities" | "models" | "gpu";
 
 async function api<T>(path: string, token: string, init: RequestInit = {}): Promise<T> {
@@ -39,7 +40,7 @@ function App() {
   const [connected,setConnected]=useState(false); const [supervisorOnline,setSupervisorConfigured]=useState(false); const [error,setError]=useState(""); const [busy,setBusy]=useState(false);
   const [models,setModels]=useState<Model[]>([]); const [model,setModel]=useState("");
   const [tasks,setTasks]=useState<Task[]>([]); const [agents,setAgents]=useState<Agent[]>([]); const [capabilities,setCapabilities]=useState<Capability[]>([]); const [services,setServices]=useState<Service[]>([]);
-  const [skillPreview,setSkillPreview]=useState<SkillPreview|null>(null); const [notice,setNotice]=useState(""); const [selectedSkills,setSelectedSkills]=useState<string[]>([]);
+  const [skillPreview,setSkillPreview]=useState<SkillPreview|null>(null); const [notice,setNotice]=useState(""); const [selectedSkills,setSelectedSkills]=useState<string[]>([]); const [hostProfile,setHostProfile]=useState<HostProfile|null>(null);
   const [prompt,setPrompt]=useState(""); const [active,setActive]=useState("");
   const [events,setEvents]=useState<Event[]>([]); const [result,setResult]=useState<Result|null>(null);
   const [page,setPage]=useState<Page>("overview"); const [lastRefresh,setLastRefresh]=useState<number|null>(null);
@@ -47,11 +48,11 @@ function App() {
   const refresh=useCallback(async()=>{
     if(!token){setConnected(false);return;}
     try{
-      const [health,gpuHealth,ml,tl,al,cl,sv]=await Promise.all([
+      const [health,gpuHealth,ml,tl,al,cl,sv,hp]=await Promise.all([
         api<{status:string}>("/health",""), api<{supervisor_online?:boolean}>("/api/gpu/health",token), api<{data?:Model[]}>("/api/gpu/models",token),
-        api<{items?:Task[]}>("/api/tasks",token), api<{items?:Agent[]} >("/api/agents",token), api<{items?:Capability[]}>("/api/capabilities",token), api<Service[]>("/api/services",token)
+        api<{items?:Task[]}>("/api/tasks",token), api<{items?:Agent[]} >("/api/agents",token), api<{items?:Capability[]}>("/api/capabilities",token), api<Service[]>("/api/services",token), api<HostProfile>("/api/system/profile",token)
       ]);
-      setConnected(health.status==="ok"); setSupervisorConfigured(Boolean(gpuHealth.supervisor_online)); setModels(ml.data??[]); setTasks(tl.items??[]); setAgents(al.items??[]); setCapabilities(cl.items??[]); setServices(sv??[]); setError(""); setLastRefresh(Date.now());
+      setConnected(health.status==="ok"); setSupervisorConfigured(Boolean(gpuHealth.supervisor_online)); setModels(ml.data??[]); setTasks(tl.items??[]); setAgents(al.items??[]); setCapabilities(cl.items??[]); setServices(sv??[]); setHostProfile(hp); setError(""); setLastRefresh(Date.now());
     }catch(e){setConnected(false);setError(e instanceof Error?e.message:"API request failed");}
   },[token]);
   useEffect(()=>{void refresh();if(!token)return;const t=window.setInterval(()=>void refresh(),5000);return()=>window.clearInterval(t);},[refresh,token]);
@@ -131,9 +132,10 @@ function App() {
       <header className="topbar"><div className="crumb">DREAD SYSTEM <ChevronRight size={13}/> <b>{page.replaceAll("_"," ").toUpperCase()}</b></div><div className="topright"><span className={connected?"online":"offline"}><i/>{connected?"CONTROL LINK ACTIVE":token?"API LINK LOST":"SYSTEM LOCKED"}</span><span className="refresh-time">{lastRefresh?new Date(lastRefresh).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"}):"NO TELEMETRY"}</span><button className="icon" onClick={()=>void refresh()} title="Refresh telemetry"><RefreshCw size={15}/></button>{token&&<button className="icon" title="Disconnect and clear token" onClick={disconnect}><LogOut size={15}/></button>}</div></header>
       <div className="content">
         <div className="eyebrow"><span className="pulse-dot"/> LOCAL AI OPERATIONS / DUAL GPU COMMAND ENVIRONMENT <span className="eyebrow-line"/></div>
-        <div className="heading"><div><h1>{page==="overview"?"Command deck":page==="tasks"?"Mission control":page==="agents"?"Agent network":page==="capabilities"?"Pstack capability registry":page==="models"?"Model arsenal":"GPU telemetry"}</h1><p>Observe, coordinate and operate your local AI stack without crossing its safety boundaries.</p></div><div className="workstation"><span className="workstation-mark"><Cpu size={15}/></span><div><b>DUAL RTX WORKSTATION</b><small>LOCAL NODE / LOOPBACK</small></div><Pill value={connected?"LINKED":"LOCKED"}/></div></div>
+        <div className="heading"><div><h1>{page==="overview"?"Command deck":page==="tasks"?"Mission control":page==="agents"?"Agent network":page==="capabilities"?"Pstack capability registry":page==="models"?"Model arsenal":"GPU telemetry"}</h1><p>Observe, coordinate and operate your local AI stack without crossing its safety boundaries.</p></div><div className="workstation"><span className="workstation-mark"><Cpu size={15}/></span><div><b>{hostProfile?`${hostProfile.gpu_devices.length} GPU DEVICE(S) / ${hostProfile.os.toUpperCase()}`:"HOST DISCOVERY PENDING"}</b><small>{hostProfile?`${hostProfile.architecture.toUpperCase()} · ${hostProfile.cpu_threads} CPU THREADS`:"LOCAL NODE / LOOPBACK"}</small></div><Pill value={connected?"LINKED":"LOCKED"}/></div></div>
         {!token&&<div className="connect"><LockKeyhole size={21}/><div><b>AUTHENTICATE COMMAND LINK</b><small>Bearer token remains in page memory only. Never persisted to browser storage.</small></div><div className="token"><KeyRound size={15}/><input type={show?"text":"password"} value={draft} onChange={e=>setDraft(e.target.value)} onKeyDown={e=>e.key==="Enter"&&connect()} placeholder="DREAD API ACCESS TOKEN"/><button className="icon" onClick={()=>setShow(!show)}><Search size={14}/></button><button className="primary" onClick={connect}>ESTABLISH LINK</button></div></div>}
         {error&&<div className="error"><AlertCircle size={16}/>{error}<button onClick={()=>setError("")}><X size={14}/></button></div>}
+        {hostProfile&&<section className="panel host-panel"><PanelTitle icon={<Cpu/>} title="AUTO-DISCOVERED HOST PROFILE" meta="READ-ONLY / NO HOST MUTATIONS"/><div className="host-grid"><div><small>OPERATING SYSTEM</small><b>{hostProfile.os} / {hostProfile.architecture}</b></div><div><small>CPU THREADS</small><b>{hostProfile.cpu_threads}</b></div><div><small>INFERENCE BACKEND</small><b>{hostProfile.inference_backend}</b></div><div><small>LLAMA SERVER</small><b>{hostProfile.llama_server??"NOT FOUND IN PATH"}</b></div></div><div className="host-gpus">{hostProfile.gpu_devices.length?hostProfile.gpu_devices.map((gpu,index)=><div className="row" key={`${gpu.vendor}-${index}`}><div><b>{gpu.name}</b><small>{gpu.vendor.toUpperCase()} · {gpu.vram_mib===null?"VRAM NOT REPORTED":`${gpu.vram_mib.toLocaleString()} MiB VRAM`}</small></div><Pill value="DETECTED"/></div>):<Empty text="No supported GPU utility reported a device. CPU-only host remains discoverable."/>}</div><div className="host-tools"><span>NVIDIA-SMI {hostProfile.nvidia_smi_available?"FOUND":"MISSING"}</span><span>ROCM-SMI {hostProfile.rocm_smi_available?"FOUND":"MISSING"}</span><span>XPU-SMI {hostProfile.xpu_smi_available?"FOUND":"MISSING"}</span></div></section>}
         <div className="metrics">
           <Metric icon={<Cpu/>} label="GPU SUPERVISOR" value={supervisorOnline?"READY":"LOCKED"} detail="PYTHON LEASE BRIDGE / :11502" tone={supervisorOnline?"cyan":"amber"}/>
           <Metric icon={<Activity/>} label="ACTIVE MISSIONS" value={String(stats.active).padStart(2,"0")} detail={`${stats.pending} AWAITING OPERATOR APPROVAL`} tone="violet"/>
