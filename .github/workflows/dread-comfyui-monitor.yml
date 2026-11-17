@@ -8,6 +8,8 @@ on:
       - .github/workflows/dread-comfyui-monitor.yml
       - dread_universal/crates/**
       - dread_universal/web/**
+      - dread_universal/scripts/**
+      - dread_universal/docs/**
   pull_request:
     branches:
       - integration/dread-canonical-source-run81
