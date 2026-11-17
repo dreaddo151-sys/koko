@@ -193,6 +193,10 @@ jobs:
           npm run build
         working-directory: dread_universal/web
 
+      - name: Test Python GPU Supervisor bridge
+        run: python3 -m unittest discover -s scripts -p 'test_gpu_supervisor_bridge.py'
+        working-directory: dread_universal
+
       - name: Exercise authenticated Pstack API apply and idempotent re-import
         shell: bash
         working-directory: dread_universal
