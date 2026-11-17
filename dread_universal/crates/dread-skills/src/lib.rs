@@ -86,10 +86,7 @@ fn safe_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 120
         && id.bytes().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || byte == b'-'
-                || byte == b'_'
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
         })
 }
 
@@ -190,7 +187,9 @@ pub fn discover_skills(root: impl AsRef<Path>) -> Result<Vec<SkillDescriptor>, S
     let entries = fs::read_dir(&skills).map_err(|e| SkillError::Io(e.to_string()))?;
     for entry in entries {
         let entry = entry.map_err(|e| SkillError::Io(e.to_string()))?;
-        let file_type = entry.file_type().map_err(|e| SkillError::Io(e.to_string()))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| SkillError::Io(e.to_string()))?;
         if !file_type.is_dir() || file_type.is_symlink() {
             continue;
         }
@@ -237,7 +236,9 @@ pub fn discover_agent_profiles(
     let entries = fs::read_dir(&agents).map_err(|e| SkillError::Io(e.to_string()))?;
     for entry in entries {
         let entry = entry.map_err(|e| SkillError::Io(e.to_string()))?;
-        let kind = entry.file_type().map_err(|e| SkillError::Io(e.to_string()))?;
+        let kind = entry
+            .file_type()
+            .map_err(|e| SkillError::Io(e.to_string()))?;
         if !kind.is_file()
             || kind.is_symlink()
             || entry.path().extension().and_then(|value| value.to_str()) != Some("md")
@@ -476,8 +477,7 @@ mod tests {
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].id, "pstack.agent.poteto-agent");
 
-        let loaded =
-            load_agent_profile_context(&temp.0, "pstack.agent.poteto-agent").unwrap();
+        let loaded = load_agent_profile_context(&temp.0, "pstack.agent.poteto-agent").unwrap();
         assert_eq!(loaded.descriptor.name, "Poteto Agent");
         assert!(loaded.content.contains("# instructions"));
     }
