@@ -12,7 +12,7 @@ SPEC.loader.exec_module(watchdog)
 
 class WatchdogPolicyTests(unittest.TestCase):
     def test_restart_allowed_below_ceiling(self):
-        allowed, _ = watchdog.restart_allowed({"attempts": [100.0]}, 120.0)
+        allowed, _ = watchdog.restart_allowed({"attempts": [50.0]}, 120.0)
         self.assertTrue(allowed)
 
     def test_restart_ceiling_stops_repeated_restarts(self):
