@@ -2426,6 +2426,28 @@ mod tests {
         (router, server)
     }
 
+    #[tokio::test]
+    async fn system_profile_exposes_read_only_host_discovery() {
+        let (router, server) = test_app().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/system/profile")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let profile: Value = serde_json::from_slice(&body).unwrap();
+        assert!(profile["os"].as_str().is_some_and(|value| !value.is_empty()));
+        assert!(profile["architecture"].as_str().is_some_and(|value| !value.is_empty()));
+        assert!(profile["cpu_threads"].as_u64().is_some_and(|value| value >= 1));
+        assert_eq!(profile["inference_backend"], "llama.cpp");
+        server.abort();
+    }
+
     #[test]
     fn gpu_chat_skill_context_ids_are_bounded_and_path_safe() {
         let valid = json!({
