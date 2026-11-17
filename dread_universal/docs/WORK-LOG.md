@@ -348,3 +348,14 @@ Do not repeat basic GPU enumeration, generic API health or standalone llama.cpp 
 - Package checks included assembly, checksums/content, disposable Ubuntu 24.04 installation, API health, production UI, unauthenticated 401 and authenticated host-profile smoke test.
 - Run #527 validates the latest PR documentation head. The mission scheduler implementation remains the Run #520 candidate `c41ea4b4424c30f1da536305dc0fef7e8f3f4129`; its scheduler-specific tests passed in that run.
 - No live workstation installation, service restart, GPU workload, media generation or reboot acceptance is implied. PR #12 remains open and unmerged.
+
+
+## Mission retry control and host discovery probe correction — 2026-11-18
+
+- Added bounded exponential retry backoff to the shared execution gate. The initial delay and maximum delay are explicit configuration fields; invalid bounds are rejected. Cancellation is observed while waiting, so a cancelled task does not launch another attempt.
+- Added regression coverage for invalid backoff configuration and cancellation during retry wait. Existing runner retry, timeout, active cancellation, concurrency and admission tests remain in the workspace suite.
+- **Important limitation:** the production default remains one attempt, and the new delay is an execution primitive. No mission-node-specific retry policy, retryable-error classification, or provider idempotency contract has been enabled. Non-idempotent work must not be blindly retried.
+- Corrected mounted filesystem discovery to use GNU `df -B1 --output=...` without the incompatible `-P` option. Added a live probe regression requiring the root filesystem to be reported; parser-only fixtures alone would not have caught the invalid command combination.
+- Candidate commit: `4cfc38b955cc93d6b4550b402a2dab9db14f30a4`.
+- GitHub Actions run #565 (`44203367682`) passed all three jobs: Rust / Ubuntu 24.04, Web console / Ubuntu 24.04, and Ubuntu packages / smoke test. Rust checks included formatting, strict Clippy, workspace tests, release build, installer syntax, portable migration/rollback, Python bridge/importer regressions and GPU single-owner guard. Package checks included checksum/content validation and disposable Ubuntu 24.04 API/UI/authenticated host-profile smoke tests.
+- Run #565 is CI evidence only. It does not prove the current candidate is installed on the physical workstation or that dual-GPU inference, ComfyUI concurrency, real media artifacts, agent execution, or release rollback have passed there.

@@ -471,3 +471,8 @@ Run #520 (`44197777681`) passed all three jobs on this candidate: Rust formattin
 Run #527 validates the current PR HEAD, whose commit updates acceptance documentation after the Run #520 implementation candidate. It does not change the implementation candidate's identity: mission scheduler code was validated by Run #520 on `c41ea4b4424c30f1da536305dc0fef7e8f3f4129`. The newer head CI confirms the complete current PR tree still builds and passes the same three-job workflow.
 
 **Acceptance boundary unchanged:** this is repository CI and disposable-runner package evidence only. It is not a live install or acceptance on the physical Ubuntu workstation. PR #12 remains open and unmerged. Do not stop, replace or reconfigure the legacy Python Hub, ComfyUI, llama.cpp or Python GPU Supervisor as part of this documentation update.
+
+
+## Latest implementation evidence — 2026-11-18
+
+Candidate `4cfc38b955cc93d6b4550b402a2dab9db14f30a4` adds capped cancellable retry backoff to the execution primitive and corrects the GNU mounted-filesystem probe to use the supported `df --output` interface. GitHub Actions run #565 (`44203367682`) passed all three Ubuntu 24.04 CI jobs. Retry remains disabled by default (one attempt); per-node retry policy, retryability/idempotency classification, resource-aware mission scheduling, provider cancellation propagation and interrupted-mission recovery remain incomplete. Physical workstation acceptance remains outstanding. See WORK-LOG.md for the dated evidence entry.
