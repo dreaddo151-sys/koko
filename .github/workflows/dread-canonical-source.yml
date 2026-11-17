@@ -159,6 +159,10 @@ jobs:
           print("Pstack pin, tree, inventory provenance: PASS")
           PY
 
+      - name: Check single-owner GPU lease boundary
+        run: python3 scripts/check_gpu_ownership_boundary.py
+        working-directory: dread_universal
+
       - name: Install stable Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
