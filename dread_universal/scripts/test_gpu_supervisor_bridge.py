@@ -94,8 +94,8 @@ class SupervisorBridgeTests(unittest.TestCase):
 
     def test_telemetry_is_read_only_and_parses_both_gpus(self):
         output = (
-            "0, NVIDIA GeForce RTX 3090, 12, 1000, 24576, 54, 230.5, 4, 16\\n"
-            "1, NVIDIA GeForce RTX 3090, 8, 2000, 24576, 49, 180.0, 3, 8\\n"
+            "0, NVIDIA GeForce RTX 3090, 12, 1000, 24576, 54, 230.5, 4, 16\n"
+            "1, NVIDIA GeForce RTX 3090, 8, 2000, 24576, 49, 180.0, 3, 8\n"
         )
         with patch("dread_gpu_supervisor_bridge.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout=output)):
             status, payload = collect_gpu_telemetry()
@@ -106,12 +106,13 @@ class SupervisorBridgeTests(unittest.TestCase):
         self.assertEqual(payload["devices"][1]["pcie_width"], 8)
 
     def test_telemetry_does_not_fabricate_unsupported_values(self):
-        output = "0, NVIDIA GeForce RTX 3090, N/A, 1000, 24576, 54, N/A, N/A, N/A\\n"
+        output = "0, NVIDIA GeForce RTX 3090, N/A, 1000, 24576, 54, N/A, N/A, N/A\n"
         with patch("dread_gpu_supervisor_bridge.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout=output)):
             status, payload = collect_gpu_telemetry()
         self.assertEqual(status, 200)
         self.assertIsNone(payload["devices"][0]["utilization_percent"])
         self.assertIsNone(payload["devices"][0]["power_w"])
+
     def test_bind_is_loopback_only(self):
         self.assertEqual(validate_bind("127.0.0.1:11502"), ("127.0.0.1", 11502))
         with self.assertRaises(ValueError):
