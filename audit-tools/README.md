@@ -41,7 +41,7 @@ The API rejects non-loopback bind addresses because authentication/authorization
 | GET | `/api/capabilities/{id}` | Read one capability record |
 | GET/POST | `/api/tasks` | List tasks / create a task in `pending_approval` |
 | GET | `/api/tasks/{id}` | Read task state |
-| GET | `/api/tasks/{id}/events` | Read ordered task audit events |
+| GET | `/api/tasks/{id}/events` | Read ordered task audit events |\n| GET (WebSocket upgrade) | `/api/tasks/{id}/stream?after_sequence=N` | Stream live events and replay persisted history after a sequence cursor |
 | POST | `/api/tasks/{id}/approve` | Record approval; does not execute the task |
 | POST | `/api/tasks/{id}/cancel` | Record cancellation |
 | GET | `/api/gpu/health` | Read GPU gateway health |
@@ -68,7 +68,7 @@ Agent health states distinguish 2xx ONLINE, 3xx REDIRECTED, 4xx REACHABLE, 5xx D
 
 ### Task approval boundary
 
-Creating a task only creates a durable `pending_approval` record. Approval records a caller-supplied approver label and reason, and changes the state to `approved`; it does not start a worker, invoke an agent or execute commands. The approver label is not authenticated identity. There is no task executor or provider dispatch yet.
+Creating a task only creates a durable `pending_approval` record. Approval records a caller-supplied approver label and reason, and changes the state to `approved`; it does not start a worker, invoke an agent or execute commands. The approver label is not authenticated identity. The stream uses bounded replay pages and recovers missed notifications from SQLite when a subscriber falls behind. A full browser/client WebSocket handshake test is still outstanding. There is no task executor or provider dispatch yet.
 
 ## GPU ownership and service safety
 
