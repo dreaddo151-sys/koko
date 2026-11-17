@@ -1383,6 +1383,21 @@ async fn main() -> anyhow::Result<()> {
     validate_bind_address(addr)?;
     let db_path =
         env::var("DREAD_DB_PATH").unwrap_or_else(|_| "data/dread_registry.sqlite3".to_string());
+    let api_token = env::var("DREAD_API_TOKEN")
+        .ok()
+        .filter(|token| !token.trim().is_empty());
+    if let Some(token) = &api_token {
+        anyhow::ensure!(
+            token.len() >= 32,
+            "DREAD_API_TOKEN must contain at least 32 characters"
+        );
+    }
+    let operator_id =
+        env::var("DREAD_OPERATOR_ID").unwrap_or_else(|_| "local-operator".to_string());
+    anyhow::ensure!(
+        !operator_id.trim().is_empty() && operator_id.len() <= 160,
+        "DREAD_OPERATOR_ID must be non-empty and at most 160 characters"
+    );
     let db = open_database(&db_path)?;
     let (events, _) = broadcast::channel(256);
     let state = AppState {
@@ -1392,8 +1407,8 @@ async fn main() -> anyhow::Result<()> {
         execution: ExecutionGate::new(ExecutionConfig::default())
             .map_err(|error| anyhow::anyhow!("Invalid execution configuration: {error:?}"))?,
         cancellations: Arc::new(Mutex::new(HashMap::new())),
-        api_token: env::var("DREAD_API_TOKEN").ok().filter(|token| !token.trim().is_empty()),
-        operator_id: env::var("DREAD_OPERATOR_ID").unwrap_or_else(|_| "local-operator".to_string()),
+        api_token,
+        operator_id,
         auth_required: true,
     };
 
