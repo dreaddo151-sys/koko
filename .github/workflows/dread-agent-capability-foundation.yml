@@ -64,6 +64,7 @@ jobs:
           grep -q 'api/tasks' crates/dread-api/src/main.rs
           grep -q 'task_events' crates/dread-api/src/main.rs
           patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/agent-readonly-discovery.patch"
+          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/agent-discovery-status-correction.patch"
           python3 - "$WORKSPACE/crates/dread-api/src/main.rs" <<'PY'
           from pathlib import Path
           import sys
@@ -89,7 +90,8 @@ jobs:
           only explicitly configured endpoints. The configuration is empty by default;
           entries are capped at 32, IDs must be unique, and health URLs must be explicit-
           port loopback HTTP URLs without credentials, query strings or fragments.
-          Enabled probes use GET only, a two-second timeout, and no redirects. Disabled
+          Enabled probes use GET only, a two-second timeout, and no redirects; 3xx responses are
+          classified as REDIRECTED, not ONLINE. Disabled
           entries generate no network request. Discovery does not enumerate arbitrary
           ports, inspect processes, start agents, dispatch tasks, or execute plugins.
           Provider-specific adapters and task dispatch remain separate future work.
