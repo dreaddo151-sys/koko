@@ -73,8 +73,8 @@ impl GpuGatewayClient {
     /// Construct the loopback gateway client from DREAD_GPU_GATEWAY_URL.
     /// The default remains the local Supervisor gateway used by the workstation build.
     pub fn from_env() -> Result<Self> {
-        let endpoint = std::env::var("DREAD_GPU_GATEWAY_URL")
-            .unwrap_or_else(|_| DEFAULT_GATEWAY.to_string());
+        let endpoint =
+            std::env::var("DREAD_GPU_GATEWAY_URL").unwrap_or_else(|_| DEFAULT_GATEWAY.to_string());
         Self::new(endpoint)
     }
 
