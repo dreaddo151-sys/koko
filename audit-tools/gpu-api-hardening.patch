@@ -1,0 +1,108 @@
+--- crates/dread-gpu/src/lib.rs
++++ crates/dread-gpu/src/lib.rs
+@@ -59,6 +59,7 @@
+         let base_url = base_url.as_ref().trim_end_matches('/').to_string();
+ 
+         let http = reqwest::Client::builder()
++            .redirect(reqwest::redirect::Policy::none())
+             .connect_timeout(Duration::from_secs(3))
+             .build()
+             .context("Could not create GPU gateway HTTP client")?;
+@@ -217,6 +218,9 @@
+     fn rejects_non_loopback_gateway() {
+         assert!(GpuGatewayClient::new("http://192.168.1.10:11500").is_err());
+         assert!(GpuGatewayClient::new("https://127.0.0.1:11500").is_err());
++        assert!(GpuGatewayClient::new("http://127.0.0.1:11500@evil.test").is_err());
++        assert!(GpuGatewayClient::new("http://127.0.0.1.evil.test:11500").is_err());
++        assert!(GpuGatewayClient::new("http://user@127.0.0.1:11500").is_err());
+     }
+ 
+     #[test]
+--- crates/dread-api/src/main.rs
++++ crates/dread-api/src/main.rs
+@@ -1,7 +1,7 @@
+ use axum::body::Body;
+ use axum::{
+     Json, Router,
+-    extract::{Path, State},
++    extract::{DefaultBodyLimit, Path, State},
+     http::StatusCode,
+     response::{IntoResponse, Response},
+     routing::get,
+@@ -22,6 +22,8 @@
+ use tracing::{error, info};
+ use uuid::Uuid;
+ 
++const MAX_API_BODY_BYTES: usize = 32 * 1024 * 1024;
++
+ #[derive(Clone)]
+ struct AppState {
+     db: Arc<Mutex<Connection>>,
+@@ -364,9 +366,18 @@
+             "/api/registry/{id}",
+             get(get_registry_item).delete(delete_registry_item),
+         )
++        .layer(DefaultBodyLimit::max(MAX_API_BODY_BYTES))
+         .with_state(state)
+ }
+ 
++fn validate_bind_address(addr: SocketAddr) -> anyhow::Result<()> {
++    anyhow::ensure!(
++        addr.ip().is_loopback(),
++        "DREAD_BIND must be a loopback address until API authentication is implemented"
++    );
++    Ok(())
++}
++
+ #[tokio::main]
+ async fn main() -> anyhow::Result<()> {
+     tracing_subscriber::fmt()
+@@ -378,6 +389,7 @@
+ 
+     let bind = env::var("DREAD_BIND").unwrap_or_else(|_| "127.0.0.1:8765".to_string());
+     let addr: SocketAddr = bind.parse()?;
++    validate_bind_address(addr)?;
+     let db_path =
+         env::var("DREAD_DB_PATH").unwrap_or_else(|_| "data/dread_registry.sqlite3".to_string());
+     let db = open_database(&db_path)?;
+@@ -592,6 +604,40 @@
+     }
+ 
+     #[test]
++    fn api_bind_is_loopback_only_without_authentication() {
++        assert!(validate_bind_address("127.0.0.1:8765".parse().unwrap()).is_ok());
++        assert!(validate_bind_address("[::1]:8765".parse().unwrap()).is_ok());
++        assert!(validate_bind_address("0.0.0.0:8765".parse().unwrap()).is_err());
++        assert!(validate_bind_address("192.168.1.20:8765".parse().unwrap()).is_err());
++    }
++
++    #[tokio::test]
++    async fn registry_round_trips_large_messages_without_truncation() {
++        let (router, server) = test_app().await;
++        for size in [5_000usize, 10_000, 20_000] {
++            let payload = "x".repeat(size);
++            let body = json!({
++                "name": format!("payload-{size}"),
++                "kind": "integrity-test",
++                "metadata": {"payload": payload}
++            }).to_string();
++            let response = router.clone().oneshot(
++                Request::builder()
++                    .method("POST")
++                    .uri("/api/registry")
++                    .header("content-type", "application/json")
++                    .body(Body::from(body))
++                    .unwrap(),
++            ).await.unwrap();
++            assert_eq!(response.status(), StatusCode::CREATED);
++            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
++            let value: Value = serde_json::from_slice(&body).unwrap();
++            assert_eq!(value["item"]["metadata"]["payload"].as_str(), Some(payload.as_str()));
++        }
++        server.abort();
++    }
++
++    #[test]
+     fn timestamp_is_unix_epoch_seconds() {
+         assert!(now_epoch() > 1_700_000_000);
+     }
