@@ -97,8 +97,7 @@ impl GpuSupervisorClient {
                 String::from_utf8_lossy(&response_body)
             );
         }
-        serde_json::from_slice(&response_body)
-            .context("GPU Supervisor returned invalid JSON")
+        serde_json::from_slice(&response_body).context("GPU Supervisor returned invalid JSON")
     }
 
     pub async fn acquire_tensor_lease(&self) -> Result<GpuLeaseGuard> {

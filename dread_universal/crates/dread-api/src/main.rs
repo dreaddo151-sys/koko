@@ -1462,8 +1462,7 @@ async fn gpu_health(State(state): State<AppState>) -> Result<Json<Value>, ApiErr
         message: format!("GPU gateway unavailable: {e}"),
     })?;
 
-    let mut value =
-        serde_json::to_value(health).map_err(|e| ApiError::internal(e.to_string()))?;
+    let mut value = serde_json::to_value(health).map_err(|e| ApiError::internal(e.to_string()))?;
     value["supervisor_configured"] = json!(state.supervisor.is_some());
     Ok(Json(value))
 }
