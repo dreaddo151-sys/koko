@@ -41,7 +41,8 @@ The API rejects non-loopback bind addresses because authentication/authorization
 | GET | `/api/capabilities/{id}` | Read one capability record |
 | GET/POST | `/api/tasks` | List tasks / create a task in `pending_approval` |
 | GET | `/api/tasks/{id}` | Read task state |
-| GET | `/api/tasks/{id}/events` | Read ordered task audit events |\n| GET (WebSocket upgrade) | `/api/tasks/{id}/stream?after_sequence=N` | Stream live events and replay persisted history after a sequence cursor |
+| GET | `/api/tasks/{id}/events` | Read ordered task audit events |
+| GET (WebSocket upgrade) | `/api/tasks/{id}/stream?after_sequence=N` | Stream live events and replay persisted history after a sequence cursor |
 | POST | `/api/tasks/{id}/approve` | Record approval; does not execute the task |
 | POST | `/api/tasks/{id}/cancel` | Record cancellation |
 | GET | `/api/gpu/health` | Read GPU gateway health |
@@ -66,16 +67,15 @@ enabled = false
 
 Agent health states distinguish 2xx ONLINE, 3xx REDIRECTED, 4xx REACHABLE, 5xx DEGRADED, connection failure OFFLINE and timeout UNKNOWN.
 
-### Task approval boundary
+### Task approval and event-stream boundary
 
-Creating a task only creates a durable `pending_approval` record. Approval records a caller-supplied approver label and reason, and changes the state to `approved`; it does not start a worker, invoke an agent or execute commands. The approver label is not authenticated identity. The stream uses bounded replay pages and recovers missed notifications from SQLite when a subscriber falls behind. A full browser/client WebSocket handshake test is still outstanding. There is no task executor or provider dispatch yet.
-
+Creating a task only creates a durable `pending_approval` record. Approval records a caller-supplied approver label and reason, and changes the state to `approved`; it does not start a worker, invoke an agent or execute commands. The approver label is not authenticated identity. The WebSocket stream emits committed task events, replays persisted history using `after_sequence`, bounds replay pages and recovers missed notifications from SQLite when a subscriber falls behind. A full browser/client WebSocket handshake and reconnect test remains outstanding. There is no task executor or provider dispatch yet.
 
 ## Pstack catalog import
 
 The catalog pins Pstack `0.15.43` (commit `2f87c854fe3e2fcda44ca86b46ede35aad3c46b7`, subtree `71d8e1d1d718e2149dc43b2535618064f29cba6b`, MIT): 58 skills and 2 agents. The bundled `integrations/pstack-upstream` copy is version `0.15.42` and is not accepted as the pinned source.
 
-First run `scripts/import-pstack.sh` to fetch and verify the exact catalog commit/tree. It records the pinned revision and per-file SHA-256 hashes. Then run `python3 scripts/import_pstack_capabilities.py` for validation/dry-run. Only add `--apply` when the loopback Rust API is running and metadata registration is intended. Existing entries must be confirmed disabled. This importer records metadata only: it never executes skill contents, agents, hooks or scripts.
+CI run `44014112205` fetched and verified the pinned upstream commit/tree, passed nine importer unit tests and completed a metadata dry-run. First run `scripts/import-pstack.sh` to fetch and verify the exact catalog commit/tree. Then run `python3 scripts/import_pstack_capabilities.py` for validation/dry-run. Only add `--apply` when the loopback Rust API is running and metadata registration is intended. The live API `--apply` operation remains unverified. Existing entries must be confirmed disabled. This importer records metadata only: it never executes skill contents, agents, hooks or scripts.
 
 ## GPU ownership and service safety
 
@@ -83,7 +83,7 @@ The Python GPU Supervisor remains the only GPU ownership, VRAM lease and process
 
 ## Scope
 
-This is a tested Rust foundation, not the complete Universal Hub. WebSocket event streaming, bounded task execution, provider-specific adapters, reviewed Pstack/Cursor import, authentication, React operator UI, legacy Hub parity, installer/upgrade/rollback and live dual-RTX-3090 acceptance remain future milestones.
+This is a tested Rust foundation, not the complete Universal Hub. WebSocket task-event streaming, read-only agent discovery, disabled-by-default capability metadata and the Pstack pinned metadata dry-run have CI evidence. The bounded orchestration kernel exists as an isolated crate but is not connected to the durable task API or a provider adapter. Remaining milestones include an end-to-end WebSocket client handshake/reconnect test, live Pstack API `--apply`, authentication, provider-specific adapters, React operator UI, legacy Hub parity, installer/upgrade/rollback and live dual-RTX-3090 acceptance.
 
 See [project status](docs/PROJECT_STATUS.md) and [verification gates](docs/VERIFICATION.md).
 
