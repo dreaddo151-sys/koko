@@ -2761,6 +2761,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn token_usage_route_reports_measured_provider_counters_without_estimates() {
+        let (router, server) = test_app().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/usage/tokens")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["provider"], "llama.cpp-compatible local gateway");
+        assert_eq!(value["total_tokens"], 0);
+        assert_eq!(value["measured_responses"], 0);
+        assert!(value["note"].as_str().unwrap().contains("no estimates"));
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn gpu_models_route_returns_gateway_models() {
         let (router, server) = test_app().await;
 
