@@ -22,6 +22,22 @@ pub struct SkillDescriptor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentProfileDescriptor {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub relative_path: String,
+    pub bytes: u64,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentProfileContext {
+    pub descriptor: AgentProfileDescriptor,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillContext {
     pub descriptor: SkillDescriptor,
     pub content: String,
@@ -173,6 +189,79 @@ pub fn discover_skills(root: impl AsRef<Path>) -> Result<Vec<SkillDescriptor>, S
     ids.into_iter().map(|id| read_descriptor(&root, &id)).collect()
 }
 
+/// Discover Pstack-style prompt-agent profiles in agents/<name>.md.
+/// These are prompt definitions, not live AgentAdapter processes.
+pub fn discover_agent_profiles(root: impl AsRef<Path>) -> Result<Vec<AgentProfileDescriptor>, SkillError> {
+    let root = root.as_ref().canonicalize()
+        .map_err(|e| SkillError::InvalidRoot(e.to_string()))?;
+    let agents = root.join("agents");
+    let metadata = fs::symlink_metadata(&agents).map_err(|_| SkillError::MissingSkillsDirectory)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(SkillError::MissingSkillsDirectory);
+    }
+    let mut profiles = Vec::new();
+    for entry in fs::read_dir(&agents).map_err(|e| SkillError::Io(e.to_string()))? {
+        let entry = entry.map_err(|e| SkillError::Io(e.to_string()))?;
+        let kind = entry.file_type().map_err(|e| SkillError::Io(e.to_string()))?;
+        if !kind.is_file() || kind.is_symlink() || entry.path().extension().and_then(|v| v.to_str()) != Some("md") {
+            continue;
+        }
+        let Some(stem) = entry.path().file_stem().and_then(|v| v.to_str()) else { continue };
+        if !safe_id(stem) { continue; }
+        let metadata = fs::symlink_metadata(entry.path()).map_err(|e| SkillError::Io(e.to_string()))?;
+        if metadata.len() > MAX_SKILL_BYTES as u64 { return Err(SkillError::TooLarge); }
+        let canonical = entry.path().canonicalize().map_err(|e| SkillError::Io(e.to_string()))?;
+        if !canonical.starts_with(&root) { return Err(SkillError::UnsafePath); }
+        let bytes = fs::read(&canonical).map_err(|e| SkillError::Io(e.to_string()))?;
+        if bytes.len() > MAX_SKILL_BYTES { return Err(SkillError::TooLarge); }
+        let content = std::str::from_utf8(&bytes).map_err(|_| SkillError::InvalidUtf8)?;
+        let (name, description) = metadata(content, stem);
+        profiles.push(AgentProfileDescriptor {
+            id: format!("pstack.agent.{stem}"),
+            name,
+            description,
+            relative_path: format!("agents/{stem}.md"),
+            bytes: bytes.len() as u64,
+            fingerprint: fingerprint(&bytes),
+        });
+        if profiles.len() > MAX_SKILLS { return Err(SkillError::TooManySkills); }
+    }
+    profiles.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(profiles)
+}
+
+/// Load an exact Markdown agent profile as untrusted model context, never as executable code.
+pub fn load_agent_profile_context(
+    root: impl AsRef<Path>,
+    capability_id: &str,
+) -> Result<AgentProfileContext, SkillError> {
+    let id = capability_id.strip_prefix("pstack.agent.").ok_or(SkillError::InvalidId)?;
+    if !safe_id(id) { return Err(SkillError::InvalidId); }
+    let root = root.as_ref().canonicalize()
+        .map_err(|e| SkillError::InvalidRoot(e.to_string()))?;
+    let path = root.join("agents").join(format!("{id}.md"));
+    let metadata = fs::symlink_metadata(&path).map_err(|e| SkillError::Io(e.to_string()))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() { return Err(SkillError::UnsafePath); }
+    if metadata.len() > MAX_SKILL_BYTES as u64 { return Err(SkillError::TooLarge); }
+    let canonical = path.canonicalize().map_err(|e| SkillError::Io(e.to_string()))?;
+    if !canonical.starts_with(&root) { return Err(SkillError::UnsafePath); }
+    let bytes = fs::read(canonical).map_err(|e| SkillError::Io(e.to_string()))?;
+    if bytes.len() > MAX_SKILL_BYTES { return Err(SkillError::TooLarge); }
+    let content = String::from_utf8(bytes.clone()).map_err(|_| SkillError::InvalidUtf8)?;
+    let (name, description) = metadata(&content, id);
+    Ok(AgentProfileContext {
+        descriptor: AgentProfileDescriptor {
+            id: format!("pstack.agent.{id}"),
+            name,
+            description,
+            relative_path: format!("agents/{id}.md"),
+            bytes: bytes.len() as u64,
+            fingerprint: fingerprint(&bytes),
+        },
+        content,
+    })
+}
+
 /// Load one skill by its exact catalog id; the returned Markdown remains untrusted.
 pub fn load_skill_context(
     root: impl AsRef<Path>,
@@ -239,6 +328,20 @@ mod tests {
         let temp = Temp::new();
         fs::write(temp.0.join("skills/example/SKILL.md"), vec![b'x'; MAX_SKILL_BYTES + 1]).unwrap();
         assert_eq!(discover_skills(&temp.0), Err(SkillError::TooLarge));
+    }
+
+    #[test]
+    fn discovers_and_loads_markdown_agent_profiles_as_data() {
+        let temp = Temp::new();
+        fs::create_dir_all(temp.0.join("agents")).unwrap();
+        fs::write(temp.0.join("agents/poteto-agent.md"),
+            "---\nname: Poteto Agent\ndescription: Review profile\n---\n# instructions\n").unwrap();
+        let profiles = discover_agent_profiles(&temp.0).unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].id, "pstack.agent.poteto-agent");
+        let loaded = load_agent_profile_context(&temp.0, "pstack.agent.poteto-agent").unwrap();
+        assert_eq!(loaded.descriptor.name, "Poteto Agent");
+        assert!(loaded.content.contains("# instructions"));
     }
 
     #[test]
