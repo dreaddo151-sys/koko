@@ -66,14 +66,21 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Install pinned direct dependencies
-        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Generate npm lockfile snapshot
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Install locked web dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Build console
         run: npm run build
       - uses: actions/upload-artifact@v4
         with:
           name: dread-universal-web-ubuntu
           path: dread_universal/web/dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dread-universal-npm-lockfile
+          path: dread_universal/web/package-lock.json
           if-no-files-found: error
 
   package:
