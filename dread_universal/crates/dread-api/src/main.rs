@@ -1144,7 +1144,8 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
             &json!({"status": "failed", "reason": reason}),
             "recovery",
             now,
-        )?);
+        )
+        .map_err(|error| anyhow::anyhow!(error.message))?);
     }
 
     let queued: Vec<(String, String, Option<String>, bool, Option<String>)> = {
@@ -1192,7 +1193,8 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
             &json!({"status": "failed", "reason": reason}),
             "recovery",
             now,
-        )?);
+        )
+        .map_err(|error| anyhow::anyhow!(error.message))?);
     }
 
     tx.commit()?;
