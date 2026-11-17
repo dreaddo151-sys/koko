@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import ipaddress
 import json
+import os
 import sys
 import time
 import urllib.error
