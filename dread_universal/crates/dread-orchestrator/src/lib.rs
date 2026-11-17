@@ -30,7 +30,7 @@ impl Default for ExecutionConfig {
             max_concurrency: 2,
             max_admitted: 8,
             max_attempts: 1,
-            attempt_timeout: Duration::from_secs(120),
+            attempt_timeout: Duration::from_secs(1805),
         }
     }
 }
@@ -209,6 +209,14 @@ mod tests {
             max_attempts: 1,
             attempt_timeout: Duration::from_secs(2),
         }
+    }
+
+    #[test]
+    fn default_timeout_covers_supervisor_bridge_inference_window() {
+        assert_eq!(
+            ExecutionConfig::default().attempt_timeout,
+            Duration::from_secs(1805)
+        );
     }
 
     #[test]
