@@ -277,11 +277,11 @@ impl AgentAdapter for HermesApiAdapter {
                 "conversation_history",
                 "previous_response_id",
             ];
-            if request
-                .input
-                .as_object()
-                .is_none_or(|object| object.keys().any(|key| !input_fields.contains(&key.as_str())))
-            {
+            if request.input.as_object().is_none_or(|object| {
+                object
+                    .keys()
+                    .any(|key| !input_fields.contains(&key.as_str()))
+            }) {
                 return Err(adapter_error(
                     "invalid_input",
                     "Hermes run input contains unsupported fields".into(),
@@ -651,12 +651,8 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_run_input_fields_before_network_access() {
-        let adapter = HermesApiAdapter::new(
-            "http://127.0.0.1:8642",
-            "test-api-key",
-            "Hermes",
-        )
-        .unwrap();
+        let adapter =
+            HermesApiAdapter::new("http://127.0.0.1:8642", "test-api-key", "Hermes").unwrap();
         let request = StartTaskRequest {
             task_id: "dread-task-1".into(),
             capability_id: "hermes.run".into(),
@@ -811,28 +807,50 @@ mod tests {
         let provider_id = started.provider_task_id.as_deref().unwrap();
         assert_eq!(provider_id, "run_provider-9");
 
-        let status = adapter.task_status("dread-task-42", provider_id).await.unwrap();
+        let status = adapter
+            .task_status("dread-task-42", provider_id)
+            .await
+            .unwrap();
         assert_eq!(status.task_id, "dread-task-42");
         assert_eq!(status.provider_task_id.as_deref(), Some(provider_id));
         assert_eq!(status.state, AgentTaskState::Succeeded);
 
-        let events = adapter.events("dread-task-42", provider_id, 0).await.unwrap();
+        let events = adapter
+            .events("dread-task-42", provider_id, 0)
+            .await
+            .unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].task_id, "dread-task-42");
         assert_eq!(events[0].sequence, 1);
 
-        let cancelled = adapter.cancel_task("dread-task-42", provider_id).await.unwrap();
+        let cancelled = adapter
+            .cancel_task("dread-task-42", provider_id)
+            .await
+            .unwrap();
         assert_eq!(cancelled.task_id, "dread-task-42");
-        let result = adapter.task_result("dread-task-42", provider_id).await.unwrap();
+        let result = adapter
+            .task_result("dread-task-42", provider_id)
+            .await
+            .unwrap();
         assert_eq!(result.task_id, "dread-task-42");
         assert_eq!(result.result.unwrap()["output"], "verified output");
 
         let recorded = requests.lock().unwrap();
-        let create = recorded.iter().find(|item| item["path"] == "/v1/runs").unwrap();
-        assert_eq!(create["authorization"], "Bearer test-api-key-that-is-long-enough");
+        let create = recorded
+            .iter()
+            .find(|item| item["path"] == "/v1/runs")
+            .unwrap();
+        assert_eq!(
+            create["authorization"],
+            "Bearer test-api-key-that-is-long-enough"
+        );
         assert_eq!(create["idempotency_key"], "dread-task-42");
         assert_eq!(create["body"]["input"], "inspect the approved workspace");
-        assert!(recorded.iter().any(|item| item["path"] == "/v1/runs/run_provider-9/stop"));
+        assert!(
+            recorded
+                .iter()
+                .any(|item| item["path"] == "/v1/runs/run_provider-9/stop")
+        );
     }
 
     #[test]
