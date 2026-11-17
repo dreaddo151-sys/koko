@@ -1,6 +1,6 @@
 # PROJECT DREAD UNIVERSAL — Rust API Foundation 0.4.0
 
-This is an additive, loopback-first Rust service developed alongside the existing Python DREAD Hub. It does not replace or control ComfyUI, Ollama or the Python GPU Supervisor.
+This is an additive, loopback-first Rust service developed alongside the existing Python DREAD Hub. It does not replace or control ComfyUI or the Python GPU Supervisor. DREAD inference uses the local llama.cpp-compatible GPU gateway; Ollama is not a DREAD inference dependency.
 
 ## Requirements and build
 
@@ -40,7 +40,7 @@ cargo run -p dread-api
 
 Never commit the token to Git. Every `/api/*` route requires `Authorization: Bearer $DREAD_API_TOKEN`. If the token is missing, API routes fail closed with HTTP 503; an invalid or missing request token returns HTTP 401. `/health` remains unauthenticated for basic liveness checks. The API still rejects non-loopback bind addresses; bearer authentication does not authorize LAN/public exposure. JSON request bodies are limited to 32 MiB.
 
-`config/services.toml` currently configures loopback-only probes for the Python DREAD Hub, ComfyUI and Ollama. The `image-video-runtime` adapter parses ComfyUI `/system_stats` into a version/device summary; `local-inference` parses Ollama `/api/tags` into a model summary. These two adapters read at most 128 KiB and mark malformed metadata as `DEGRADED`. Other roles receive generic HTTP reachability checks. Service definitions are capped at 32 unique IDs; discovery follows no redirects, uses GET only and never scans ports or launches processes. This is read-only inventory, not a GPU Supervisor or provider execution adapter.
+`config/services.toml` configures loopback-only probes for the Python DREAD Hub, ComfyUI and the DREAD llama.cpp-compatible GPU gateway at `127.0.0.1:11500`. ComfyUI `/system_stats` is parsed into a version/device summary. The llama.cpp gateway health endpoint is used for local inference availability and model discovery; Ollama is not configured or queried. These two adapters read at most 128 KiB and mark malformed metadata as `DEGRADED`. Other roles receive generic HTTP reachability checks. Service definitions are capped at 32 unique IDs; discovery follows no redirects, uses GET only and never scans ports or launches processes. This is read-only inventory, not a GPU Supervisor or provider execution adapter.
 
 ## HTTP API
 
@@ -87,13 +87,20 @@ Creating a task creates a durable `pending_approval` record. Approval accepts a 
 
 ## Service adapters
 
-The service inventory is explicitly defined in `config/services.toml`; every URL must be explicit-port loopback HTTP. The current dedicated response parsers cover Ollama model tags and ComfyUI system/device metadata. The DREAD Python Hub remains a generic control-plane reachability probe. Hermes, OpenHands, OpenCode and llama.cpp do not yet have verified dedicated contracts. The parsers return short summaries rather than raw response bodies and fail closed when their expected JSON shape is absent.
+The service inventory is explicitly defined in `config/services.toml`; every URL must be explicit-port loopback HTTP. The current dedicated response parsers cover ComfyUI system/device metadata and the DREAD llama.cpp-compatible GPU gateway health/model contract. The DREAD Python Hub remains a generic control-plane reachability probe. Hermes, OpenHands, OpenCode and llama.cpp do not yet have verified dedicated contracts. The parsers return short summaries rather than raw response bodies and fail closed when their expected JSON shape is absent.
 
 ## Pstack catalog import
 
 The catalog pins Pstack `0.15.43` (commit `2f87c854fe3e2fcda44ca86b46ede35aad3c46b7`, subtree `71d8e1d1d718e2149dc43b2535618064f29cba6b`, MIT): 58 skills and 2 agents. The active pinned source is `integrations/pstack/upstream/` at version `0.15.43`. The separate `integrations/pstack-upstream/` copy is an older retained `0.15.42` snapshot and is not used by the importer.
 
 Canonical-source CI run `44025427057` verified the committed Pstack pin/tree and all 60 provenance hashes, passed 11 importer unit tests (including Bearer-header validation), imported 58 skills and 2 agents through the authenticated Rust API, read back all 60 as disabled and verified idempotent re-import (0 created, 60 already present). First run `scripts/import-pstack.sh` to fetch and verify the exact catalog commit/tree. Then run `python3 scripts/import_pstack_capabilities.py` for validation/dry-run. Only add `--apply` when the loopback Rust API is running, metadata registration is intended and `DREAD_API_TOKEN` is configured. The live import was tested only against an isolated temporary CI API; it has not been applied to the operator's workstation.
+
+## Token observability and prompt enhancement
+
+- `GET /api/usage/tokens` is bearer-authenticated and aggregates exact prompt, completion and total token counters from completed inference responses. Responses without complete usage metadata are counted separately; the console never substitutes estimates for measured usage.
+- The persistent bottom-docked composer remains available across console pages. The operator can ask the selected local model to enhance a prompt; the enhanced text is only a preview until explicitly applied or discarded.
+- Prompt enhancement is routed through the authenticated Python GPU Supervisor bridge. It does not create, approve or run a mission.
+- The console keeps the bearer token in page memory only and clears it on disconnect.
 
 ## GPU ownership and service safety
 
