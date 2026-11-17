@@ -1298,8 +1298,11 @@ async fn get_mission(
         .map_err(|error| ApiError::internal(format!("Stored mission order is invalid: {error}")))?;
     let mut statement = conn
         .prepare(
-            "SELECT mt.node_id, mt.task_id, mt.depends_on_json, t.status
-             FROM mission_tasks mt JOIN tasks t ON t.id = mt.task_id
+            "SELECT mt.node_id, mt.task_id, mt.depends_on_json, t.status,
+                    tr.result_json, tr.error, tr.attempts, tr.elapsed_ms, tr.completed_at
+             FROM mission_tasks mt
+             JOIN tasks t ON t.id = mt.task_id
+             LEFT JOIN task_results tr ON tr.task_id = t.id
              WHERE mt.mission_id = ?1 ORDER BY mt.rowid",
         )
         .map_err(|error| ApiError::internal(error.to_string()))?;
@@ -1315,17 +1318,37 @@ async fn get_mission(
         .map_err(|error| ApiError::internal(error.to_string()))?;
     let mut tasks = Vec::new();
     for row in rows {
-        let (node_id, task_id, dependencies_json, status) =
-            row.map_err(|error| ApiError::internal(error.to_string()))?;
+        let (
+            node_id,
+            task_id,
+            dependencies_json,
+            status,
+            result_json,
+            error,
+            attempts,
+            elapsed_ms,
+            completed_at,
+        ) = row.map_err(|error| ApiError::internal(error.to_string()))?;
         let depends_on: Vec<String> =
             serde_json::from_str(&dependencies_json).map_err(|error| {
                 ApiError::internal(format!("Stored mission dependencies are invalid: {error}"))
             })?;
+        let result = result_json
+            .as_deref()
+            .map(serde_json::from_str::<Value>)
+            .transpose()
+            .map_err(|error| ApiError::internal(format!("Stored mission task result is invalid: {error}")))?
+            .unwrap_or(Value::Null);
         tasks.push(json!({
             "node_id": node_id,
             "task_id": task_id,
             "depends_on": depends_on,
-            "status": status
+            "status": status,
+            "result": result,
+            "error": error,
+            "attempts": attempts.unwrap_or(0),
+            "elapsed_ms": elapsed_ms.unwrap_or(0),
+            "completed_at": completed_at
         }));
     }
     let execution_started = matches!(stored.2.as_str(), "running" | "completed" | "blocked");
@@ -1333,6 +1356,16 @@ async fn get_mission(
         "item": {
             "mission_id": graph.mission_id,
             "graph": graph,
+            "execution_order": execution_order,
+            "tasks": tasks,
+            "status": stored.2,
+            "created_at": stored.3,
+            "execution_started": execution_started
+        }
+    })))
+}
+
+        "graph": graph,
             "execution_order": execution_order,
             "tasks": tasks,
             "status": stored.2,
@@ -4305,6 +4338,9 @@ mod tests {
         let stored: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(stored["item"]["status"], "awaiting_approval");
         assert_eq!(stored["item"]["tasks"].as_array().unwrap().len(), 2);
+        assert_eq!(stored["item"]["tasks"][0]["result"], Value::Null);
+        assert_eq!(stored["item"]["tasks"][0]["attempts"], 0);
+        assert_eq!(stored["item"]["tasks"][0]["error"], Value::Null);
         server.abort();
     }
 
