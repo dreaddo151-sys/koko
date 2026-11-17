@@ -1807,7 +1807,7 @@ async fn approve_task(
     drop(conn);
     let _ = state.events.send(event);
     if let Some(mission_id) = mission_id {
-        dispatch_ready_mission_tasks(state.clone(), mission_id).await;
+        dispatch_ready_mission_tasks(state.clone(), mission_id);
     }
     Ok(Json(json!({"item": task, "execution_started": false})))
 }
@@ -1872,7 +1872,7 @@ fn ready_mission_task_ids(state: &AppState, mission_id: &str) -> Result<Vec<Stri
     Ok(ready)
 }
 
-async fn dispatch_ready_mission_tasks(state: AppState, mission_id: String) {
+fn dispatch_ready_mission_tasks(state: AppState, mission_id: String) {
     let ready = match ready_mission_task_ids(&state, &mission_id) {
         Ok(ready) => ready,
         Err(error) => {
@@ -1882,7 +1882,7 @@ async fn dispatch_ready_mission_tasks(state: AppState, mission_id: String) {
     };
 
     for task_id in ready {
-        if let Err(error) = run_task(State(state.clone()), Path(task_id.clone())).await {
+        if let Err(error) = run_task(State(state.clone()), Path(task_id.clone())) {
             if error.status != StatusCode::CONFLICT {
                 error!(
                     mission_id = %mission_id,
@@ -1902,7 +1902,7 @@ async fn dispatch_ready_mission_tasks(state: AppState, mission_id: String) {
     }
 }
 
-async fn run_task(
+fn run_task(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
