@@ -80,11 +80,11 @@ pub struct HostProfile {
     /// Physical whole-disk inventory, including disks without mounted filesystems.
     pub physical_storage_devices: Vec<PhysicalStorageDevice>,
     pub gpu_devices: Vec<GpuDevice>,
-    pub llama_server: Option<String>,
+    /// Optional executable path; this does not imply a llama-server process is running.\n    pub llama_server: Option<String>,
     pub nvidia_smi_available: bool,
     pub rocm_smi_available: bool,
     pub xpu_smi_available: bool,
-    pub inference_backend: String,
+    /// Selected backend; actual server lifecycle is on-demand under the GPU Supervisor.\n    pub inference_backend: String,
 }
 
 fn find_binary(names: &[&str]) -> Option<PathBuf> {
