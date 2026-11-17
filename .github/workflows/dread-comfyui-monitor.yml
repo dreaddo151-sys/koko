@@ -1,0 +1,62 @@
+name: DREAD ComfyUI monitor validation
+
+on:
+  push:
+    branches:
+      - work/comfyui-render-monitor-2026-11-17
+    paths:
+      - .github/workflows/dread-comfyui-monitor.yml
+      - dread_universal/crates/**
+      - dread_universal/web/**
+  pull_request:
+    branches:
+      - integration/dread-canonical-source-run81
+    paths:
+      - .github/workflows/dread-comfyui-monitor.yml
+      - dread_universal/crates/**
+      - dread_universal/web/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dread-comfyui-monitor-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+      - name: Rust formatting
+        working-directory: dread_universal
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        working-directory: dread_universal
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Rust tests
+        working-directory: dread_universal
+        run: cargo test --workspace --locked
+      - name: Rust release build
+        working-directory: dread_universal
+        run: cargo build --workspace --release --locked
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+      - name: Install frontend dependencies
+        working-directory: dread_universal/web
+        run: npm ci --no-audit --no-fund
+      - name: Build operator console
+        working-directory: dread_universal/web
+        run: npm run build
+      - name: Test Python Supervisor bridge
+        working-directory: dread_universal
+        run: python3 -m unittest discover -s scripts -p 'test_gpu_supervisor_bridge.py' -v
+      - name: Verify single-owner GPU boundary
+        working-directory: dread_universal
+        run: python3 scripts/check_gpu_ownership_boundary.py
