@@ -1,0 +1,8 @@
+/dread_universal/target/
+**/target/
+.env
+.env.*
+*.sqlite
+*.sqlite3
+*.db
+/outputs/
