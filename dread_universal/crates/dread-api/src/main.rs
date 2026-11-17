@@ -1112,6 +1112,114 @@ async fn execute_approved_task(
     }
 }
 
+fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
+    let mut conn = state
+        .db
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Database lock is unavailable during task recovery"))?;
+    let tx = conn.transaction()?;
+    let now = now_epoch();
+    let mut emitted = Vec::new();
+
+    let interrupted: Vec<String> = {
+        let mut statement = tx.prepare("SELECT id FROM tasks WHERE status = 'running'")?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for task_id in interrupted {
+        tx.execute(
+            "UPDATE tasks SET status = 'failed', updated_at = ?2 WHERE id = ?1 AND status = 'running'",
+            params![task_id, now],
+        )?;
+        let reason = "Task interrupted by API process restart; it was not automatically replayed";
+        tx.execute(
+            "INSERT OR REPLACE INTO task_results (task_id, result_json, error, attempts, elapsed_ms, completed_at)
+             VALUES (?1, NULL, ?2, 0, 0, ?3)",
+            params![task_id, reason, now],
+        )?;
+        emitted.push(append_task_event(
+            &tx,
+            &task_id,
+            "task_interrupted",
+            &json!({"status": "failed", "reason": reason}),
+            "recovery",
+            now,
+        )?);
+    }
+
+    let queued: Vec<(String, String, Option<String>, bool, Option<String>)> = {
+        let mut statement = tx.prepare(
+            "SELECT id, task_type, capability_id, approval_required, approved_by
+             FROM tasks WHERE status = 'queued'",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get::<_, i64>(3)? != 0,
+                    row.get(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    let mut resumable = Vec::new();
+    for (task_id, task_type, capability_id, approval_required, approved_by) in queued {
+        if task_type == "service_discovery"
+            && capability_id.is_none()
+            && approval_required
+            && approved_by.is_some()
+        {
+            resumable.push((task_id, task_type));
+            continue;
+        }
+
+        let reason = "Queued task is not eligible for automatic recovery; explicit operator review is required";
+        tx.execute(
+            "UPDATE tasks SET status = 'failed', updated_at = ?2 WHERE id = ?1 AND status = 'queued'",
+            params![task_id, now],
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO task_results (task_id, result_json, error, attempts, elapsed_ms, completed_at)
+             VALUES (?1, NULL, ?2, 0, 0, ?3)",
+            params![task_id, reason, now],
+        )?;
+        emitted.push(append_task_event(
+            &tx,
+            &task_id,
+            "task_recovery_rejected",
+            &json!({"status": "failed", "reason": reason}),
+            "recovery",
+            now,
+        )?);
+    }
+
+    tx.commit()?;
+    for event in emitted {
+        let _ = state.events.send(event);
+    }
+
+    for (task_id, task_type) in &resumable {
+        let (cancel_sender, cancel_receiver) = watch::channel(false);
+        state
+            .cancellations
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Task cancellation registry is unavailable"))?
+            .insert(task_id.clone(), cancel_sender);
+        tokio::spawn(execute_approved_task(
+            state.clone(),
+            task_id.clone(),
+            task_type.clone(),
+            cancel_receiver,
+        ));
+    }
+
+    Ok(resumable.len())
+}
+
 async fn get_task_result(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1417,6 +1525,9 @@ async fn main() -> anyhow::Result<()> {
         auth_required: true,
     };
 
+    let recovered_tasks = recover_task_queue(&state)?;
+    info!(recovered_tasks, "Recovered eligible queued tasks; interrupted running tasks were marked failed");
+    
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(address = %addr, database = %db_path, "PROJECT DREAD Universal API listening");
     axum::serve(listener, app(state))
@@ -1607,6 +1718,71 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_resumes_only_safe_queued_tasks_and_marks_running_tasks_failed() {
+        let db = open_database(":memory:").unwrap();
+        let now = now_epoch();
+        {
+            let conn = db.lock().unwrap();
+            for (id, task_type, status, capability_id) in [
+                ("queued-safe", "service_discovery", "queued", None),
+                ("running-interrupted", "service_discovery", "running", None),
+                ("queued-unsupported", "arbitrary_command", "queued", None),
+                ("queued-capability", "service_discovery", "queued", Some("pstack.skill")),
+            ] {
+                conn.execute(
+                    "INSERT INTO tasks (id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, approval_reason, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, '{}', ?5, 1, 'test-operator', 'approved in test', ?6, ?6)",
+                    params![id, id, task_type, capability_id, status, now],
+                )
+                .unwrap();
+            }
+        }
+        let (events, _) = broadcast::channel(256);
+        let state = AppState {
+            db,
+            gpu: GpuGatewayClient::new("http://127.0.0.1:1").unwrap(),
+            events,
+            execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
+            cancellations: Arc::new(Mutex::new(HashMap::new())),
+            api_token: Some("test-token".to_string()),
+            operator_id: "test-operator".to_string(),
+            auth_required: true,
+        };
+
+        assert_eq!(recover_task_queue(&state).unwrap(), 1);
+
+        for _ in 0..100 {
+            let status: String = state
+                .db
+                .lock()
+                .unwrap()
+                .query_row("SELECT status FROM tasks WHERE id = 'queued-safe'", [], |row| row.get(0))
+                .unwrap();
+            if status == "completed" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let conn = state.db.lock().unwrap();
+        let status: String = conn
+            .query_row("SELECT status FROM tasks WHERE id = 'queued-safe'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(status, "completed");
+
+        for id in ["running-interrupted", "queued-unsupported", "queued-capability"] {
+            let status: String = conn
+                .query_row("SELECT status FROM tasks WHERE id = ?1", params![id], |row| row.get(0))
+                .unwrap();
+            assert_eq!(status, "failed", "task {id} must fail closed during recovery");
+            let error: String = conn
+                .query_row("SELECT error FROM task_results WHERE task_id = ?1", params![id], |row| row.get(0))
+                .unwrap();
+            assert!(!error.is_empty());
+        }
     }
 
     #[tokio::test]
