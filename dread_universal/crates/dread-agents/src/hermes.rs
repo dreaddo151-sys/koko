@@ -57,7 +57,12 @@ impl HermesApiAdapter {
         }
         let loopback = url
             .host_str()
-            .and_then(|host| host.parse::<IpAddr>().ok())
+            .and_then(|host| {
+                host.trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<IpAddr>()
+                    .ok()
+            })
             .is_some_and(|ip| ip.is_loopback());
         if !loopback {
             return Err(adapter_error(
@@ -577,6 +582,7 @@ fn parse_sse_events(task_id: &str, body: &str, after_sequence: u64) -> Vec<Agent
             .and_then(Value::as_u64)
             .or_else(|| event_id.as_deref().and_then(|value| value.parse().ok()))
             .unwrap_or(fallback_sequence);
+        fallback_sequence = fallback_sequence.max(sequence);
         if sequence <= after_sequence {
             continue;
         }
@@ -605,6 +611,8 @@ mod tests {
     #[test]
     fn rejects_non_loopback_and_credential_bearing_endpoints() {
         assert!(HermesApiAdapter::new("http://example.com:8642", "key", "Hermes").is_err());
+        assert!(HermesApiAdapter::new("http://localhost:8642", "key", "Hermes").is_err());
+        assert!(HermesApiAdapter::new("http://[::1]:8642", "key", "Hermes").is_ok());
         assert!(HermesApiAdapter::new("http://user:pass@127.0.0.1:8642", "key", "Hermes").is_err());
         assert!(HermesApiAdapter::new("http://127.0.0.1:8642", "", "Hermes").is_err());
         assert!(HermesApiAdapter::new("http://127.0.0.1:8642", "key", "Hermes").is_ok());
