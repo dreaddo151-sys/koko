@@ -152,7 +152,7 @@ jobs:
           ROOT="$RUNNER_TEMP/dread-final/DREAD-UNIVERSAL"
           rm -rf "$ROOT/dread_universal/target"
           # Exclude nested historical bundles from the distributable; source and backup files remain intact.
-          rm -f "$ROOT/DREAD-UNIVERSAL.zip" "$ROOT/dread_universal/dread_universal_source.zip"
+          rm -f "$ROOT/DREAD-UNIVERSAL.zip" "$ROOT/dread_universal_source.zip" "$ROOT/dread_universal/dread_universal_source.zip"
           FILE_COUNT=$(find "$ROOT" "$RUNNER_TEMP/dread-final/legacy-reference" -type f | wc -l)
           cat > "$ROOT/BUNDLE_MANIFEST.txt" <<EOF
           PROJECT DREAD UNIVERSAL SOURCE BUNDLE
@@ -172,6 +172,7 @@ jobs:
           Live workstation integration and remaining blueprint milestones are documented
           in dread_universal/docs/PROJECT_STATUS.md.
           EOF
+          test -z "$(find "$ROOT" -type f -name '*.zip' -print -quit)"
           cd "$RUNNER_TEMP/dread-final"
           zip -qr "$RUNNER_TEMP/DREAD_UNIVERSAL_AGENT_DISCOVERY_FOUNDATION.zip" DREAD-UNIVERSAL legacy-reference
           unzip -tq "$RUNNER_TEMP/DREAD_UNIVERSAL_AGENT_DISCOVERY_FOUNDATION.zip"
