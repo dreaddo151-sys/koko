@@ -1909,10 +1909,7 @@ async fn run_task(
     queue_task(state, id)
 }
 
-fn queue_task(
-    state: AppState,
-    id: String,
-) -> Result<(StatusCode, Json<Value>), ApiError> {
+fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), ApiError> {
     let now = now_epoch();
     let mut conn = db_lock(&state)?;
     let tx = conn
