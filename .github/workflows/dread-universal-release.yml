@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: Existing or new release tag (for example v0.4.0)
+        description: New release tag to create at the selected commit (for example v0.4.0)
         required: true
         type: string
 
@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag_name || github.ref }}
+          ref: ${{ github.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with:
