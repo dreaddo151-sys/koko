@@ -125,7 +125,7 @@
 +
 +    fn try_admit(&self) -> Result<AdmissionGuard, ExecutionError> {
 +        self.admitted
-+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
++            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
 +                (current < self.config.max_admitted).then_some(current + 1)
 +            })
 +            .map_err(|_| ExecutionError::AdmissionFull {
@@ -181,10 +181,7 @@
 +            let attempt_result = loop {
 +                tokio::select! {
 +                    result = tokio::time::timeout(self.config.attempt_timeout, &mut operation_future) => {
-+                        break match result {
-+                            Ok(value) => Some(value),
-+                            Err(_) => None,
-+                        };
++                        break result.ok();
 +                    }
 +                    changed = cancellation.changed() => {
 +                        if changed.is_err() || *cancellation.borrow() {
