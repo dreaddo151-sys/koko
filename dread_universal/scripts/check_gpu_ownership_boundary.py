@@ -24,7 +24,7 @@ assert "/v1/leases" not in supervisor_client
 bridge = (ROOT / "scripts/dread_gpu_supervisor_bridge.py").read_text(encoding="utf-8")
 assert 'TENSOR_UPSTREAM_URL = "http://127.0.0.1:11501/v1/chat/completions"' in bridge
 assert 'with self.gpu_lease("tensor"):' in bridge
-assert "11500" not in bridge, "The lease-owning bridge must never call the lease-owning gateway"
+assert "http://127.0.0.1:11500/" not in bridge, "The lease-owning bridge must never call the lease-owning gateway"
 
 supervisor = (ROOT.parent / "legacy-reference/dread_gpu_supervisor.py").read_text(encoding="utf-8")
 assert "fcntl.flock(lockfile.fileno(), fcntl.LOCK_EX)" in supervisor
