@@ -84,12 +84,13 @@ Never commit API or Supervisor tokens. Store them outside the repository with re
 | GET | `/api/services` | Configured local service health |
 | GET | `/api/agents` | Read-only configured/known endpoint probes |
 | GET | `/api/capabilities/discover` | Discover local Pstack skills/profiles |
-| POST | `/api/capabilities/import` | Register discovered profiles disabled |
+| POST | `/api/capabilities/import` | Register discovered profiles disabled from the configured local tree |
+| POST | `/api/capabilities/import-batch` | Atomically import up to 128 disabled capability records; exact matches are idempotent, conflicts roll back the entire batch |
 | GET | `/api/capabilities/{id}/preview` | Preview source |
 | POST | `/api/capabilities/{id}/enable` | Explicit operator approval |
 | POST | `/api/capabilities/{id}/disable` | Disable profile |
 | POST | `/api/missions` | Validate and persist a dependency-aware mission plan (planning only; no auto-execution) |
-| GET | `/api/missions/{id}` | Retrieve a persisted mission plan |
+| GET | `/api/missions/{id}` | Retrieve a persisted mission plan and per-node result/error/attempt/timing metadata |
 | GET/POST | `/api/tasks` | List/create tasks |
 | POST | `/api/tasks/{id}/approve` | Record approval; does not itself execute |
 | POST | `/api/tasks/{id}/run` | Queue supported approved task |
@@ -100,11 +101,11 @@ Never commit API or Supervisor tokens. Store them outside the repository with re
 
 Current OpenHands and LangGraph probes are read-only health checks. A healthy endpoint is not a live task adapter. Hermes, OpenHands and DeerFlow task execution require separately tested AgentAdapter implementations. Pstack `agents/*.md` files are prompt profiles, not running agents.
 
-The repository's reviewed Pstack snapshot is 0.15.43 at commit `2f87c854fe3e2fcda44ca86b46ede35aad3c46b7`, subtree `71d8e1d1d718e2149dc43b2535618064f29cba6b`, MIT; 58 skills and 2 prompt profiles. This repository snapshot pin is not proof that an arbitrary runtime local directory matches that revision. Runtime local imports are explicitly labelled `unverified_local_copy`, omit an upstream URL and invented version/revision, and treat Markdown only as untrusted context. Use cryptographic SHA-256 plus signed source provenance for production extension/update integrity.
+The repository's reviewed Pstack snapshot is 0.15.43 at commit `2f87c854fe3e2fcda44ca86b46ede35aad3c46b7`, subtree `71d8e1d1d718e2149dc43b2535618064f29cba6b`, MIT; 58 skills and 2 prompt profiles. The runtime importer independently hard-pins SHA-256 for the catalog, import marker, upstream manifest and LICENSE, in addition to the repository/commit/tree/version/license fields. It checks each source file hash and rejects path traversal and symlink escapes. The batch API is transactional and accepts only disabled metadata; an exact match is skipped, but any differing existing record rolls back the whole batch. This is stronger than trusting a mutable marker and catalog together, but it is not a publisher signature. Runtime local discovery/import remains explicitly labelled `unverified_local_copy`, omits an upstream URL and invented version/revision, and treats Markdown only as untrusted context. Signed publisher provenance and transactional extension update/remove are still required for production extension integrity.
 
 ## Hermes API adapter (library-only; not yet registered)
 
-The `dread-agents` crate includes an explicit `HermesApiAdapter` for the documented Hermes Runs API: authenticated run submission, status/result retrieval, SSE event replay and cooperative stop. Construction requires a numeric loopback HTTP endpoint, an API server bearer key, and an explicit caller-supplied display name. Requests and event streams have size limits; run IDs and idempotency keys are validated. The adapter is not auto-discovered or registered in the Rust API, and it does not itself authorize a task. Do not expose the Hermes API server beyond loopback or submit work until DREAD approval, sandboxing and the provider's own tool policy are enforced by the calling integration.
+The `dread-agents` crate includes an explicit `HermesApiAdapter` for the documented Hermes Runs API: authenticated run submission, status/result retrieval, SSE event replay and cooperative stop. Construction requires a numeric loopback HTTP endpoint, an API server bearer key, and an explicit caller-supplied display name. Requests and event streams have size limits; run IDs and idempotency keys are validated. The adapter preserves separate local DREAD task and remote provider run identities across status, SSE events, stop and result calls; it rejects undeclared input fields and has a loopback HTTP lifecycle regression test. It is not auto-discovered or registered in the Rust API, and it does not itself authorize a task. The Hermes API server can expose powerful configured tools, including terminal execution. Do not submit work until DREAD approval, a verified isolated workspace/container and the provider's own tool policy are enforced by the calling integration.
 
 The read-only host profile also enumerates persistent and network-mounted filesystems using GNU `df` with bounded execution. It reports source, filesystem type, mount point, total, used and available MiB, while excluding common pseudo-filesystems (for example `tmpfs`, `proc`, `sysfs` and `overlay`). The overview console renders the discovered mounts. This is mount-level capacity discovery, not physical-disk topology, SMART health or RAID status.
 
