@@ -378,3 +378,15 @@ Latest code candidate `482a1bc1526a64160e2047600cea2c3214365512` passed GitHub A
 | 11 — Release acceptance | Current CI fully green | All remaining phases above, dual-3090 workstation report, SBOM/license inventory, recovery instructions and verified release artifacts |
 
 **Release remains BLOCKED / NOT ACCEPTED.** CI run #359 is green, but it is not live workstation acceptance. Do not merge or install this candidate on CI evidence alone. The current tool connection exposes GitHub and documentation actions but no SSH/terminal session to the Ubuntu workstation; therefore this run did not touch the user's services or files. Preserve the existing Python Hub, ComfyUI and Python GPU Supervisor until a controlled live acceptance window is available.
+
+
+## Provider and provenance gate update — 2026-11-18
+
+Candidate `bfa432d51e103e08bb36c77e61695459330c40d0` passed CI run #389 (`44191004156`) across Rust, web console and Ubuntu package smoke tests. The provider-neutral agent crate now contains a reviewed, loopback-only Hermes Runs API adapter with bounded input/output, authenticated requests, run lifecycle, SSE replay and cancellation support. It is deliberately library-only: no API task/mission registration or execution dispatch exists yet, and it must remain unregistered until DREAD approval and sandbox/tool-policy enforcement are wired. Pstack local runtime imports now record honest local/unverified provenance rather than claiming the repository's pinned upstream snapshot or fabricating a version/revision. These changes advance Phase 4 and Phase 5, but neither phase is accepted.
+
+Updated phase deltas:
+- **Phase 4:** Hermes adapter contract and unit tests exist. Remaining: safe registration, DREAD approval-gated dispatch, provider sandbox and real local Hermes API acceptance; OpenHands and DeerFlow adapters.
+- **Phase 5:** Local import provenance is honest and unverified by default. Remaining: source revision verification, signed manifests, transactional lifecycle and atomic rollback.
+- **Phase 8:** Hermes adapter has endpoint restrictions and bounded input/output, but the full PASS/DENY/ASK engine, provider tool sandbox, repair simulation and recovery drills remain incomplete.
+
+CI evidence is not live agent or workstation acceptance. Keep release blocked and do not register or run the Hermes adapter until its approval and sandbox boundary is connected.
