@@ -1,0 +1,138 @@
+use futures::future::join_all;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use std::{fs, time::Duration, time::Instant};
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Service {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub role: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ServiceConfig {
+    pub services: Vec<Service>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ServiceResult {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub role: String,
+    pub status: String,
+    pub http_status: Option<u16>,
+    pub latency_ms: Option<u128>,
+    pub detail: String,
+}
+
+pub fn load_services(path: &str) -> Result<Vec<Service>, String> {
+    let contents = fs::read_to_string(path).map_err(|e| format!("Cannot read {path}: {e}"))?;
+    let config: ServiceConfig =
+        toml::from_str(&contents).map_err(|e| format!("Invalid service configuration: {e}"))?;
+
+    for service in &config.services {
+        if service.id.trim().is_empty()
+            || service.name.trim().is_empty()
+            || !service.url.starts_with("http://127.0.0.1:")
+        {
+            return Err(format!("Invalid local service definition: {}", service.id));
+        }
+    }
+    Ok(config.services)
+}
+
+pub fn classify_http_status(code: u16) -> &'static str {
+    match code {
+        200..=399 => "ONLINE",
+        400..=499 => "REACHABLE",
+        500..=599 => "DEGRADED",
+        _ => "UNKNOWN",
+    }
+}
+
+fn status_detail(code: u16) -> &'static str {
+    match code {
+        200..=399 => "HTTP endpoint responded successfully",
+        400..=499 => "Host is reachable, but this path or request is not accepted",
+        500..=599 => "Host is reachable, but the service returned a server error",
+        _ => "HTTP response received; health classification is unknown",
+    }
+}
+
+async fn check_one(client: Client, service: Service) -> ServiceResult {
+    let started = Instant::now();
+    match client.get(&service.url).send().await {
+        Ok(response) => {
+            let code = response.status().as_u16();
+            ServiceResult {
+                id: service.id,
+                name: service.name,
+                url: service.url,
+                role: service.role,
+                status: classify_http_status(code).into(),
+                http_status: Some(code),
+                latency_ms: Some(started.elapsed().as_millis()),
+                detail: status_detail(code).into(),
+            }
+        }
+        Err(error) => ServiceResult {
+            id: service.id,
+            name: service.name,
+            url: service.url,
+            role: service.role,
+            status: if error.is_timeout() {
+                "UNKNOWN"
+            } else {
+                "OFFLINE"
+            }
+            .into(),
+            http_status: None,
+            latency_ms: Some(started.elapsed().as_millis()),
+            detail: if error.is_timeout() {
+                "Connection timed out"
+            } else {
+                "Endpoint could not be reached"
+            }
+            .into(),
+        },
+    }
+}
+
+pub async fn discover(services: Vec<Service>) -> Vec<ServiceResult> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .expect("HTTP client configuration should be valid");
+    join_all(
+        services
+            .into_iter()
+            .map(|service| check_one(client.clone(), service)),
+    )
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_http_status;
+
+    #[test]
+    fn successful_responses_are_online() {
+        assert_eq!(classify_http_status(200), "ONLINE");
+        assert_eq!(classify_http_status(302), "ONLINE");
+    }
+
+    #[test]
+    fn client_errors_mean_reachable_not_online() {
+        assert_eq!(classify_http_status(404), "REACHABLE");
+        assert_eq!(classify_http_status(401), "REACHABLE");
+    }
+
+    #[test]
+    fn server_errors_are_degraded() {
+        assert_eq!(classify_http_status(500), "DEGRADED");
+        assert_eq!(classify_http_status(503), "DEGRADED");
+    }
+}

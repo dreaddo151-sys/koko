@@ -1,0 +1,47 @@
+name: Rust CI
+on:
+  push:
+    branches: [main, "foundation/**"]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dread_universal
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "dread_universal -> target"
+      - name: Require complete workspace
+        run: test -f Cargo.toml && test -f crates/dread-api/src/main.rs && test -f crates/dread-discovery/src/lib.rs
+      - name: Resolve and lock dependencies
+        run: cargo generate-lockfile
+      - name: Normalize Rust formatting
+        run: cargo fmt --all
+      - name: Formatting validation
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Tests
+        run: cargo test --workspace --locked
+      - name: Release build
+        run: cargo build --workspace --release --locked
+      - name: API smoke test
+        shell: bash
+        run: |
+          DREAD_BIND=127.0.0.1:18765 cargo run -p dread-api --bin dread-universal > /tmp/dread-api.log 2>&1 &
+          api_pid=$!
+          trap 'kill "$api_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18765/health > /tmp/dread-health.json; then break; fi
+            sleep 1
+          done
+          grep -q '"inference_backend":"llama.cpp"' /tmp/dread-health.json
