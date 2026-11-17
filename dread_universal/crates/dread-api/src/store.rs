@@ -80,7 +80,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod tests {
+mod persistence_tests {
  use super::*;
  fn test_store()->(Store,String){
   let path=std::env::temp_dir().join(format!("dread-store-{}.sqlite3",uuid::Uuid::new_v4()));
