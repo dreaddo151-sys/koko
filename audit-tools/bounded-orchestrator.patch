@@ -20,7 +20,7 @@
 +tokio.workspace = true
 --- /dev/null
 +++ b/crates/dread-orchestrator/src/lib.rs
-@@ -0,0 +1,348 @@
+@@ -0,0 +1,345 @@
 +//! Bounded execution primitives for DREAD.
 +//!
 +//! This crate does not discover providers, execute plugins, or own GPU resources.
