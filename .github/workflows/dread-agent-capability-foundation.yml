@@ -64,7 +64,6 @@ jobs:
           grep -q 'api/tasks' crates/dread-api/src/main.rs
           grep -q 'task_events' crates/dread-api/src/main.rs
           patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/agent-readonly-discovery.patch"
-          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/agent-discovery-status-correction.patch"
           python3 - "$WORKSPACE/crates/dread-api/src/main.rs" <<'PY'
           from pathlib import Path
           import sys
