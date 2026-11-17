@@ -1755,7 +1755,7 @@ mod tests {
         }
         let result = result.expect("service-discovery task should persist a result");
         assert_eq!(result["error"], Value::Null);
-        assert!(result["result"]["items"].is_array());
+        assert!(result["result"].is_array());
 
         let task = router
             .clone()
