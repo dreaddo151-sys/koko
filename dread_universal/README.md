@@ -147,3 +147,14 @@ Both installers create a per-user API token file at `~/.config/dread-universal/d
 The packaged API listens only on `127.0.0.1:8765`. GPU inference remains disabled until the already-running authenticated Supervisor bridge URL and token are configured in the private environment file. Do not copy the bridge token into Git or browser storage.
 
 The `.deb` and tarball are packaging candidates, not yet a release acceptance claim: clean-machine installation, upgrade/rollback, reboot persistence, and workstation service-preservation tests remain required.
+
+
+## Preservation baseline before installation
+
+Before installing or upgrading on the workstation, run:
+
+```bash
+bash scripts/capture-workstation-baseline.sh
+```
+
+The read-only baseline records Ubuntu/kernel identity, user service states, the legacy Hub/ComfyUI/Supervisor/API port status, NVIDIA driver and current-versus-maximum PCIe link data, and workspace filesystem capacity. It saves a private report under `~/.local/share/dread-universal/baselines/`. It does not start, stop or restart any service and does not dump HTTP response bodies or authentication tokens. Review and retain the report before any live migration.
