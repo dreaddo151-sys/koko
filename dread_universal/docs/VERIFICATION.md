@@ -1,21 +1,27 @@
 # Verification and release gates
 
-A source archive is not error-free merely because it packages. Release gates:
+## Automated CI (required; no skip-on-missing-source path)
+1. Workspace source presence.
+2. Dependency lock generation.
+3. `cargo fmt --all -- --check`.
+4. `cargo clippy --workspace --all-targets --locked -- -D warnings`.
+5. `cargo test --workspace --locked`.
+6. `cargo build --workspace --release --locked`.
+7. Live API smoke test proving the health response identifies `llama.cpp`.
 
-1. cargo fmt --all -- --check
-2. cargo clippy --workspace --all-targets -- -D warnings
-3. cargo test --workspace --locked
-4. cargo build --workspace --release --locked
-5. API smoke test with a temporary database
-6. Integration checks against the operator's real local services
+## Manual workstation acceptance
+- Confirm llama.cpp OpenAI-compatible API at `127.0.0.1:11501`; verify `/v1/models` and a real `/v1/chat/completions` request.
+- Confirm ComfyUI `127.0.0.1:8188/system_stats`; run a real image workflow and a real video workflow.
+- Confirm GPU gateway `127.0.0.1:11500` and both RTX 3090 devices through the existing GPU Supervisor.
+- Confirm legacy Hub `127.0.0.1:8080` remains online throughout deployment.
+- Exercise failure/timeouts without killing or restarting any pre-existing service.
 
-GitHub Actions runs gates 1–4. The API binds to loopback by default. There is no authentication; do not expose it to untrusted networks.
-
-Discovery statuses:
+## Discovery classifications
 - ONLINE: HTTP 2xx/3xx
 - REACHABLE: HTTP 4xx (host answered, route/request rejected)
 - DEGRADED: HTTP 5xx
 - OFFLINE: connection failure
 - UNKNOWN: timeout or unclassified response
 
-The persistent SQLite registry must be backed up before manual maintenance. This application does not stop or modify the existing DREAD Hub, ComfyUI, Ollama, or GPU Supervisor.
+## Not yet accepted
+SQLite persistence, authentication, SSE streaming, durable job queue, render lifecycle, token ledger, prompt-enhancement workflow, recovery policies, pstack execution adapters, installers, and dual-GPU end-to-end acceptance. Do not report these as complete until implemented and tested.
