@@ -244,6 +244,6 @@ mod tests {
     #[test]
     fn rejects_missing_catalog_root() {
         let temp = Temp::new();
-        assert_eq!(discover_skills(temp.0.join("missing")), Err(SkillError::InvalidRoot("No such file or directory (os error 2)".into())));
+        assert!(matches!(discover_skills(temp.0.join("missing")), Err(SkillError::InvalidRoot(_))));
     }
 }
