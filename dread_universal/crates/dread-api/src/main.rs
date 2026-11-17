@@ -1,4 +1,9 @@
-use axum::{Json, Router, extract::State, http::StatusCode, routing::{get, post}};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::StatusCode,
+    routing::{get, post},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{env, sync::Arc, time::Duration};
