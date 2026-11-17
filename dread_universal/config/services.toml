@@ -1,0 +1,23 @@
+[[services]]
+id = "llama-cpp"
+name = "llama.cpp OpenAI-compatible API"
+url = "http://127.0.0.1:11501/health"
+role = "llm-inference"
+
+[[services]]
+id = "comfyui"
+name = "ComfyUI"
+url = "http://127.0.0.1:8188/system_stats"
+role = "image-video-generation"
+
+[[services]]
+id = "dread-gateway"
+name = "DREAD GPU Gateway"
+url = "http://127.0.0.1:11500/health"
+role = "gpu-supervisor-gateway"
+
+[[services]]
+id = "dread-hub"
+name = "DREAD Web Hub"
+url = "http://127.0.0.1:8080/api/telemetry"
+role = "legacy-ui-bridge"
