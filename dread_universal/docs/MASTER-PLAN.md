@@ -366,7 +366,7 @@ Latest code candidate `482a1bc1526a64160e2047600cea2c3214365512` passed GitHub A
 |---|---|---|
 | 0 — Baseline and preservation | Historical workstation evidence documented; read-only baseline tool packaged | Fresh current-candidate baseline on the physical Ubuntu workstation, including exact unit/port/process/model/output inventory and backup verification |
 | 1 — Rust foundation and Hub continuity | Rust API, auth, persistence and packaging CI pass | Legacy `dread_web_hub.py` source is not in this repository; no live Hub integration/parity, handoff or rollback evidence |
-| 2 — Durable registry and discovery | Loopback service/agent probes, model discovery, host RAM/CPU thread/root-disk and NVIDIA telemetry; UI displays actual GPU readings | Full CPU topology, all mounted/physical storage, CUDA/runtime/model/tool inventory and durable provenance/health reconciliation |
+| 2 — Durable registry and discovery | Loopback service/agent probes, model discovery, host RAM/CPU thread/root-disk, NVIDIA telemetry, and persistent/network mount capacity; UI displays GPU and mount inventory | Full CPU topology, physical disk/partition/SMART/RAID data, CUDA/runtime/model/tool inventory and durable provenance/health reconciliation |
 | 3 — Task kernel and mission orchestration | Task state/approval/events/cancel/recovery baseline; authenticated mission graph planning and persistence with cycle/dependency validation | DAG execution, dependency-aware dispatch, priority/resource admission, aggregation, retry/cancel semantics and delegation |
 | 4 — Real agent adapters | OpenHands/LangGraph health probes only | Verified Hermes/OpenHands/DeerFlow start/status/events/cancel/result adapters, sandbox contract, timeouts and recovery |
 | 5 — Extension manager | Pstack discover/import/preview/enable/disable, SHA-256 fingerprint check, untrusted Markdown-only context | Pinned source provenance, signed manifests, transactional install/update/remove, atomic activation, compatibility/permission UI and rollback |
@@ -390,3 +390,8 @@ Updated phase deltas:
 - **Phase 8:** Hermes adapter has endpoint restrictions and bounded input/output, but the full PASS/DENY/ASK engine, provider tool sandbox, repair simulation and recovery drills remain incomplete.
 
 CI evidence is not live agent or workstation acceptance. Keep release blocked and do not register or run the Hermes adapter until its approval and sandbox boundary is connected.
+
+
+## Phase 2 mounted-storage acceptance update — 2026-11-18
+
+The host profile now enumerates persistent and network-mounted filesystems via a bounded, read-only `df` probe and exposes source/type/mount point/total/used/available MiB to the console. Pseudo-filesystems are filtered. Parser regression and the full Ubuntu 24.04 CI pipeline passed in run #403 (`44192143563`), candidate `78c8d4db95686edfe8fbb5c0bc9b86de42da3d4b`. This closes the mount-capacity inventory slice only; it does not establish physical device topology, SMART, RAID, NVMe health or complete CPU/storage discovery. Phase 2 remains partial.
