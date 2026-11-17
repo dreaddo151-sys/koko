@@ -329,3 +329,8 @@ This addendum restores previously completed Ubuntu workstation evidence that mus
 - ComfyUI API health/model-node presence are **historically verified**; media artifact production remains open.
 - Do not repeat broad GPU discovery, generic API health, or standalone inference tests without a reason. For the PR #12 candidate, run only a compact integration regression: candidate API → authenticated Supervisor bridge → existing Supervisor-owned llama.cpp inference, plus health responsiveness during inference. Then test dual-GPU/concurrent media lease behavior only when media integration is ready.
 - Capture a fresh preservation baseline before any workstation install or mutation. Historical service states are not a substitute for a current baseline.
+
+
+## Mission planning API status — 2026-11-18
+
+The Rust API now exposes persistent mission planning: authenticated `POST /api/missions` validates and stores a bounded dependency graph and deterministic priority-aware order; `GET /api/missions/{id}` retrieves it. Plans remain `planned` and are never auto-executed. This closes the plan-validation/persistence API gap only. Mission DAG execution, task dependency propagation, aggregation, retries, cancellation across a mission, provider delegation and resource-aware scheduling remain incomplete and must not be marked accepted until implemented and tested.
