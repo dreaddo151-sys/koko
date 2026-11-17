@@ -195,7 +195,6 @@ impl ExecutionGate {
     }
 }
 
-
 /// A dependency-aware mission plan. This model validates and orders work only;
 /// execution and external side effects remain the responsibility of reviewed runners.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -229,8 +228,8 @@ pub enum MissionGraphError {
 impl MissionGraph {
     /// Validate dependencies and return a deterministic priority-aware execution order.
     pub fn execution_order(&self) -> Result<Vec<String>, MissionGraphError> {
-        use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
         use std::cmp::Reverse;
+        use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
         if self.mission_id.trim().is_empty() {
             return Err(MissionGraphError::EmptyMissionId);
@@ -265,7 +264,10 @@ impl MissionGraph {
                 }
                 if unique.insert(dependency.as_str()) {
                     *indegree.entry(node.id.as_str()).or_default() += 1;
-                    dependents.entry(dependency.as_str()).or_default().push(node.id.as_str());
+                    dependents
+                        .entry(dependency.as_str())
+                        .or_default()
+                        .push(node.id.as_str());
                 }
             }
             indegree.entry(node.id.as_str()).or_default();
@@ -313,36 +315,80 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::{Notify, oneshot};
 
-
     #[test]
     fn mission_graph_orders_dependencies_before_priority() {
         let graph = MissionGraph {
             mission_id: "mission-1".into(),
             nodes: vec![
-                MissionNode { id: "report".into(), depends_on: vec!["build".into()], priority: 250, task_type: "report".into() },
-                MissionNode { id: "audit".into(), depends_on: vec![], priority: 20, task_type: "audit".into() },
-                MissionNode { id: "build".into(), depends_on: vec![], priority: 1, task_type: "build".into() },
+                MissionNode {
+                    id: "report".into(),
+                    depends_on: vec!["build".into()],
+                    priority: 250,
+                    task_type: "report".into(),
+                },
+                MissionNode {
+                    id: "audit".into(),
+                    depends_on: vec![],
+                    priority: 20,
+                    task_type: "audit".into(),
+                },
+                MissionNode {
+                    id: "build".into(),
+                    depends_on: vec![],
+                    priority: 1,
+                    task_type: "build".into(),
+                },
             ],
         };
-        assert_eq!(graph.execution_order().unwrap(), vec!["audit", "build", "report"]);
+        assert_eq!(
+            graph.execution_order().unwrap(),
+            vec!["audit", "build", "report"]
+        );
     }
 
     #[test]
     fn mission_graph_rejects_missing_dependencies_and_cycles() {
         let missing = MissionGraph {
             mission_id: "m".into(),
-            nodes: vec![MissionNode { id: "a".into(), depends_on: vec!["absent".into()], priority: 0, task_type: "x".into() }],
+            nodes: vec![MissionNode {
+                id: "a".into(),
+                depends_on: vec!["absent".into()],
+                priority: 0,
+                task_type: "x".into(),
+            }],
         };
-        assert_eq!(missing.execution_order(), Err(MissionGraphError::MissingDependency { node: "a".into(), dependency: "absent".into() }));
+        assert_eq!(
+            missing.execution_order(),
+            Err(MissionGraphError::MissingDependency {
+                node: "a".into(),
+                dependency: "absent".into()
+            })
+        );
 
         let cycle = MissionGraph {
             mission_id: "m".into(),
             nodes: vec![
-                MissionNode { id: "a".into(), depends_on: vec!["b".into()], priority: 0, task_type: "x".into() },
-                MissionNode { id: "b".into(), depends_on: vec!["a".into()], priority: 0, task_type: "x".into() },
+                MissionNode {
+                    id: "a".into(),
+                    depends_on: vec!["b".into()],
+                    priority: 0,
+                    task_type: "x".into(),
+                },
+                MissionNode {
+                    id: "b".into(),
+                    depends_on: vec!["a".into()],
+                    priority: 0,
+                    task_type: "x".into(),
+                },
             ],
         };
-        assert_eq!(cycle.execution_order(), Err(MissionGraphError::DependencyCycle(vec!["a".into(), "b".into()])));
+        assert_eq!(
+            cycle.execution_order(),
+            Err(MissionGraphError::DependencyCycle(vec![
+                "a".into(),
+                "b".into()
+            ]))
+        );
     }
 
     fn config(max_concurrency: usize, max_admitted: usize) -> ExecutionConfig {
