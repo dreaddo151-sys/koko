@@ -271,3 +271,14 @@ Do not repeat basic GPU enumeration, generic API health or standalone llama.cpp 
 - This proves CI behavior for the exact candidate SHA above. It does not prove clean physical workstation install/upgrade/reboot, preservation of the running legacy Hub/ComfyUI/Supervisor, live dual-3090 operation, provider task execution, real image/video artifacts, or rollback on the user's machine.
 - PR #12 remains open and unmerged. No live workstation service or user data was modified by this GitHub-only work.
 - Mission execution/provider delegation, concrete Hermes/OpenHands/DeerFlow adapters, full legacy Hub parity, signed/transactional Pstack extension management, media pipelines, complete security/repair lifecycle, signed updater, and live workstation acceptance remain open.
+
+
+## Installer rollback and GPU telemetry UI hardening — 2026-11-18
+
+- Fixed portable installer rollback so a failed update restores the prior application tree, credential file, systemd unit file, and prior enabled/active service state.
+- Fixed failed first-install cleanup: disable the newly enabled unit before removing its unit file, so a systemd enablement symlink is not left behind.
+- Added regression tests for both failed upgrade (byte-for-byte restoration of unit and credential file, previous binary restored, service remains enabled/active) and failed first install (no app tree or unit left; service disabled).
+- Corrected the React GPU cards to display the host telemetry already returned by `/api/system/profile`: utilization, VRAM used/total, temperature, power, driver and PCIe current/max. Read-only host sampling is no longer incorrectly gated by the Python Supervisor; the UI now reports Supervisor status separately because it owns inference admission and process lifecycle.
+- Latest candidate HEAD: `482a1bc1526a64160e2047600cea2c3214365512`.
+- GitHub Actions PR run #359 (`44186835645`) passed all three jobs: Rust / Ubuntu 24.04, Web console / Ubuntu 24.04, and Ubuntu packages / smoke test. This includes Rust formatting, strict Clippy, workspace tests, release build, installer syntax, portable migration/rollback regression (including first-install failure), Python bridge/importer regressions, single-owner GPU static guard, TypeScript type-check and Vite production build, package checksum/content verification, disposable Ubuntu 24.04 `.deb` install, API health, production UI, unauthenticated 401 and authenticated host-profile smoke test.
+- No live workstation deployment, service restart, GPU workload or media artifact was performed. The run proves CI/package behavior only.
