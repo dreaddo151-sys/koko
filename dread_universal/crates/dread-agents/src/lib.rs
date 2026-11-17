@@ -235,8 +235,6 @@ impl CapabilityRecord {
     }
 }
 
-
-
 /// In-memory registry for explicitly enabled, reviewed provider adapters.
 ///
 /// This registry is intentionally inert: registration does not probe endpoints,
@@ -383,7 +381,13 @@ mod tests {
         }
 
         fn health<'a>(&'a self) -> AdapterFuture<'a, AgentHealth> {
-            Box::pin(async { Ok(AgentHealth { state: AgentHealthState::Online, checked_at: 1, detail: None }) })
+            Box::pin(async {
+                Ok(AgentHealth {
+                    state: AgentHealthState::Online,
+                    checked_at: 1,
+                    detail: None,
+                })
+            })
         }
 
         fn capabilities<'a>(&'a self) -> AdapterFuture<'a, Vec<AgentCapability>> {
@@ -391,19 +395,50 @@ mod tests {
         }
 
         fn start_task<'a>(&'a self, request: StartTaskRequest) -> AdapterFuture<'a, AgentTask> {
-            Box::pin(async move { Ok(AgentTask { task_id: request.task_id, state: AgentTaskState::Queued, provider_task_id: None, result: None, error: None, updated_at: 1 }) })
+            Box::pin(async move {
+                Ok(AgentTask {
+                    task_id: request.task_id,
+                    state: AgentTaskState::Queued,
+                    provider_task_id: None,
+                    result: None,
+                    error: None,
+                    updated_at: 1,
+                })
+            })
         }
 
         fn task_status<'a>(&'a self, task_id: &'a str) -> AdapterFuture<'a, AgentTask> {
-            Box::pin(async move { Ok(AgentTask { task_id: task_id.to_string(), state: AgentTaskState::Unknown, provider_task_id: None, result: None, error: None, updated_at: 1 }) })
+            Box::pin(async move {
+                Ok(AgentTask {
+                    task_id: task_id.to_string(),
+                    state: AgentTaskState::Unknown,
+                    provider_task_id: None,
+                    result: None,
+                    error: None,
+                    updated_at: 1,
+                })
+            })
         }
 
-        fn events<'a>(&'a self, _task_id: &'a str, _after_sequence: u64) -> AdapterFuture<'a, Vec<AgentEvent>> {
+        fn events<'a>(
+            &'a self,
+            _task_id: &'a str,
+            _after_sequence: u64,
+        ) -> AdapterFuture<'a, Vec<AgentEvent>> {
             Box::pin(async { Ok(Vec::new()) })
         }
 
         fn cancel_task<'a>(&'a self, task_id: &'a str) -> AdapterFuture<'a, AgentTask> {
-            Box::pin(async move { Ok(AgentTask { task_id: task_id.to_string(), state: AgentTaskState::Cancelled, provider_task_id: None, result: None, error: None, updated_at: 1 }) })
+            Box::pin(async move {
+                Ok(AgentTask {
+                    task_id: task_id.to_string(),
+                    state: AgentTaskState::Cancelled,
+                    provider_task_id: None,
+                    result: None,
+                    error: None,
+                    updated_at: 1,
+                })
+            })
         }
 
         fn task_result<'a>(&'a self, task_id: &'a str) -> AdapterFuture<'a, AgentTask> {
@@ -428,7 +463,9 @@ mod tests {
     fn adapter_registry_rejects_disabled_adapters() {
         let mut registry = AgentAdapterRegistry::default();
         assert_eq!(
-            registry.register(stub_adapter("disabled-agent", false)).unwrap_err(),
+            registry
+                .register(stub_adapter("disabled-agent", false))
+                .unwrap_err(),
             AdapterRegistryError::Disabled
         );
         assert!(registry.is_empty());
@@ -437,9 +474,13 @@ mod tests {
     #[test]
     fn adapter_registry_rejects_duplicate_ids_without_replacing_existing_adapter() {
         let mut registry = AgentAdapterRegistry::default();
-        registry.register(stub_adapter("local-agent", true)).unwrap();
+        registry
+            .register(stub_adapter("local-agent", true))
+            .unwrap();
         assert_eq!(
-            registry.register(stub_adapter("local-agent", true)).unwrap_err(),
+            registry
+                .register(stub_adapter("local-agent", true))
+                .unwrap_err(),
             AdapterRegistryError::DuplicateId("local-agent".into())
         );
         assert_eq!(registry.len(), 1);
@@ -451,8 +492,11 @@ mod tests {
         let mut registry = AgentAdapterRegistry::default();
         registry.register(stub_adapter("z-agent", true)).unwrap();
         registry.register(stub_adapter("a-agent", true)).unwrap();
-        let ids: Vec<_> = registry.descriptors().into_iter().map(|item| item.id).collect();
+        let ids: Vec<_> = registry
+            .descriptors()
+            .into_iter()
+            .map(|item| item.id)
+            .collect();
         assert_eq!(ids, vec!["a-agent", "z-agent"]);
     }
-
 }
