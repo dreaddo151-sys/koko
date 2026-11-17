@@ -19,10 +19,10 @@ async fn chat(State(s):State<Arc<AppState>>,Json(mut q):Json<ChatRequest>)->Resu
  let mut payload=json!({"messages":q.messages,"model":model,"stream":q.stream});
  if q.stream{payload["stream_options"]=json!({"include_usage":true});}
  if let Some(map)=payload.as_object_mut(){for(k,v)in q.options{if !["messages","model","stream","stream_options"].contains(&k.as_str()){map.insert(k,v);}}}
- let upstream=s.http.post(format!("{}/v1/chat/completions",s.llama_url)).json(&payload).send().await.map_err(upstream)?;
- if !upstream_response.status().is_success(){let body=upstream.text().await.unwrap_or_default();return Err((StatusCode::BAD_GATEWAY,body));}
+ let upstream_response=s.http.post(format!("{}/v1/chat/completions",s.llama_url)).json(&payload).send().await.map_err(upstream)?;
+ if !upstream_response.status().is_success(){let body=upstream_response.text().await.unwrap_or_default();return Err((StatusCode::BAD_GATEWAY,body));}
  if q.stream{let mut r=Response::new(Body::from_stream(upstream_response.bytes_stream()));*r.status_mut()=StatusCode::OK;r.headers_mut().insert(header::CONTENT_TYPE,HeaderValue::from_static("text/event-stream"));r.headers_mut().insert(header::CACHE_CONTROL,HeaderValue::from_static("no-cache"));r.headers_mut().insert("x-dread-conversation-id",HeaderValue::from_str(&conversation).unwrap_or_else(|_|HeaderValue::from_static("unavailable")));return Ok(r);}
- let body=upstream.json::<Value>().await.map_err(upstream)?;let usage=&body["usage"];let p=usage["prompt_tokens"].as_i64().unwrap_or(0);let c=usage["completion_tokens"].as_i64().unwrap_or(0);let t=usage["total_tokens"].as_i64().unwrap_or(p+c);let answer=body["choices"][0]["message"]["content"].as_str().unwrap_or("");
+ let body=upstream_response.json::<Value>().await.map_err(|e|upstream(e))?;let usage=&body["usage"];let p=usage["prompt_tokens"].as_i64().unwrap_or(0);let c=usage["completion_tokens"].as_i64().unwrap_or(0);let t=usage["total_tokens"].as_i64().unwrap_or(p+c);let answer=body["choices"][0]["message"]["content"].as_str().unwrap_or("");
  s.store.save_exchange(&conversation,&model,&user,answer,(p,c,t)).map_err(internal)?;
  let mut r=Json(json!({"conversation_id":conversation,"response":body})).into_response();r.headers_mut().insert("x-dread-conversation-id",HeaderValue::from_str(&conversation).unwrap_or_else(|_|HeaderValue::from_static("unavailable")));Ok(r)
 }
