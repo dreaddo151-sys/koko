@@ -83,14 +83,20 @@ async fn check_one(client: Client, service: Service) -> ServiceResult {
             name: service.name,
             url: service.url,
             role: service.role,
-            status: if error.is_timeout() { "UNKNOWN" } else { "OFFLINE" }.into(),
+            status: if error.is_timeout() {
+                "UNKNOWN"
+            } else {
+                "OFFLINE"
+            }
+            .into(),
             http_status: None,
             latency_ms: Some(started.elapsed().as_millis()),
             detail: if error.is_timeout() {
                 "Connection timed out"
             } else {
                 "Endpoint could not be reached"
-            }.into(),
+            }
+            .into(),
         },
     }
 }
@@ -100,7 +106,12 @@ pub async fn discover(services: Vec<Service>) -> Vec<ServiceResult> {
         .timeout(Duration::from_secs(2))
         .build()
         .expect("HTTP client configuration should be valid");
-    join_all(services.into_iter().map(|service| check_one(client.clone(), service))).await
+    join_all(
+        services
+            .into_iter()
+            .map(|service| check_one(client.clone(), service)),
+    )
+    .await
 }
 
 #[cfg(test)]
