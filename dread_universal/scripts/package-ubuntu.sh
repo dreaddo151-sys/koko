@@ -12,7 +12,7 @@ if [[ "${ID:-}" != ubuntu ]] || ! dpkg --compare-versions "${VERSION_ID:-0}" ge 
   exit 1
 fi
 
-ROOT="$(cd -- "$(dirname -- "\${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 for command in dpkg dpkg-deb sha256sum python3 tar install; do
@@ -36,7 +36,7 @@ if [[ ! -x "$API_BIN" || ! -s "$WEB_ROOT/index.html" ]]; then
   exit 1
 fi
 
-OUT_DIR="\${DREAD_RELEASE_DIR:-$ROOT/dist/release}"
+OUT_DIR="${DREAD_RELEASE_DIR:-$ROOT/dist/release}"
 mkdir -p "$OUT_DIR"
 TMP="$(mktemp -d)"
 trap 'rm -rf -- "$TMP"' EXIT
@@ -53,9 +53,9 @@ install -m 0755 scripts/capture-workstation-baseline.sh "$BUNDLE/scripts/"
 install -m 0644 README.md "$BUNDLE/README.md"
 install -m 0644 docs/MASTER-PLAN.md docs/VERIFICATION.md docs/GPU_OWNERSHIP_BOUNDARY.md "$BUNDLE/docs/"
 
-SOURCE_DATE_EPOCH="\${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct 2>/dev/null || date +%s)}"
-TAR_PATH="$OUT_DIR/dread-universal-ubuntu-\${VERSION}-\${ARCH}.tar.gz"
-tar --sort=name --mtime="@\${SOURCE_DATE_EPOCH}" --owner=0 --group=0 --numeric-owner \
+SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct 2>/dev/null || date +%s)}"
+TAR_PATH="$OUT_DIR/dread-universal-ubuntu-${VERSION}-${ARCH}.tar.gz"
+tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 --numeric-owner \
   -C "$TMP" -czf "$TAR_PATH" bundle
 
 DEB="$TMP/deb"
@@ -85,7 +85,7 @@ Description: Local-first PROJECT DREAD Universal Master Hub for Ubuntu
  service is enabled explicitly with the packaged configure-user.sh helper.
 EOF
 
-DEB_PATH="$OUT_DIR/dread-universal_\${VERSION}_\${ARCH}.deb"
+DEB_PATH="$OUT_DIR/dread-universal_${VERSION}_${ARCH}.deb"
 dpkg-deb --build --root-owner-group "$DEB" "$DEB_PATH" >/dev/null
 dpkg-deb --contents "$DEB_PATH" >/dev/null
 (
