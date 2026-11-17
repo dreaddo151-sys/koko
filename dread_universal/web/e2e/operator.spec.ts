@@ -25,9 +25,9 @@ test("operator connects, approves and runs authenticated GPU chat", async ({ pag
   await expect(run).toBeVisible();
   await run.click();
 
-  await expect(page.getByText("completed", { exact: true })).toBeVisible({
-    timeout: 45_000,
-  });
+  await expect(
+    page.locator(".detail .pill").filter({ hasText: "completed" }),
+  ).toBeVisible({ timeout: 45_000 });
   await expect(
     page.locator("pre").filter({ hasText: "E2E mock inference response" }),
   ).toBeVisible({ timeout: 45_000 });
