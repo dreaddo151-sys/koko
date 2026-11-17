@@ -282,3 +282,14 @@ Do not repeat basic GPU enumeration, generic API health or standalone llama.cpp 
 - Latest candidate HEAD: `482a1bc1526a64160e2047600cea2c3214365512`.
 - GitHub Actions PR run #359 (`44186835645`) passed all three jobs: Rust / Ubuntu 24.04, Web console / Ubuntu 24.04, and Ubuntu packages / smoke test. This includes Rust formatting, strict Clippy, workspace tests, release build, installer syntax, portable migration/rollback regression (including first-install failure), Python bridge/importer regressions, single-owner GPU static guard, TypeScript type-check and Vite production build, package checksum/content verification, disposable Ubuntu 24.04 `.deb` install, API health, production UI, unauthenticated 401 and authenticated host-profile smoke test.
 - No live workstation deployment, service restart, GPU workload or media artifact was performed. The run proves CI/package behavior only.
+
+
+## Pstack provenance and Hermes adapter hardening — 2026-11-18
+
+- Corrected local Pstack import provenance. A local directory is now recorded as `Pstack local filesystem copy`; no official GitHub URL, default version, or synthetic revision is asserted. Optional operator-supplied version/revision values remain explicit claims, not verified source provenance. The manifest says `source_verification=unverified_local_copy` and `execution=never`; license is not invented.
+- Added a unit regression for local provenance with and without operator-supplied claims.
+- Added a concrete, library-only `HermesApiAdapter` using the documented Hermes Runs API. It supports authenticated health/capability discovery, run creation with idempotency, status/result, SSE events and stop. Endpoint construction rejects hostnames/non-loopback addresses and credential-bearing URLs; request IDs and idempotency keys are bounded; JSON responses and event streams have explicit byte limits; run input, conversation history and response IDs are validated.
+- Added adapter unit tests for loopback restrictions (including IPv6), terminal status mapping, LF/CRLF SSE parsing and replay sequence filtering.
+- Important boundary: the adapter is not registered into the API's task/mission execution path. It must not be called until a DREAD-approved task lifecycle and provider sandbox/tool permission policy are connected. Hermes server health is not agent execution proof.
+- CI run #389 (`44191004156`) passed all three jobs for candidate `bfa432d51e103e08bb36c77e61695459330c40d0`: Rust formatting, strict Clippy, workspace tests, release build, installer validation, migration/rollback regression, Python bridge/importer tests, single-owner GPU guard, React build, package checksum/content validation and disposable Ubuntu 24.04 package/API/UI/auth smoke tests.
+- No live Hermes server was contacted, no agent task was executed, and no workstation process or file was changed.
