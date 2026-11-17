@@ -278,6 +278,7 @@ dependencies = [
 name = "dread-orchestrator"
 version = "0.4.0"
 dependencies = [
+ "serde",
  "serde_json",
  "tokio",
 ]
