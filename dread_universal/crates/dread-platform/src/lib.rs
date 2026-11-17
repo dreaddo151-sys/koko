@@ -31,8 +31,8 @@ pub struct HostProfile {
 }
 
 fn find_binary(names: &[&str]) -> Option<PathBuf> {
-    let paths = env::split_paths(&env::var_os("PATH")?);
-    for directory in paths {
+    let path_var = env::var_os("PATH")?;
+    for directory in env::split_paths(&path_var) {
         for name in names {
             let candidate = directory.join(name);
             if candidate.is_file() {
