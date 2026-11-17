@@ -2,14 +2,14 @@
 
 ## Automated Rust gates
 
-The following checks passed for the task-lifecycle and read-only agent-discovery candidate in GitHub Actions run `44009858035`:
+The task-lifecycle, read-only agent-discovery and WebSocket event-stream candidate passed these GitHub Actions gates in run `44012192907`:
 
 1. `cargo fmt --all -- --check` — PASS
 2. `cargo clippy --workspace --all-targets --locked -- -D warnings` — PASS
-3. `cargo test --workspace --locked` — PASS, 27 tests
+3. `cargo test --workspace --locked` — PASS, 28 tests
 4. `cargo build --workspace --release --locked` — PASS
 
-The workflow applies the candidate patches to the exact uploaded baseline archive before running these checks. The CI result is not a substitute for a workstation integration test.
+The workflow applies the candidate patches to the exact uploaded baseline archive before running these checks. The CI result is not a substitute for workstation integration tests.
 
 ## Security and behavior gates
 
@@ -24,12 +24,16 @@ The workflow applies the candidate patches to the exact uploaded baseline archiv
 - Task creation enters `pending_approval`; approval records state/audit only and does not start execution.
 - `approved_by` is caller-provided text, not authenticated identity.
 - Capability imports/records remain disabled by default; no imported code or hooks execute.
+- WebSocket task events are emitted only after the corresponding SQLite transaction commits.
+- WebSocket replay uses `after_sequence`, bounded 1,000-event pages, and SQLite recovery after broadcast-channel lag.
+- A unit test verifies committed task events reach broadcast subscribers; a full network/browser WebSocket handshake and reconnect integration test remains outstanding.
 
 ## Not yet verified
 
 - Live API smoke test and integration against the operator's actual local services.
+- End-to-end WebSocket handshake/reconnect using a real client or browser.
 - Hermes/OpenHands/other agent endpoint contracts and provider-specific adapters.
-- WebSocket event delivery, reconnect/replay and task execution.
+- Bounded task execution, cancellation of a live provider task and resource-aware scheduling.
 - Pstack/Cursor importer end-to-end behavior.
 - Authentication/authorization and remote-access security.
 - Frontend, GPU contention/lease handoff, installer/upgrade/rollback and dual-RTX-3090 acceptance.
