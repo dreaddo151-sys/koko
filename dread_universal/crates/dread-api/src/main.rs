@@ -1695,6 +1695,53 @@ async fn run_task(
                     .into(),
         });
     }
+    if let Some((mission_id, dependencies_json)) = tx
+        .query_row(
+            "SELECT mission_id, depends_on_json FROM mission_tasks WHERE task_id = ?1",
+            params![id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| ApiError::internal(error.to_string()))?
+    {
+        let mission_status: String = tx
+            .query_row(
+                "SELECT status FROM missions WHERE id = ?1",
+                params![mission_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        if !matches!(mission_status.as_str(), "awaiting_approval" | "running") {
+            return Err(ApiError::conflict(
+                "Mission is not in an executable state",
+            ));
+        }
+        let dependencies: Vec<String> = serde_json::from_str(&dependencies_json)
+            .map_err(|error| ApiError::internal(format!("Stored mission dependencies are invalid: {error}")))?;
+        for dependency in dependencies {
+            let dependency_status: Option<String> = tx
+                .query_row(
+                    "SELECT t.status
+                     FROM mission_tasks mt JOIN tasks t ON t.id = mt.task_id
+                     WHERE mt.mission_id = ?1 AND mt.node_id = ?2",
+                    params![mission_id, dependency],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| ApiError::internal(error.to_string()))?;
+            if dependency_status.as_deref() != Some("completed") {
+                return Err(ApiError::conflict(format!(
+                    "Mission dependency '{dependency}' must complete before this task can run"
+                )));
+            }
+        }
+        tx.execute(
+            "UPDATE missions SET status = 'running' WHERE id = ?1 AND status = 'awaiting_approval'",
+            params![mission_id],
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    }
+
     let runner_name = match task.task_type.as_str() {
         "service_discovery" => "builtin.service_discovery",
         "gpu_chat" => {
@@ -2181,6 +2228,40 @@ async fn execute_approved_task(
         ).is_err()
         {
             return;
+        }
+        let mission_id: Option<String> = tx
+            .query_row(
+                "SELECT mission_id FROM mission_tasks WHERE task_id = ?1",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        if let Some(mission_id) = mission_id {
+            if final_status == "completed" {
+                let incomplete: i64 = tx
+                    .query_row(
+                        "SELECT COUNT(*)
+                         FROM mission_tasks mt JOIN tasks t ON t.id = mt.task_id
+                         WHERE mt.mission_id = ?1 AND t.status != 'completed'",
+                        params![mission_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| ApiError::internal(error.to_string()))?;
+                if incomplete == 0 {
+                    tx.execute(
+                        "UPDATE missions SET status = 'completed' WHERE id = ?1",
+                        params![mission_id],
+                    )
+                    .map_err(|error| ApiError::internal(error.to_string()))?;
+                }
+            } else {
+                tx.execute(
+                    "UPDATE missions SET status = 'blocked' WHERE id = ?1",
+                    params![mission_id],
+                )
+                .map_err(|error| ApiError::internal(error.to_string()))?;
+            }
         }
         let event_type = match final_status {
             "completed" => "task_succeeded",
