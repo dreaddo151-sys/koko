@@ -1,3 +1,6 @@
+pub mod supervisor;
+pub use supervisor::{GpuLeaseGuard, GpuSupervisorClient};
+
 use anyhow::{Context, Result, ensure};
 use reqwest::{Response, Url};
 use serde::{Deserialize, Serialize};
