@@ -27,6 +27,7 @@ case "$1" in
     printf 'stopped\n' > "$MOCK_SYSTEMD_STATE"
     ;;
   disable)
+    [[ -e "$MOCK_UNIT_FILE" ]] || exit 1
     printf 'disabled\n' > "$MOCK_SYSTEMD_ENABLED"
     ;;
   start)
@@ -96,6 +97,7 @@ run_installer() {
   DREAD_INSTALL_DIR="$PREFIX" \
   MOCK_SYSTEMD_STATE="$STATE" \
   MOCK_SYSTEMD_ENABLED="$TMP/systemd-enabled" \
+  MOCK_UNIT_FILE="$HOME/.config/systemd/user/dread-universal.service" \
   PATH="$MOCK_BIN:$PATH" \
   bash "$bundle/install-user.sh" 2>/dev/null
 }
@@ -135,7 +137,7 @@ cp "$UNIT_FILE" "$TMP/unit-before-failure"
 cp "$ENV_FILE" "$TMP/env-before-failure"
 
 BUNDLE3="$(make_bundle v3)"
-if HOME="$HOME" DREAD_INSTALL_DIR="$PREFIX" MOCK_SYSTEMD_STATE="$STATE" MOCK_SYSTEMD_ENABLED="$TMP/systemd-enabled" MOCK_FAIL_HEALTH=1 PATH="$MOCK_BIN:$PATH" bash "$BUNDLE3/install-user.sh" >/dev/null; then
+if HOME="$HOME" DREAD_INSTALL_DIR="$PREFIX" MOCK_SYSTEMD_STATE="$STATE" MOCK_SYSTEMD_ENABLED="$TMP/systemd-enabled" MOCK_UNIT_FILE="$UNIT_FILE" MOCK_FAIL_HEALTH=1 PATH="$MOCK_BIN:$PATH" bash "$BUNDLE3/install-user.sh" >/dev/null; then
   printf 'Expected the forced health-check failure to trigger rollback.\n' >&2
   exit 1
 fi
@@ -144,6 +146,23 @@ fi
 cmp -s "$TMP/unit-before-failure" "$UNIT_FILE"
 cmp -s "$TMP/env-before-failure" "$ENV_FILE"
 [[ "$(cat "$TMP/systemd-enabled")" == enabled ]]
+# A failed first install must remove its newly enabled unit even though no
+# previous unit or application tree exists.
+FRESH_HOME="$TMP/fresh-home"
+FRESH_PREFIX="$FRESH_HOME/.local/opt/dread-universal"
+FRESH_STATE="$TMP/fresh-systemd-state"
+FRESH_ENABLED="$TMP/fresh-systemd-enabled"
+FRESH_UNIT="$FRESH_HOME/.config/systemd/user/dread-universal.service"
+mkdir -p "$FRESH_HOME"
+BUNDLE4="$(make_bundle fresh)"
+if HOME="$FRESH_HOME" DREAD_INSTALL_DIR="$FRESH_PREFIX" MOCK_SYSTEMD_STATE="$FRESH_STATE" MOCK_SYSTEMD_ENABLED="$FRESH_ENABLED" MOCK_UNIT_FILE="$FRESH_UNIT" MOCK_FAIL_HEALTH=1 PATH="$MOCK_BIN:$PATH" bash "$BUNDLE4/install-user.sh" >/dev/null; then
+  printf 'Expected a failed first install to trigger rollback.\n' >&2
+  exit 1
+fi
+[[ ! -e "$FRESH_PREFIX" ]]
+[[ ! -e "$FRESH_UNIT" ]]
+[[ "$(cat "$FRESH_ENABLED")" == disabled ]]
+
 failed_install="$(find "$HOME/.local/opt" -maxdepth 1 -type d -name 'dread-universal.failed.*' -print -quit)"
 if [[ -z "$failed_install" ]]; then
   printf 'Failed release tree was not retained for diagnosis.\n' >&2
@@ -151,4 +170,4 @@ if [[ -z "$failed_install" ]]; then
   exit 1
 fi
 
-printf 'Portable installer migration, permissions, backup, unit/credential restoration and rollback: PASS\n'
+printf 'Portable installer migration, permissions, upgrade rollback and failed first-install cleanup: PASS\n'
