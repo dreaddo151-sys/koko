@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/dread-discovery", "crates/dread-api", "crates/dread-gpu", "crates/dread-agents", "crates/dread-orchestrator"]
+members = ["crates/dread-discovery", "crates/dread-api", "crates/dread-gpu", "crates/dread-agents", "crates/dread-orchestrator", "crates/dread-skills"]
 
 [workspace.package]
 version = "0.4.0"
