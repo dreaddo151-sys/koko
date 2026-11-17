@@ -5,8 +5,8 @@ use std::time::Duration;
 const MAX_QUEUE_BYTES: usize = 2 * 1024 * 1024;
 
 fn comfyui_base_url() -> Result<String, String> {
-    let raw = std::env::var("DREAD_COMFYUI_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:8188".to_string());
+    let raw =
+        std::env::var("DREAD_COMFYUI_URL").unwrap_or_else(|_| "http://127.0.0.1:8188".to_string());
     let url = reqwest::Url::parse(&raw).map_err(|_| "DREAD_COMFYUI_URL is invalid".to_string())?;
     let loopback = url.host_str().is_some_and(|host| {
         host == "localhost"
