@@ -49,7 +49,7 @@ for required in bin/dread-universal web/dist/index.html config/services.toml con
   }
 done
 
-install -d -m 0700 "$CONFIG_DIR" "$DATA_DIR/data" "$UNIT_DIR"
+install -d -m 0700 "$CONFIG_DIR" "$DATA_DIR/data" "$UNIT_DIR" "$HOME/.cache"
 
 was_active=false
 install_complete=false
