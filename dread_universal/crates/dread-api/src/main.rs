@@ -668,8 +668,10 @@ async fn import_capability_batch(
             .map_err(|error| ApiError::internal(error.to_string()))?;
 
         if let Some(existing_json) = existing_json {
-            let mut existing: CapabilityRecord = serde_json::from_str(&existing_json)
-                .map_err(|error| ApiError::internal(format!("Stored capability is invalid: {error}")))?;
+            let mut existing: CapabilityRecord =
+                serde_json::from_str(&existing_json).map_err(|error| {
+                    ApiError::internal(format!("Stored capability is invalid: {error}"))
+                })?;
             // Import timestamps are observational metadata; compare all other
             // fields so a changed source or altered capability cannot be skipped.
             existing.provenance.imported_at = record.provenance.imported_at;
