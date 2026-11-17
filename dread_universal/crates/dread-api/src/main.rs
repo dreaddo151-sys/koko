@@ -2137,6 +2137,30 @@ mod tests {
         (router, server)
     }
 
+    #[test]
+    fn gpu_chat_skill_context_ids_are_bounded_and_path_safe() {
+        let valid = json!({
+            "model": "qwen3.8:27b",
+            "messages": [{"role": "user", "content": "Use the reviewed skill"}],
+            "skill_ids": ["pstack.skill.architect", "pstack.skill.correct"]
+        });
+        assert!(validate_gpu_chat_payload(&valid).is_ok());
+
+        let traversal = json!({
+            "model": "qwen3.8:27b",
+            "messages": [{"role": "user", "content": "x"}],
+            "skill_ids": ["pstack.skill.../../../etc/passwd"]
+        });
+        assert!(validate_gpu_chat_payload(&traversal).is_err());
+
+        let too_many = json!({
+            "model": "qwen3.8:27b",
+            "messages": [{"role": "user", "content": "x"}],
+            "skill_ids": (0..9).map(|n| format!("pstack.skill.skill-{n}")).collect::<Vec<_>>()
+        });
+        assert!(validate_gpu_chat_payload(&too_many).is_err());
+    }
+
     #[tokio::test]
     async fn api_requires_valid_bearer_token_when_authentication_is_enabled() {
         let (router, server) = test_app_with_auth().await;
