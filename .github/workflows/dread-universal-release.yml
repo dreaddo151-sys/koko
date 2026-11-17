@@ -4,6 +4,11 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Existing or new release tag (for example v0.4.0)
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -13,66 +18,46 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build Ubuntu 24.04 x86_64 API
+  package:
+    name: Build Ubuntu 24.04 packages
     runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: dread_universal
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Build API executable
-        run: cargo build --release --locked --bin dread-universal
-      - name: Upload API executable
-        uses: actions/upload-artifact@v4
         with:
-          name: dread-universal-api-ubuntu-x86_64
-          path: dread_universal/target/release/dread-universal
-          if-no-files-found: error
-
-  web:
-    name: Build web console
-    runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: dread_universal/web
-    steps:
-      - uses: actions/checkout@v4
+          ref: ${{ github.event.inputs.tag_name || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install --ignore-scripts --no-audit --no-fund
-      - run: npm run build
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dread-universal-web-ubuntu
-          path: dread_universal/web/dist/
-          if-no-files-found: error
-
-  publish:
-    name: Publish Ubuntu bundle and checksums
-    needs: [build, web]
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: release
-          merge-multiple: true
-      - name: Assemble portable Ubuntu build bundle
+      - name: Build Rust API
+        working-directory: dread_universal
+        run: cargo build --release --locked --bin dread-universal
+      - name: Build production web console
+        working-directory: dread_universal/web
+        run: |
+          npm install --ignore-scripts --no-audit --no-fund
+          npm run build
+      - name: Validate packaging scripts
+        working-directory: dread_universal
+        run: bash -n scripts/install-user.sh scripts/configure-user.sh scripts/package-ubuntu.sh
+      - name: Assemble tarball, deb and SHA-256 manifest
+        working-directory: dread_universal
+        run: scripts/package-ubuntu.sh
+      - name: Verify release package contents
+        working-directory: dread_universal
         run: |
           set -euo pipefail
-          mkdir -p release/bundle/bin release/bundle/web
-          test -x release/dread-universal
-          install -m 0755 release/dread-universal release/bundle/bin/dread-universal
-          find release -maxdepth 1 -type f ! -name dread-universal -exec cp {} release/bundle/web/ \;
-          tar -C release -czf release/dread-universal-ubuntu-24.04-x86_64.tar.gz bundle
-          cd release
-          sha256sum dread-universal-ubuntu-24.04-x86_64.tar.gz > SHA256SUMS
+          test -s dist/release/SHA256SUMS
+          sha256sum --check dist/release/SHA256SUMS
+          dpkg-deb --info dist/release/dread-universal_*.deb
+          tar -tzf dist/release/dread-universal-ubuntu-*.tar.gz | grep -q 'bundle/bin/dread-universal'
+          tar -tzf dist/release/dread-universal-ubuntu-*.tar.gz | grep -q 'bundle/web/dist/index.html'
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.inputs.tag_name || github.ref_name }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
           files: |
-            release/dread-universal-ubuntu-24.04-x86_64.tar.gz
-            release/SHA256SUMS
+            dread_universal/dist/release/dread-universal-ubuntu-*.tar.gz
+            dread_universal/dist/release/dread-universal_*.deb
+            dread_universal/dist/release/SHA256SUMS
