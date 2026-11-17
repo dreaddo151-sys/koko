@@ -78,7 +78,7 @@ def restart_allowed(state: dict, now: float) -> tuple[bool, str]:
 def append_incident(state_path: Path, incident: dict) -> None:
     journal = state_path.with_name("incidents.jsonl")
     journal.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(incident, separators=(",", ":")) + "\\n"
+    payload = json.dumps(incident, separators=(",", ":")) + "\n"
     descriptor = os.open(journal, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
         os.write(descriptor, payload.encode("utf-8"))
