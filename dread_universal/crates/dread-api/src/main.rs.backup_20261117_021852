@@ -1,0 +1,331 @@
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::get,
+};
+use dread_discovery::{discover, load_services};
+use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::{
+    env, fs,
+    net::SocketAddr,
+    path::Path as FsPath,
+    sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
+};
+use tracing::{error, info};
+use uuid::Uuid;
+
+#[derive(Clone)]
+struct AppState {
+    db: Arc<Mutex<Connection>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RegistryEntry {
+    id: String,
+    name: String,
+    kind: String,
+    endpoint: Option<String>,
+    metadata: Value,
+    created_at: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateRegistryEntry {
+    name: String,
+    kind: String,
+    endpoint: Option<String>,
+    #[serde(default = "empty_object")]
+    metadata: Value,
+}
+
+fn empty_object() -> Value {
+    json!({})
+}
+
+#[derive(Debug)]
+struct ApiError {
+    status: StatusCode,
+    message: String,
+}
+
+impl ApiError {
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+        }
+    }
+
+    fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: message.into(),
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.status, Json(json!({ "error": self.message }))).into_response()
+    }
+}
+
+fn now_epoch() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn open_database(path: &str) -> anyhow::Result<Connection> {
+    if let Some(parent) = FsPath::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+
+    let conn = Connection::open(path)?;
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA foreign_keys = ON;
+         CREATE TABLE IF NOT EXISTS registry (
+             id TEXT PRIMARY KEY NOT NULL,
+             name TEXT NOT NULL,
+             kind TEXT NOT NULL,
+             endpoint TEXT,
+             metadata TEXT NOT NULL DEFAULT '{}',
+             created_at INTEGER NOT NULL
+         );",
+    )?;
+    Ok(conn)
+}
+
+fn db_lock(state: &AppState) -> Result<std::sync::MutexGuard<'_, Connection>, ApiError> {
+    state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("Database lock is unavailable"))
+}
+
+async fn health() -> Json<Value> {
+    Json(json!({
+        "status": "ok",
+        "service": "dread-universal",
+        "version": env!("CARGO_PKG_VERSION")
+    }))
+}
+
+async fn services() -> Result<Json<Value>, ApiError> {
+    let config_path =
+        env::var("DREAD_SERVICES_CONFIG").unwrap_or_else(|_| "config/services.toml".to_string());
+
+    let configured = match load_services(&config_path) {
+        Ok(items) => items,
+        Err(_) if !FsPath::new(&config_path).exists() => Vec::new(),
+        Err(error) => return Err(ApiError::bad_request(error)),
+    };
+
+    let results = discover(configured).await;
+    serde_json::to_value(results).map(Json).map_err(|error| {
+        ApiError::internal(format!("Could not serialize service results: {error}"))
+    })
+}
+
+async fn list_registry(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let mut stmt = conn
+        .prepare("SELECT id, name, kind, endpoint, metadata, created_at FROM registry ORDER BY created_at DESC")
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let metadata: String = row.get(4)?;
+            let parsed = serde_json::from_str(&metadata).unwrap_or_else(|_| json!({}));
+            Ok(RegistryEntry {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                kind: row.get(2)?,
+                endpoint: row.get(3)?,
+                metadata: parsed,
+                created_at: row.get(5)?,
+            })
+        })
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let mut entries = Vec::new();
+    for row in rows {
+        entries.push(row.map_err(|e| ApiError::internal(e.to_string()))?);
+    }
+    Ok(Json(json!({ "items": entries, "count": entries.len() })))
+}
+
+async fn create_registry(
+    State(state): State<AppState>,
+    Json(input): Json<CreateRegistryEntry>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let name = input.name.trim();
+    let kind = input.kind.trim();
+    if name.is_empty() || kind.is_empty() {
+        return Err(ApiError::bad_request("Both name and kind are required"));
+    }
+    if name.len() > 200 || kind.len() > 80 {
+        return Err(ApiError::bad_request(
+            "name or kind exceeds its maximum length",
+        ));
+    }
+    if let Some(endpoint) = &input.endpoint {
+        if endpoint.len() > 2048 {
+            return Err(ApiError::bad_request("endpoint is too long"));
+        }
+    }
+
+    let id = Uuid::new_v4().to_string();
+    let created_at = now_epoch();
+    let metadata = serde_json::to_string(&input.metadata)
+        .map_err(|e| ApiError::bad_request(format!("Invalid metadata: {e}")))?;
+
+    let conn = db_lock(&state)?;
+    conn.execute(
+        "INSERT INTO registry (id, name, kind, endpoint, metadata, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, name, kind, input.endpoint, metadata, created_at],
+    )
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "item": RegistryEntry {
+                id,
+                name: name.to_string(),
+                kind: kind.to_string(),
+                endpoint: input.endpoint,
+                metadata: input.metadata,
+                created_at
+            }
+        })),
+    ))
+}
+
+async fn get_registry_item(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let entry = conn
+        .query_row(
+            "SELECT id, name, kind, endpoint, metadata, created_at FROM registry WHERE id = ?1",
+            params![id],
+            |row| {
+                let metadata: String = row.get(4)?;
+                Ok(RegistryEntry {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    kind: row.get(2)?,
+                    endpoint: row.get(3)?,
+                    metadata: serde_json::from_str(&metadata).unwrap_or_else(|_| json!({})),
+                    created_at: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    entry
+        .map(|item| Json(json!({ "item": item })))
+        .ok_or_else(|| ApiError::not_found("Registry item not found"))
+}
+
+async fn delete_registry_item(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let conn = db_lock(&state)?;
+    let changed = conn
+        .execute("DELETE FROM registry WHERE id = ?1", params![id])
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    if changed == 0 {
+        return Err(ApiError::not_found("Registry item not found"));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn app(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/api/services", get(services))
+        .route("/api/registry", get(list_registry).post(create_registry))
+        .route(
+            "/api/registry/{id}",
+            get(get_registry_item).delete(delete_registry_item),
+        )
+        .with_state(state)
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    let bind = env::var("DREAD_BIND").unwrap_or_else(|_| "127.0.0.1:8765".to_string());
+    let addr: SocketAddr = bind.parse()?;
+    let db_path =
+        env::var("DREAD_DB_PATH").unwrap_or_else(|_| "data/dread_registry.sqlite3".to_string());
+    let db = open_database(&db_path)?;
+    let state = AppState {
+        db: Arc::new(Mutex::new(db)),
+    };
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    info!(address = %addr, database = %db_path, "PROJECT DREAD Universal API listening");
+    axum::serve(listener, app(state))
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+            info!("Shutdown signal received");
+        })
+        .await
+        .map_err(|error| {
+            error!(%error, "API server failed");
+            anyhow::anyhow!(error)
+        })?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn database_initializes_registry_schema() {
+        let conn = open_database(":memory:").expect("in-memory database should initialize");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'registry'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("schema query should work");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn timestamp_is_unix_epoch_seconds() {
+        assert!(now_epoch() > 1_700_000_000);
+    }
+}

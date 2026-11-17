@@ -1,0 +1,1551 @@
+use axum::body::Body;
+use axum::{
+    Json, Router,
+    extract::{
+        DefaultBodyLimit, Path, Query, State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
+    },
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::get,
+};
+use dread_agents::{CapabilityKind, CapabilityProvenance, CapabilityRecord, CapabilityStatus};
+use dread_discovery::{discover, discover_agents, load_agents, load_services};
+use dread_gpu::GpuGatewayClient;
+use futures::StreamExt;
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::{
+    env, fs,
+    net::SocketAddr,
+    path::Path as FsPath,
+    sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
+};
+use tokio::sync::broadcast;
+use tracing::{error, info};
+use uuid::Uuid;
+
+const MAX_API_BODY_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Clone)]
+struct AppState {
+    db: Arc<Mutex<Connection>>,
+    gpu: GpuGatewayClient,
+    events: broadcast::Sender<TaskEvent>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RegistryEntry {
+    id: String,
+    name: String,
+    kind: String,
+    endpoint: Option<String>,
+    metadata: Value,
+    created_at: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateRegistryEntry {
+    name: String,
+    kind: String,
+    endpoint: Option<String>,
+    #[serde(default = "empty_object")]
+    metadata: Value,
+}
+
+fn empty_object() -> Value {
+    json!({})
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateCapability {
+    id: String,
+    name: String,
+    kind: CapabilityKind,
+    #[serde(default)]
+    description: String,
+    version: Option<String>,
+    license: Option<String>,
+    provenance: CapabilityProvenance,
+    #[serde(default = "default_compatibility")]
+    compatibility: String,
+    #[serde(default)]
+    dependencies: Vec<String>,
+    adapter: Option<String>,
+    #[serde(default = "empty_object")]
+    manifest: Value,
+}
+
+fn default_compatibility() -> String {
+    "review_required".to_string()
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TaskRecord {
+    id: String,
+    title: String,
+    task_type: String,
+    capability_id: Option<String>,
+    payload: Value,
+    status: String,
+    approval_required: bool,
+    approved_by: Option<String>,
+    approval_reason: Option<String>,
+    created_at: u64,
+    updated_at: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateTask {
+    title: String,
+    task_type: String,
+    capability_id: Option<String>,
+    payload: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApproveTask {
+    approved_by: String,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TaskEvent {
+    task_id: String,
+    sequence: u64,
+    event_type: String,
+    payload: Value,
+    actor: String,
+    created_at: u64,
+}
+
+#[derive(Debug)]
+struct ApiError {
+    status: StatusCode,
+    message: String,
+}
+
+impl ApiError {
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+        }
+    }
+
+    fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: message.into(),
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.status, Json(json!({ "error": self.message }))).into_response()
+    }
+}
+
+fn now_epoch() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn open_database(path: &str) -> anyhow::Result<Connection> {
+    if let Some(parent) = FsPath::new(path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+
+    let conn = Connection::open(path)?;
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA foreign_keys = ON;
+         CREATE TABLE IF NOT EXISTS registry (
+             id TEXT PRIMARY KEY NOT NULL,
+             name TEXT NOT NULL,
+             kind TEXT NOT NULL,
+             endpoint TEXT,
+             metadata TEXT NOT NULL DEFAULT '{}',
+             created_at INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS tasks (
+             id TEXT PRIMARY KEY NOT NULL,
+             title TEXT NOT NULL,
+             task_type TEXT NOT NULL,
+             capability_id TEXT,
+             payload_json TEXT NOT NULL,
+             status TEXT NOT NULL,
+             approval_required INTEGER NOT NULL DEFAULT 1,
+             approved_by TEXT,
+             approval_reason TEXT,
+             created_at INTEGER NOT NULL,
+             updated_at INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS task_events (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             task_id TEXT NOT NULL REFERENCES tasks(id),
+             sequence INTEGER NOT NULL,
+             event_type TEXT NOT NULL,
+             payload_json TEXT NOT NULL,
+             actor TEXT NOT NULL,
+             created_at INTEGER NOT NULL,
+             UNIQUE(task_id, sequence)
+         );
+         CREATE INDEX IF NOT EXISTS idx_tasks_status_created ON tasks(status, created_at);
+         CREATE INDEX IF NOT EXISTS idx_task_events_task_sequence ON task_events(task_id, sequence);
+         CREATE TABLE IF NOT EXISTS capabilities (
+             id TEXT PRIMARY KEY NOT NULL,
+             record_json TEXT NOT NULL,
+             created_at INTEGER NOT NULL
+         );",
+    )?;
+    Ok(conn)
+}
+
+fn db_lock(state: &AppState) -> Result<std::sync::MutexGuard<'_, Connection>, ApiError> {
+    state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("Database lock is unavailable"))
+}
+
+async fn health() -> Json<Value> {
+    Json(json!({
+        "status": "ok",
+        "service": "dread-universal",
+        "version": env!("CARGO_PKG_VERSION")
+    }))
+}
+
+async fn services() -> Result<Json<Value>, ApiError> {
+    let config_path =
+        env::var("DREAD_SERVICES_CONFIG").unwrap_or_else(|_| "config/services.toml".to_string());
+
+    let configured = match load_services(&config_path) {
+        Ok(items) => items,
+        Err(_) if !FsPath::new(&config_path).exists() => Vec::new(),
+        Err(error) => return Err(ApiError::bad_request(error)),
+    };
+
+    let results = discover(configured).await;
+    serde_json::to_value(results).map(Json).map_err(|error| {
+        ApiError::internal(format!("Could not serialize service results: {error}"))
+    })
+}
+
+async fn agents() -> Result<Json<Value>, ApiError> {
+    let config_path =
+        env::var("DREAD_AGENTS_CONFIG").unwrap_or_else(|_| "config/agents.toml".to_string());
+    let configured = match load_agents(&config_path) {
+        Ok(items) => items,
+        Err(_) if !FsPath::new(&config_path).exists() => Vec::new(),
+        Err(error) => return Err(ApiError::bad_request(error)),
+    };
+    let results = discover_agents(configured).await;
+    serde_json::to_value(results).map(Json).map_err(|error| {
+        ApiError::internal(format!(
+            "Could not serialize agent discovery results: {error}"
+        ))
+    })
+}
+
+async fn list_registry(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let mut stmt = conn
+        .prepare("SELECT id, name, kind, endpoint, metadata, created_at FROM registry ORDER BY created_at DESC")
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let metadata: String = row.get(4)?;
+            let parsed = serde_json::from_str(&metadata).unwrap_or_else(|_| json!({}));
+            Ok(RegistryEntry {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                kind: row.get(2)?,
+                endpoint: row.get(3)?,
+                metadata: parsed,
+                created_at: row.get(5)?,
+            })
+        })
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let mut entries = Vec::new();
+    for row in rows {
+        entries.push(row.map_err(|e| ApiError::internal(e.to_string()))?);
+    }
+    Ok(Json(json!({ "items": entries, "count": entries.len() })))
+}
+
+async fn create_registry(
+    State(state): State<AppState>,
+    Json(input): Json<CreateRegistryEntry>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let name = input.name.trim();
+    let kind = input.kind.trim();
+    if name.is_empty() || kind.is_empty() {
+        return Err(ApiError::bad_request("Both name and kind are required"));
+    }
+    if name.len() > 200 || kind.len() > 80 {
+        return Err(ApiError::bad_request(
+            "name or kind exceeds its maximum length",
+        ));
+    }
+    if let Some(endpoint) = &input.endpoint
+        && endpoint.len() > 2048
+    {
+        return Err(ApiError::bad_request("endpoint is too long"));
+    }
+
+    let id = Uuid::new_v4().to_string();
+    let created_at = now_epoch();
+    let metadata = serde_json::to_string(&input.metadata)
+        .map_err(|e| ApiError::bad_request(format!("Invalid metadata: {e}")))?;
+
+    let conn = db_lock(&state)?;
+    conn.execute(
+        "INSERT INTO registry (id, name, kind, endpoint, metadata, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, name, kind, input.endpoint, metadata, created_at],
+    )
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "item": RegistryEntry {
+                id,
+                name: name.to_string(),
+                kind: kind.to_string(),
+                endpoint: input.endpoint,
+                metadata: input.metadata,
+                created_at
+            }
+        })),
+    ))
+}
+
+async fn get_registry_item(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let entry = conn
+        .query_row(
+            "SELECT id, name, kind, endpoint, metadata, created_at FROM registry WHERE id = ?1",
+            params![id],
+            |row| {
+                let metadata: String = row.get(4)?;
+                Ok(RegistryEntry {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    kind: row.get(2)?,
+                    endpoint: row.get(3)?,
+                    metadata: serde_json::from_str(&metadata).unwrap_or_else(|_| json!({})),
+                    created_at: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    entry
+        .map(|item| Json(json!({ "item": item })))
+        .ok_or_else(|| ApiError::not_found("Registry item not found"))
+}
+
+async fn delete_registry_item(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let conn = db_lock(&state)?;
+    let changed = conn
+        .execute("DELETE FROM registry WHERE id = ?1", params![id])
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    if changed == 0 {
+        return Err(ApiError::not_found("Registry item not found"));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_capabilities(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let mut stmt = conn
+        .prepare("SELECT record_json FROM capabilities ORDER BY created_at DESC")
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let mut items = Vec::new();
+    for row in rows {
+        let encoded = row.map_err(|e| ApiError::internal(e.to_string()))?;
+        let item: CapabilityRecord = serde_json::from_str(&encoded)
+            .map_err(|e| ApiError::internal(format!("Stored capability is invalid: {e}")))?;
+        items.push(item);
+    }
+    Ok(Json(json!({ "items": items, "count": items.len() })))
+}
+
+async fn create_capability(
+    State(state): State<AppState>,
+    Json(input): Json<CreateCapability>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    // Imported and discovered capabilities are always disabled. Activation is a
+    // separate approval workflow and is intentionally not exposed by this route.
+    let record = CapabilityRecord {
+        id: input.id,
+        name: input.name,
+        kind: input.kind,
+        description: input.description,
+        version: input.version,
+        license: input.license,
+        provenance: input.provenance,
+        compatibility: input.compatibility,
+        dependencies: input.dependencies,
+        adapter: input.adapter,
+        status: CapabilityStatus::Disabled,
+        manifest: input.manifest,
+    };
+    record
+        .validate()
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let encoded = serde_json::to_string(&record)
+        .map_err(|e| ApiError::bad_request(format!("Could not encode capability: {e}")))?;
+    let created_at = record.provenance.imported_at;
+    let conn = db_lock(&state)?;
+    conn.execute(
+        "INSERT INTO capabilities (id, record_json, created_at) VALUES (?1, ?2, ?3)",
+        params![record.id, encoded, created_at],
+    )
+    .map_err(|e| {
+        if e.to_string().contains("UNIQUE constraint failed") {
+            ApiError {
+                status: StatusCode::CONFLICT,
+                message: "Capability id already exists".into(),
+            }
+        } else {
+            ApiError::internal(e.to_string())
+        }
+    })?;
+    Ok((StatusCode::CREATED, Json(json!({ "item": record }))))
+}
+
+async fn get_capability(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let encoded = conn
+        .query_row(
+            "SELECT record_json FROM capabilities WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let encoded = encoded.ok_or_else(|| ApiError::not_found("Capability not found"))?;
+    let item: CapabilityRecord = serde_json::from_str(&encoded)
+        .map_err(|e| ApiError::internal(format!("Stored capability is invalid: {e}")))?;
+    Ok(Json(json!({ "item": item })))
+}
+
+fn append_task_event(
+    tx: &Transaction<'_>,
+    task_id: &str,
+    event_type: &str,
+    payload: &Value,
+    actor: &str,
+    created_at: u64,
+) -> Result<TaskEvent, ApiError> {
+    let payload_json = serde_json::to_string(payload)
+        .map_err(|e| ApiError::internal(format!("Could not encode task event: {e}")))?;
+    tx.execute(
+        "INSERT INTO task_events (task_id, sequence, event_type, payload_json, actor, created_at)
+         SELECT ?1, COALESCE(MAX(sequence), 0) + 1, ?2, ?3, ?4, ?5
+         FROM task_events WHERE task_id = ?1",
+        params![task_id, event_type, payload_json, actor, created_at],
+    )
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    let sequence = tx
+        .query_row(
+            "SELECT MAX(sequence) FROM task_events WHERE task_id = ?1",
+            params![task_id],
+            |row| row.get::<_, u64>(0),
+        )
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(TaskEvent {
+        task_id: task_id.to_string(),
+        sequence,
+        event_type: event_type.to_string(),
+        payload: payload.clone(),
+        actor: actor.to_string(),
+        created_at,
+    })
+}
+
+fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
+    let payload: String = row.get(4)?;
+    let status: String = row.get(5)?;
+    Ok(TaskRecord {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        task_type: row.get(2)?,
+        capability_id: row.get(3)?,
+        payload: serde_json::from_str(&payload).unwrap_or(Value::Null),
+        status,
+        approval_required: row.get::<_, i64>(6)? != 0,
+        approved_by: row.get(7)?,
+        approval_reason: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+    })
+}
+
+async fn create_task(
+    State(state): State<AppState>,
+    Json(input): Json<CreateTask>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let title = input.title.trim();
+    let task_type = input.task_type.trim();
+    if title.is_empty() || task_type.is_empty() {
+        return Err(ApiError::bad_request("title and task_type are required"));
+    }
+    if title.len() > 240 || task_type.len() > 100 {
+        return Err(ApiError::bad_request(
+            "title or task_type exceeds its maximum length",
+        ));
+    }
+    if input
+        .capability_id
+        .as_ref()
+        .is_some_and(|id| id.trim().is_empty() || id.len() > 160)
+    {
+        return Err(ApiError::bad_request(
+            "capability_id must be non-empty and at most 160 characters",
+        ));
+    }
+
+    let id = Uuid::new_v4().to_string();
+    let now = now_epoch();
+    let payload_json = serde_json::to_string(&input.payload)
+        .map_err(|e| ApiError::bad_request(format!("Invalid task payload: {e}")))?;
+    let mut conn = db_lock(&state)?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    tx.execute(
+        "INSERT INTO tasks (id, title, task_type, capability_id, payload_json, status, approval_required, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'pending_approval', 1, ?6, ?6)",
+        params![id, title, task_type, input.capability_id, payload_json, now],
+    )
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    let event = append_task_event(
+        &tx,
+        &id,
+        "task_created",
+        &json!({"status": "pending_approval"}),
+        "system",
+        now,
+    )?;
+    tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
+    let _ = state.events.send(event);
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"item": TaskRecord {
+            id, title: title.to_string(), task_type: task_type.to_string(), capability_id: input.capability_id,
+            payload: input.payload, status: "pending_approval".to_string(), approval_required: true,
+            approved_by: None, approval_reason: None, created_at: now, updated_at: now
+        }})),
+    ))
+}
+
+async fn list_tasks(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, approval_reason, created_at, updated_at
+         FROM tasks ORDER BY created_at DESC"
+    ).map_err(|e| ApiError::internal(e.to_string()))?;
+    let rows = stmt
+        .query_map([], task_from_row)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let mut items = Vec::new();
+    for row in rows {
+        items.push(row.map_err(|e| ApiError::internal(e.to_string()))?);
+    }
+    Ok(Json(json!({"items": items, "count": items.len()})))
+}
+
+async fn get_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let task = conn.query_row(
+        "SELECT id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, approval_reason, created_at, updated_at
+         FROM tasks WHERE id = ?1", params![id], task_from_row
+    ).optional().map_err(|e| ApiError::internal(e.to_string()))?;
+    task.map(|item| Json(json!({"item": item})))
+        .ok_or_else(|| ApiError::not_found("Task not found"))
+}
+
+async fn task_events(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1)",
+            params![id],
+            |row| row.get(0),
+        )
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    if !exists {
+        return Err(ApiError::not_found("Task not found"));
+    }
+    let mut stmt = conn.prepare(
+        "SELECT sequence, event_type, payload_json, actor, created_at FROM task_events WHERE task_id = ?1 ORDER BY sequence"
+    ).map_err(|e| ApiError::internal(e.to_string()))?;
+    let rows = stmt
+        .query_map(params![id], |row| {
+            let encoded: String = row.get(2)?;
+            Ok(TaskEvent {
+                task_id: id.clone(),
+                sequence: row.get(0)?,
+                event_type: row.get(1)?,
+                payload: serde_json::from_str(&encoded).unwrap_or(Value::Null),
+                actor: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let mut items = Vec::new();
+    for row in rows {
+        items.push(row.map_err(|e| ApiError::internal(e.to_string()))?);
+    }
+    Ok(Json(json!({"items": items, "count": items.len()})))
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct EventStreamQuery {
+    after_sequence: Option<u64>,
+}
+
+fn load_task_events_after(
+    state: &AppState,
+    task_id: &str,
+    after_sequence: u64,
+) -> Result<Vec<TaskEvent>, ApiError> {
+    let conn = db_lock(state)?;
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1)",
+            params![task_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    if !exists {
+        return Err(ApiError::not_found("Task not found"));
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT sequence, event_type, payload_json, actor, created_at
+         FROM task_events WHERE task_id = ?1 AND sequence > ?2 ORDER BY sequence LIMIT 1000",
+        )
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let rows = stmt
+        .query_map(params![task_id, after_sequence], |row| {
+            let encoded: String = row.get(2)?;
+            Ok(TaskEvent {
+                task_id: task_id.to_string(),
+                sequence: row.get(0)?,
+                event_type: row.get(1)?,
+                payload: serde_json::from_str(&encoded).unwrap_or(Value::Null),
+                actor: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let mut events = Vec::new();
+    for row in rows {
+        events.push(row.map_err(|e| ApiError::internal(e.to_string()))?);
+    }
+    Ok(events)
+}
+
+async fn send_event_pages(
+    socket: &mut WebSocket,
+    state: &AppState,
+    task_id: &str,
+    last_sequence: &mut u64,
+) -> Result<(), String> {
+    loop {
+        let events = load_task_events_after(state, task_id, *last_sequence)
+            .map_err(|error| error.message)?;
+        let page_len = events.len();
+        for event in events {
+            *last_sequence = (*last_sequence).max(event.sequence);
+            let text = serde_json::to_string(&event).map_err(|error| error.to_string())?;
+            socket
+                .send(Message::Text(text.into()))
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        if page_len < 1000 {
+            return Ok(());
+        }
+    }
+}
+
+async fn task_event_stream(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    Query(query): Query<EventStreamQuery>,
+) -> Result<Response, ApiError> {
+    // Subscribe before loading persisted history so events committed during replay cannot be lost.
+    let receiver = state.events.subscribe();
+    let after_sequence = query.after_sequence.unwrap_or(0);
+    let replay = load_task_events_after(&state, &task_id, after_sequence)?;
+    Ok(ws.on_upgrade(move |socket| {
+        stream_task_events(socket, state, task_id, after_sequence, replay, receiver)
+    }))
+}
+
+async fn stream_task_events(
+    mut socket: WebSocket,
+    state: AppState,
+    task_id: String,
+    mut last_sequence: u64,
+    replay: Vec<TaskEvent>,
+    mut receiver: broadcast::Receiver<TaskEvent>,
+) {
+    for event in replay {
+        last_sequence = last_sequence.max(event.sequence);
+        let Ok(text) = serde_json::to_string(&event) else {
+            continue;
+        };
+        if socket.send(Message::Text(text.into())).await.is_err() {
+            return;
+        }
+    }
+    if let Err(message) = send_event_pages(&mut socket, &state, &task_id, &mut last_sequence).await
+    {
+        let text = json!({"error": message}).to_string();
+        let _ = socket.send(Message::Text(text.into())).await;
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    Some(Ok(Message::Ping(payload))) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() { break; }
+                    }
+                    Some(Ok(_)) => {}
+                }
+            }
+            received = receiver.recv() => {
+                match received {
+                    Ok(event) if event.task_id == task_id && event.sequence > last_sequence => {
+                        last_sequence = event.sequence;
+                        let Ok(text) = serde_json::to_string(&event) else { continue };
+                        if socket.send(Message::Text(text.into())).await.is_err() { break; }
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        if let Err(message) = send_event_pages(&mut socket, &state, &task_id, &mut last_sequence).await {
+                            let text = json!({"error": message}).to_string();
+                            let _ = socket.send(Message::Text(text.into())).await;
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+}
+
+async fn approve_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<ApproveTask>,
+) -> Result<Json<Value>, ApiError> {
+    let approved_by = input.approved_by.trim();
+    let reason = input.reason.trim();
+    if approved_by.is_empty() || reason.is_empty() {
+        return Err(ApiError::bad_request("approved_by and reason are required"));
+    }
+    if approved_by.len() > 160 || reason.len() > 2000 {
+        return Err(ApiError::bad_request(
+            "approval fields exceed their maximum length",
+        ));
+    }
+    let now = now_epoch();
+    let mut conn = db_lock(&state)?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let changed = tx.execute(
+        "UPDATE tasks SET status = 'approved', approved_by = ?2, approval_reason = ?3, updated_at = ?4
+         WHERE id = ?1 AND status = 'pending_approval' AND approval_required = 1",
+        params![id, approved_by, reason, now],
+    ).map_err(|e| ApiError::internal(e.to_string()))?;
+    if changed == 0 {
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1)",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        if !exists {
+            return Err(ApiError::not_found("Task not found"));
+        }
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: "Task is not awaiting approval".into(),
+        });
+    }
+    let event = append_task_event(
+        &tx,
+        &id,
+        "task_approved",
+        &json!({"approved_by": approved_by, "reason": reason}),
+        approved_by,
+        now,
+    )?;
+    let task = tx.query_row(
+        "SELECT id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, approval_reason, created_at, updated_at
+         FROM tasks WHERE id = ?1", params![id], task_from_row
+    ).map_err(|e| ApiError::internal(e.to_string()))?;
+    tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
+    let _ = state.events.send(event);
+    Ok(Json(json!({"item": task, "execution_started": false})))
+}
+
+async fn cancel_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let now = now_epoch();
+    let mut conn = db_lock(&state)?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let changed = tx.execute(
+        "UPDATE tasks SET status = 'cancelled', updated_at = ?2 WHERE id = ?1 AND status IN ('pending_approval', 'approved', 'queued')",
+        params![id, now],
+    ).map_err(|e| ApiError::internal(e.to_string()))?;
+    if changed == 0 {
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1)",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        if !exists {
+            return Err(ApiError::not_found("Task not found"));
+        }
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: "Task cannot be cancelled in its current state".into(),
+        });
+    }
+    let event = append_task_event(
+        &tx,
+        &id,
+        "task_cancelled",
+        &json!({"status": "cancelled"}),
+        "operator",
+        now,
+    )?;
+    let task = tx.query_row(
+        "SELECT id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, approval_reason, created_at, updated_at
+         FROM tasks WHERE id = ?1", params![id], task_from_row
+    ).map_err(|e| ApiError::internal(e.to_string()))?;
+    tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
+    let _ = state.events.send(event);
+    Ok(Json(json!({"item": task, "execution_started": false})))
+}
+
+async fn gpu_health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let health = state.gpu.health().await.map_err(|e| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        message: format!("GPU gateway unavailable: {e}"),
+    })?;
+
+    serde_json::to_value(health)
+        .map(Json)
+        .map_err(|e| ApiError::internal(e.to_string()))
+}
+
+async fn gpu_models(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let models = state.gpu.models().await.map_err(|e| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        message: format!("GPU model discovery failed: {e}"),
+    })?;
+
+    serde_json::to_value(models)
+        .map(Json)
+        .map_err(|e| ApiError::internal(e.to_string()))
+}
+
+async fn gpu_inference(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+    Json(payload): Json<Value>,
+) -> Result<Response, ApiError> {
+    if !path.starts_with("v1/") {
+        return Err(ApiError::not_found(
+            "Only GPU gateway /v1/ endpoints are exposed",
+        ));
+    }
+
+    let gateway_path = format!("/{path}");
+
+    let upstream = state
+        .gpu
+        .post_v1(&gateway_path, &payload)
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: format!("GPU inference gateway request failed: {e}"),
+        })?;
+
+    let status =
+        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+
+    let content_type = upstream
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+
+    let cache_control = upstream
+        .headers()
+        .get(reqwest::header::CACHE_CONTROL)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+
+    let buffering = upstream
+        .headers()
+        .get("x-accel-buffering")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+
+    let stream = upstream
+        .bytes_stream()
+        .map(|chunk| chunk.map_err(std::io::Error::other));
+
+    let mut builder = Response::builder()
+        .status(status)
+        .header("content-type", content_type);
+
+    if let Some(value) = cache_control {
+        builder = builder.header("cache-control", value);
+    }
+
+    if let Some(value) = buffering {
+        builder = builder.header("x-accel-buffering", value);
+    }
+
+    builder
+        .body(Body::from_stream(stream))
+        .map_err(|e| ApiError::internal(format!("Could not forward GPU response: {e}")))
+}
+
+fn app(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/api/gpu/health", get(gpu_health))
+        .route("/api/gpu/models", get(gpu_models))
+        .route("/api/tasks", get(list_tasks).post(create_task))
+        .route("/api/tasks/{id}", get(get_task))
+        .route("/api/tasks/{id}/events", get(task_events))
+        .route("/api/tasks/{id}/stream", get(task_event_stream))
+        .route("/api/tasks/{id}/approve", axum::routing::post(approve_task))
+        .route("/api/tasks/{id}/cancel", axum::routing::post(cancel_task))
+        .route("/api/gpu/{*path}", axum::routing::post(gpu_inference))
+        .route("/api/services", get(services))
+        .route("/api/agents", get(agents))
+        .route(
+            "/api/capabilities",
+            get(list_capabilities).post(create_capability),
+        )
+        .route("/api/capabilities/{id}", get(get_capability))
+        .route("/api/registry", get(list_registry).post(create_registry))
+        .route(
+            "/api/registry/{id}",
+            get(get_registry_item).delete(delete_registry_item),
+        )
+        .layer(DefaultBodyLimit::max(MAX_API_BODY_BYTES))
+        .with_state(state)
+}
+
+fn validate_bind_address(addr: SocketAddr) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        addr.ip().is_loopback(),
+        "DREAD_BIND must be a loopback address until API authentication is implemented"
+    );
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    let bind = env::var("DREAD_BIND").unwrap_or_else(|_| "127.0.0.1:8765".to_string());
+    let addr: SocketAddr = bind.parse()?;
+    validate_bind_address(addr)?;
+    let db_path =
+        env::var("DREAD_DB_PATH").unwrap_or_else(|_| "data/dread_registry.sqlite3".to_string());
+    let db = open_database(&db_path)?;
+    let (events, _) = broadcast::channel(256);
+    let state = AppState {
+        db: Arc::new(Mutex::new(db)),
+        gpu: GpuGatewayClient::local()?,
+        events,
+    };
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    info!(address = %addr, database = %db_path, "PROJECT DREAD Universal API listening");
+    axum::serve(listener, app(state))
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+            info!("Shutdown signal received");
+        })
+        .await
+        .map_err(|error| {
+            error!(%error, "API server failed");
+            anyhow::anyhow!(error)
+        })?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+        routing::post,
+    };
+    use serde_json::json;
+    use tokio::net::TcpListener;
+    use tower::ServiceExt;
+
+    async fn mock_health() -> Json<Value> {
+        Json(json!({"status": "ok", "gpu": "on-demand"}))
+    }
+
+    async fn mock_models() -> Json<Value> {
+        Json(json!({
+            "object": "list",
+            "data": [{
+                "id": "qwen3.8:27b",
+                "object": "model",
+                "owned_by": "DREAD"
+            }]
+        }))
+    }
+
+    async fn mock_completion(Json(_payload): Json<Value>) -> Response {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/event-stream")
+            .header("cache-control", "no-cache")
+            .header("x-accel-buffering", "no")
+            .body(Body::from(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n\
+                 data: [DONE]\n\n",
+            ))
+            .unwrap()
+    }
+
+    async fn test_app_with_events() -> (
+        Router,
+        broadcast::Receiver<TaskEvent>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let mock = Router::new()
+            .route("/health", get(mock_health))
+            .route("/v1/models", get(mock_models))
+            .route("/v1/chat/completions", post(mock_completion));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            axum::serve(listener, mock).await.unwrap();
+        });
+
+        let gpu = GpuGatewayClient::new(format!("http://{address}")).unwrap();
+        let db = open_database(":memory:").unwrap();
+
+        let (events, _) = broadcast::channel(256);
+        let receiver = events.subscribe();
+        (
+            app(AppState {
+                db: Arc::new(Mutex::new(db)),
+                gpu,
+                events,
+            }),
+            receiver,
+            server,
+        )
+    }
+
+    async fn test_app() -> (Router, tokio::task::JoinHandle<()>) {
+        let (router, _receiver, server) = test_app_with_events().await;
+        (router, server)
+    }
+
+    #[tokio::test]
+    async fn task_creation_publishes_committed_event_to_stream_subscribers() {
+        let (router, mut receiver, server) = test_app_with_events().await;
+        let payload = json!({"title":"Stream event", "task_type":"test", "payload":{}});
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let event = receiver.recv().await.unwrap();
+        assert_eq!(event.event_type, "task_created");
+        assert_eq!(event.sequence, 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn capability_create_is_persisted_disabled_and_listed() {
+        let (router, server) = test_app().await;
+        let payload = json!({
+            "id": "pstack.skill.sample",
+            "name": "Sample skill",
+            "kind": "skill",
+            "description": "Imported for review",
+            "version": "1.0.0",
+            "license": "MIT",
+            "provenance": {
+                "source_name": "Pstack",
+                "source_uri": "https://example.invalid",
+                "source_version": "1.0.0",
+                "source_revision": "abc123",
+                "imported_at": 100
+            },
+            "manifest": {"untrusted": true},
+            "status": "enabled"
+        });
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/capabilities")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let created: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(created["item"]["status"], "disabled");
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let listed: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(listed["count"], 1);
+        assert_eq!(listed["items"][0]["id"], "pstack.skill.sample");
+        assert_eq!(listed["items"][0]["status"], "disabled");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn capability_rejects_invalid_ids_and_missing_provenance() {
+        let (router, server) = test_app().await;
+        let payload = json!({
+            "id": "../unsafe", "name": "Unsafe", "kind": "skill",
+            "provenance": {"source_name": "Pstack", "imported_at": 100}
+        });
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/capabilities")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn task_creation_requires_approval_and_persists_event_history() {
+        let (router, server) = test_app().await;
+        let payload = json!({"title": "Audit workflow", "task_type": "security_audit", "payload": {"target": "local-project"}});
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let created: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(created["item"]["status"], "pending_approval");
+        assert_eq!(created["item"]["approval_required"], true);
+        let id = created["item"]["id"].as_str().unwrap();
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/tasks/{id}/approve"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"approved_by":"operator", "reason":"Reviewed scope"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let approved: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(approved["item"]["status"], "approved");
+        assert_eq!(approved["execution_started"], false);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/tasks/{id}/events"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let events: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(events["count"], 2);
+        assert_eq!(events["items"][0]["event_type"], "task_created");
+        assert_eq!(events["items"][1]["event_type"], "task_approved");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn task_approval_is_single_use_and_cancellation_is_audited() {
+        let (router, server) = test_app().await;
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"title":"Cancel me", "task_type":"manual", "payload":{}})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let created: Value = serde_json::from_slice(&body).unwrap();
+        let id = created["item"]["id"].as_str().unwrap();
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/tasks/{id}/approve"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"approved_by":"operator", "reason":"Reviewed"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/tasks/{id}/approve"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"approved_by":"operator", "reason":"Again"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/tasks/{id}/cancel"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let cancelled: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(cancelled["item"]["status"], "cancelled");
+        assert_eq!(cancelled["execution_started"], false);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn task_creation_rejects_missing_title_or_type() {
+        let (router, server) = test_app().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"title":" ", "task_type":"", "payload":{}}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn gpu_health_route_uses_gateway() {
+        let (router, server) = test_app().await;
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/gpu/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({"status": "ok", "gpu": "on-demand"})
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn gpu_models_route_returns_gateway_models() {
+        let (router, server) = test_app().await;
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/gpu/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(value["object"], "list");
+        assert_eq!(value["data"][0]["id"], "qwen3.8:27b");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn gpu_inference_forwards_sse_and_headers() {
+        let (router, server) = test_app().await;
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/gpu/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "qwen3.8:27b",
+                            "stream": true,
+                            "messages": [{"role": "user", "content": "hello"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "text/event-stream"
+        );
+        assert_eq!(response.headers().get("cache-control").unwrap(), "no-cache");
+        assert_eq!(response.headers().get("x-accel-buffering").unwrap(), "no");
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(text.contains("hello"));
+        assert!(text.contains("[DONE]"));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn gpu_api_rejects_paths_outside_v1() {
+        let (router, server) = test_app().await;
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/gpu/admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        server.abort();
+    }
+
+    #[test]
+    fn database_initializes_registry_schema() {
+        let conn = open_database(":memory:").expect("in-memory database should initialize");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'registry'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("schema query should work");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn api_bind_is_loopback_only_without_authentication() {
+        assert!(validate_bind_address("127.0.0.1:8765".parse().unwrap()).is_ok());
+        assert!(validate_bind_address("[::1]:8765".parse().unwrap()).is_ok());
+        assert!(validate_bind_address("0.0.0.0:8765".parse().unwrap()).is_err());
+        assert!(validate_bind_address("192.168.1.20:8765".parse().unwrap()).is_err());
+    }
+
+    #[tokio::test]
+    async fn registry_round_trips_large_messages_without_truncation() {
+        let (router, server) = test_app().await;
+        for size in [5_000usize, 10_000, 20_000] {
+            let payload = "x".repeat(size);
+            let body = json!({
+                "name": format!("payload-{size}"),
+                "kind": "integrity-test",
+                "metadata": {"payload": payload}
+            })
+            .to_string();
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/registry")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                value["item"]["metadata"]["payload"].as_str(),
+                Some(payload.as_str())
+            );
+        }
+        server.abort();
+    }
+
+    #[test]
+    fn timestamp_is_unix_epoch_seconds() {
+        assert!(now_epoch() > 1_700_000_000);
+    }
+}

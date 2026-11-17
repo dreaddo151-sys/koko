@@ -1,0 +1,12 @@
+# Explicit local agent health probes only. Empty by default until endpoints are verified.
+# Every enabled health_url must be an explicit-port loopback HTTP URL.
+# Discovery performs GET requests only, follows no redirects, and never starts tasks.
+# Example (keep disabled until this exact endpoint is confirmed on the workstation):
+# [[agents]]
+# id = "hermes-local"
+# name = "Hermes local gateway"
+# adapter = "hermes"
+# health_url = "http://127.0.0.1:8642/health"
+# enabled = false
+
+agents = []
