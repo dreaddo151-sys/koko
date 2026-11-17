@@ -26,7 +26,39 @@ async fn chat(State(s):State<Arc<AppState>>,Json(mut q):Json<ChatRequest>)->Resu
  s.store.save_exchange(&conversation,&model,&user,answer,(p,c,t)).map_err(internal)?;
  let mut r=Json(json!({"conversation_id":conversation,"response":body})).into_response();r.headers_mut().insert("x-dread-conversation-id",HeaderValue::from_str(&conversation).unwrap_or_else(|_|HeaderValue::from_static("unavailable")));Ok(r)
 }
-async fn comfy_status(State(s):State<Arc<AppState>>)->Result<Json<Value>,(StatusCode,String)>{let r=s.http.get(format!("{}/system_stats",s.comfy_url)).send().await.map_err(upstream)?;let status=r.status();let body=r.json::<Value>().await.map_err(upstream)?;if !status.is_success(){return Err((StatusCode::BAD_GATEWAY,body.to_string()));}Ok(Json(body))}
+
+#[derive(Deserialize)] struct TokenizeRequest { content:String }
+async fn tokenize_text(s:&AppState,text:&str)->Result<usize,(StatusCode,String)> {
+ let r=s.http.post(format!("{}/tokenize",s.llama_url)).json(&json!({"content":text})).send().await.map_err(upstream)?;
+ if !r.status().is_success(){return Err((StatusCode::BAD_GATEWAY,"llama.cpp tokenizer endpoint failed; no approximate count substituted".into()));}
+ let v=r.json::<Value>().await.map_err(upstream)?;
+ let count=v["tokens"].as_array().map(|a|a.len()).or_else(||v.as_array().map(|a|a.len()))
+  .ok_or_else(||(StatusCode::BAD_GATEWAY,"unexpected llama.cpp /tokenize response".into()))?;
+ Ok(count)
+}
+async fn tokenize(State(s):State<Arc<AppState>>,Json(q):Json<TokenizeRequest>)->Result<Json<Value>,(StatusCode,String)> {
+ let n=tokenize_text(&s,&q.content).await?;Ok(Json(json!({"tokens":n,"tokenizer":"llama.cpp","approximate":false})))
+}
+#[derive(Deserialize)] struct BoostRequest { prompt:String, #[serde(default)] max_tokens:Option<usize> }
+async fn boost_prompt(State(s):State<Arc<AppState>>,Json(q):Json<BoostRequest>)->Result<Json<Value>,(StatusCode,String)> {
+ let original_tokens=tokenize_text(&s,&q.prompt).await?;
+ // Lossless normalization only: preserve wording and order; collapse repeated horizontal
+ // whitespace and excessive blank lines. No semantic deletion or invented instructions.
+ let normalized=q.prompt.lines().map(|line|line.split_whitespace().collect::<Vec<_>>().join(" "))
+  .collect::<Vec<_>>().join("\\n").trim().to_string();
+ let boosted_tokens=tokenize_text(&s,&normalized).await?;
+ let budget=q.max_tokens.unwrap_or(usize::MAX);
+ Ok(Json(json!({"original_prompt":q.prompt,"boosted_prompt":normalized,
+  "original_tokens":original_tokens,"boosted_tokens":boosted_tokens,
+  "tokens_saved":original_tokens.saturating_sub(boosted_tokens),
+  "budget":if budget==usize::MAX {Value::Null}else{json!(budget)},
+  "within_budget":boosted_tokens<=budget,"method":"lossless_whitespace_normalization",
+  "semantic_compression":false,"note":"No content was intentionally removed. This is a safe baseline booster, not semantic compression."})))
+}
+async fn conversation(State(s):State<Arc<AppState>>,Path(id):Path<String>)->Result<Json<Value>,(StatusCode,String)> {
+ s.store.conversation_messages(&id,200).map(Json).map_err(internal)
+}
+\nasync fn comfy_status(State(s):State<Arc<AppState>>)->Result<Json<Value>,(StatusCode,String)>{let r=s.http.get(format!("{}/system_stats",s.comfy_url)).send().await.map_err(upstream)?;let status=r.status();let body=r.json::<Value>().await.map_err(upstream)?;if !status.is_success(){return Err((StatusCode::BAD_GATEWAY,body.to_string()));}Ok(Json(body))}
 async fn usage(State(s):State<Arc<AppState>>)->Result<Json<Value>,(StatusCode,String)>{s.store.usage_totals().map(Json).map_err(internal)}
 #[derive(Deserialize)]struct NewJob{kind:String,#[serde(default)]payload:Value}
 async fn create_job(State(s):State<Arc<AppState>>,Json(j):Json<NewJob>)->Result<Json<Value>,(StatusCode,String)>{if j.kind.trim().is_empty(){return Err((StatusCode::BAD_REQUEST,"kind is required".into()));}let id=s.store.create_job(&j.kind,&j.payload.to_string()).map_err(internal)?;Ok(Json(json!({"id":id,"status":"queued","note":"metadata queued; execution adapters are not enabled"})))}
@@ -34,5 +66,5 @@ async fn jobs(State(s):State<Arc<AppState>>)->Result<Json<Value>,(StatusCode,Str
 async fn cancel_job(State(s):State<Arc<AppState>>,Path(id):Path<i64>)->Result<Json<Value>,(StatusCode,String)>{let cancelled=s.store.cancel_job(id).map_err(internal)?;Ok(Json(json!({"id":id,"cancelled":cancelled})))}
 fn upstream(e:reqwest::Error)->(StatusCode,String){(StatusCode::BAD_GATEWAY,format!("upstream request failed: {e}"))}
 fn internal(e:String)->(StatusCode,String){(StatusCode::INTERNAL_SERVER_ERROR,e)}
-#[tokio::main]async fn main()->anyhow::Result<()>{let bind=env::var("DREAD_BIND").unwrap_or_else(|_|"127.0.0.1:8765".into());let llama=env::var("DREAD_LLAMA_URL").unwrap_or_else(|_|"http://127.0.0.1:11501".into()).trim_end_matches('/').to_string();let comfy=env::var("DREAD_COMFYUI_URL").unwrap_or_else(|_|"http://127.0.0.1:8188".into()).trim_end_matches('/').to_string();let model=env::var("DREAD_MODEL").unwrap_or_else(|_|"qwen3.8:27b".into());let db=env::var("DREAD_DATABASE").unwrap_or_else(|_|"data/dread.sqlite3".into());let state=Arc::new(AppState{http:reqwest::Client::builder().timeout(Duration::from_secs(300)).build()?,llama_url:llama,comfy_url:comfy,model,store:Store::open(&db)?});let app=Router::new().route("/health",get(health)).route("/api/services",get(services)).route("/api/models",get(models)).route("/api/chat",post(chat)).route("/api/comfyui/status",get(comfy_status)).route("/api/usage",get(usage)).route("/api/jobs",get(jobs).post(create_job)).route("/api/jobs/{id}/cancel",post(cancel_job)).with_state(state);let listener=tokio::net::TcpListener::bind(&bind).await?;println!("PROJECT DREAD UNIVERSAL API listening on http://{bind}; inference=llama.cpp");axum::serve(listener,app).await?;Ok(())}
+#[tokio::main]async fn main()->anyhow::Result<()>{let bind=env::var("DREAD_BIND").unwrap_or_else(|_|"127.0.0.1:8765".into());let llama=env::var("DREAD_LLAMA_URL").unwrap_or_else(|_|"http://127.0.0.1:11501".into()).trim_end_matches('/').to_string();let comfy=env::var("DREAD_COMFYUI_URL").unwrap_or_else(|_|"http://127.0.0.1:8188".into()).trim_end_matches('/').to_string();let model=env::var("DREAD_MODEL").unwrap_or_else(|_|"qwen3.8:27b".into());let db=env::var("DREAD_DATABASE").unwrap_or_else(|_|"data/dread.sqlite3".into());let state=Arc::new(AppState{http:reqwest::Client::builder().timeout(Duration::from_secs(300)).build()?,llama_url:llama,comfy_url:comfy,model,store:Store::open(&db)?});let app=Router::new().route("/health",get(health)).route("/api/services",get(services)).route("/api/models",get(models)).route("/api/chat",post(chat)).route("/api/comfyui/status",get(comfy_status)).route("/api/usage",get(usage)).route("/api/tokenize",post(tokenize)).route("/api/prompt/boost",post(boost_prompt)).route("/api/conversations/{id}",get(conversation)).route("/api/jobs",get(jobs).post(create_job)).route("/api/jobs/{id}/cancel",post(cancel_job)).with_state(state);let listener=tokio::net::TcpListener::bind(&bind).await?;println!("PROJECT DREAD UNIVERSAL API listening on http://{bind}; inference=llama.cpp");axum::serve(listener,app).await?;Ok(())}
 #[cfg(test)]mod tests{#[test]fn inference_default_is_llama_cpp(){assert_eq!(std::env::var("DREAD_LLAMA_URL").unwrap_or_else(|_|"http://127.0.0.1:11501".into()),"http://127.0.0.1:11501");}}
