@@ -739,7 +739,7 @@ async fn import_discovered_skills(
             manifest: json!({
                 "source_relative_path": relative_path,
                 "fingerprint": fingerprint,
-                "fingerprint_algorithm": "fnv1a64_non_cryptographic",
+                "fingerprint_algorithm": "sha256",
                 "trust": "untrusted_context",
                 "execution": "never",
                 "approval": null
