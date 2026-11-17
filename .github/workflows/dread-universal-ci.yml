@@ -46,7 +46,10 @@ jobs:
           path: dread_universal/target/release/dread-universal
           if-no-files-found: error
       - name: Validate Ubuntu installer scripts
-        run: bash -n scripts/install-user.sh scripts/configure-user.sh scripts/package-ubuntu.sh
+        run: bash -n scripts/install-user.sh scripts/configure-user.sh scripts/package-ubuntu.sh scripts/test_install_user.sh
+      - name: Test portable install migration and rollback
+        working-directory: dread_universal
+        run: bash scripts/test_install_user.sh
       - name: Python bridge and importer regression tests
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
       - name: Enforce single-owner GPU boundary
