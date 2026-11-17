@@ -8,13 +8,13 @@
 
 The baseline hardened source passed formatting, Clippy with warnings denied, workspace tests and an optimized release build in GitHub Actions run `44002596952`.
 
-The task-lifecycle, read-only agent-discovery and WebSocket event-stream candidate passed the same four gates in GitHub Actions run `44012192907`:
+The task-lifecycle, read-only agent-discovery, WebSocket event-stream and pinned Pstack-import candidate passed the Rust quality gates in GitHub Actions run `44014112205`:
 - `cargo fmt --all -- --check`: PASS
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: PASS
 - `cargo test --workspace --locked`: PASS — 28 tests
 - `cargo build --workspace --release --locked`: PASS
 
-The release archive is produced from the exact uploaded baseline after applying the reviewed source patches. The archive must also pass ZIP integrity and SHA-256 verification. These CI results validate the Rust workspace build and unit tests; they do not constitute end-to-end testing against the user's live workstation services or a browser WebSocket client.
+The release archive is produced from the exact uploaded baseline after applying the reviewed source patches. The archive must also pass ZIP integrity and SHA-256 verification. The same run also passed nine Pstack importer unit tests, fetched the catalog-pinned upstream commit/tree, and completed a dry-run reporting 58 skills and 2 agents. CI validates the source build and tests; it does not constitute end-to-end testing against the user's live workstation services, a browser WebSocket client or the live Rust API importer.
 
 ## Implemented
 
@@ -46,12 +46,19 @@ The release archive is produced from the exact uploaded baseline after applying 
   - Uses a bounded broadcast channel and recovers missed events from SQLite if a subscriber falls behind.
   - CI verifies formatting, Clippy, compilation and a unit test that confirms committed task events reach subscribers. A full browser/client WebSocket handshake and reconnect test remains outstanding.
 
-- Pstack capability-import candidate (CI pending):
+- Pstack capability importer (CI verified in run `44014112205`):
   - The catalog pins Pstack `0.15.43`, commit `2f87c854fe3e2fcda44ca86b46ede35aad3c46b7`, subtree `71d8e1d1d718e2149dc43b2535618064f29cba6b`, MIT; inventory is 58 skills and 2 agents.
   - The bundled `integrations/pstack-upstream` snapshot reports `0.15.42`; it is intentionally not imported as `0.15.43`.
   - `scripts/import-pstack.sh` verifies the pinned commit/tree and manifest before writing a provenance marker with per-file SHA-256 values.
   - `scripts/import_pstack_capabilities.py` defaults to dry-run; `--apply` is required to POST metadata to the explicit-port loopback API. It refuses missing/mismatched markers, changed files, unsafe paths, redirects and existing capabilities not confirmed disabled.
-  - Imported metadata starts disabled. No skills, agents, scripts or hooks are executed. The pinned remote fetch and live API import have not been run in this CI candidate.
+  - CI fetched the pinned remote source and completed a dry-run. Imported metadata starts disabled. No skills, agents, scripts or hooks are executed. The live API `--apply` operation has not been run.
+
+- Bounded execution kernel candidate (CI pending):
+  - New `dread-orchestrator` crate provides a bounded execution gate for explicitly supplied runner functions.
+  - Enforces a maximum number of active runners and a separate cap on admitted work (running plus waiting).
+  - Applies per-attempt timeouts, a configured maximum retry count and watch-channel cancellation; cancellation drops the active runner future and reports the active attempt count.
+  - Unit tests cover concurrency, admission overflow, retry bounds, active cancellation and timeout.
+  - This is an execution primitive only: it has no provider discovery, task database integration, priority scheduler, durable queue, process launcher or provider dispatch. It does not acquire GPU leases or bypass the Python GPU Supervisor.
 
 ## Runtime safety boundaries
 
@@ -73,8 +80,8 @@ The release archive is produced from the exact uploaded baseline after applying 
 5. [x] WebSocket task-event fanout, durable replay cursor and bounded lag recovery (unit/CI verified; client handshake test pending).
 6. [ ] Authentication/authorization before any network exposure or trusted approval identity.
 7. [ ] Provider-specific adapters, enabled only after each local endpoint contract is verified.
-8. [ ] Pstack/Cursor/MCP/OpenAPI/CLI importer, provenance/license/dependency review and disabled-by-default activation.
-9. [ ] React/TypeScript operator UI driven by real API and event state.
-10. [ ] Incremental legacy Python Hub workflow parity, installer/upgrade/rollback, backup/restore tests and dual-RTX-3090 workstation acceptance.
+8. [x] Pstack pinned metadata importer and disabled-by-default dry-run validation (live API import still pending).
+9. [ ] Bounded execution kernel integration with durable task lifecycle, plus priority/resource-aware queue policy.
+10. [ ] React/TypeScript operator UI driven by real API and event state.\n11. [ ] Incremental legacy Python Hub workflow parity, installer/upgrade/rollback, backup/restore tests and dual-RTX-3090 workstation acceptance.
 
 The Python Hub, ComfyUI, Ollama and GPU Supervisor remain separate runtime/reference components. Full Universal Hub parity has not been achieved.
