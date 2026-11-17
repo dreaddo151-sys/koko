@@ -1418,17 +1418,33 @@ fn validate_gpu_chat_payload(payload: &Value) -> Result<(), String> {
         return Err("gpu_chat total message content exceeds 1 MiB".to_string());
     }
     if let Some(skill_ids) = object.get("skill_ids") {
-        let ids = skill_ids.as_array()
+        let ids = skill_ids
+            .as_array()
             .filter(|ids| ids.len() <= 8)
-            .ok_or_else(|| "skill_ids must be an array of at most 8 enabled skill ids".to_string())?;
+            .ok_or_else(|| {
+                "skill_ids must be an array of at most 8 enabled skill or agent context ids"
+                    .to_string()
+            })?;
         for id in ids {
-            let id = id.as_str().ok_or_else(|| "each skill id must be a string".to_string())?;
+            let id = id
+                .as_str()
+                .ok_or_else(|| "each context id must be a string".to_string())?;
             let suffix = id
                 .strip_prefix("pstack.skill.")
                 .or_else(|| id.strip_prefix("pstack.agent."))
-                .ok_or_else(|| "context ids must use pstack.skill.<name> or pstack.agent.<name>".to_string())?;
-            if suffix.is_empty() || suffix.len() > 120 || !suffix.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_') {
-                return Err("skill id contains invalid characters".into());
+                .ok_or_else(|| {
+                    "context ids must use pstack.skill.<name> or pstack.agent.<name>".to_string()
+                })?;
+            if suffix.is_empty()
+                || suffix.len() > 120
+                || !suffix.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || byte == b'-'
+                        || byte == b'_'
+                })
+            {
+                return Err("context id contains invalid characters".into());
             }
         }
     }
@@ -2028,7 +2044,9 @@ async fn gpu_inference(
     }
     validate_gpu_chat_payload(&payload).map_err(ApiError::bad_request)?;
     if payload.get("skill_ids").is_some() {
-        return Err(ApiError::bad_request("Skill context is available only through an approved gpu_chat task"));
+        return Err(ApiError::bad_request(
+            "Skill context is available only through an approved gpu_chat task",
+        ));
     }
     let supervisor = state.supervisor.as_ref().ok_or_else(|| ApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
@@ -2119,11 +2137,26 @@ fn app(state: AppState) -> Router {
             "/api/capabilities",
             get(list_capabilities).post(create_capability),
         )
-        .route("/api/capabilities/discover", get(discover_pstack_skills))
-        .route("/api/capabilities/import", axum::routing::post(import_discovered_skills))
-        .route("/api/capabilities/{id}/preview", get(preview_capability))
-        .route("/api/capabilities/{id}/enable", axum::routing::post(enable_capability))
-        .route("/api/capabilities/{id}/disable", axum::routing::post(disable_capability))
+        .route(
+            "/api/capabilities/discover",
+            get(discover_pstack_skills),
+        )
+        .route(
+            "/api/capabilities/import",
+            axum::routing::post(import_discovered_skills),
+        )
+        .route(
+            "/api/capabilities/{id}/preview",
+            get(preview_capability),
+        )
+        .route(
+            "/api/capabilities/{id}/enable",
+            axum::routing::post(enable_capability),
+        )
+        .route(
+            "/api/capabilities/{id}/disable",
+            axum::routing::post(disable_capability),
+        )
         .route("/api/capabilities/{id}", get(get_capability))
         .route("/api/registry", get(list_registry).post(create_registry))
         .route(
@@ -2377,7 +2410,7 @@ mod tests {
         let valid = json!({
             "model": "qwen3.8:27b",
             "messages": [{"role": "user", "content": "Use the reviewed skill"}],
-            "skill_ids": ["pstack.skill.architect", "pstack.skill.correct"]
+            "skill_ids": ["pstack.skill.architect", "pstack.skill.correct", "pstack.agent.poteto-agent"]
         });
         assert!(validate_gpu_chat_payload(&valid).is_ok());
 
