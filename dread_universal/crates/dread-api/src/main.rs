@@ -13,6 +13,7 @@ use dread_agents::{CapabilityKind, CapabilityProvenance, CapabilityRecord, Capab
 use dread_discovery::{discover, discover_agents, load_agents, load_services};
 use dread_gpu::{GpuGatewayClient, GpuSupervisorClient};
 use dread_orchestrator::{ExecutionConfig, ExecutionError, ExecutionGate};
+use dread_platform::detect_host;
 use dread_skills::{
     discover_agent_profiles, discover_skills, load_agent_profile_context, load_skill_context,
 };
@@ -258,6 +259,10 @@ fn db_lock(state: &AppState) -> Result<std::sync::MutexGuard<'_, Connection>, Ap
         .db
         .lock()
         .map_err(|_| ApiError::internal("Database lock is unavailable"))
+}
+
+async fn system_profile() -> Json<dread_platform::HostProfile> {
+    Json(detect_host())
 }
 
 async fn health() -> Json<Value> {
@@ -2135,6 +2140,7 @@ async fn require_api_token(
 
 fn app(state: AppState) -> Router {
     let protected = Router::new()
+        .route("/api/system/profile", get(system_profile))
         .route("/api/gpu/health", get(gpu_health))
         .route("/api/gpu/models", get(gpu_models))
         .route("/api/tasks", get(list_tasks).post(create_task))
