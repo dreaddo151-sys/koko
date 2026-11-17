@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, ensure};
 use reqwest::Url;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::time::Duration;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
