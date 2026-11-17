@@ -31,7 +31,7 @@ function Pill({value}:{value:string}) {
 }
 function App() {
   const [token,setToken]=useState(""); const [draft,setDraft]=useState(""); const [show,setShow]=useState(false);
-  const [connected,setConnected]=useState(false); const [supervisorConfigured,setSupervisorConfigured]=useState(false); const [error,setError]=useState(""); const [busy,setBusy]=useState(false);
+  const [connected,setConnected]=useState(false); const [supervisorOnline,setSupervisorConfigured]=useState(false); const [error,setError]=useState(""); const [busy,setBusy]=useState(false);
   const [models,setModels]=useState<Model[]>([]); const [model,setModel]=useState("");
   const [tasks,setTasks]=useState<Task[]>([]); const [agents,setAgents]=useState<Agent[]>([]);
   const [prompt,setPrompt]=useState(""); const [active,setActive]=useState("");
@@ -42,10 +42,10 @@ function App() {
     if(!token){setConnected(false);return;}
     try{
       const [health,gpuHealth,ml,tl,al]=await Promise.all([
-        api<{status:string}>("/health",""), api<{supervisor_configured?:boolean}>("/api/gpu/health",token), api<{data?:Model[]}>("/api/gpu/models",token),
+        api<{status:string}>("/health",""), api<{supervisor_online?:boolean}>("/api/gpu/health",token), api<{data?:Model[]}>("/api/gpu/models",token),
         api<{items?:Task[]}>("/api/tasks",token), api<{items?:Agent[]}>("/api/agents",token)
       ]);
-      setConnected(health.status==="ok"); setSupervisorConfigured(Boolean(gpuHealth.supervisor_configured)); setModels(ml.data??[]); setTasks(tl.items??[]); setAgents(al.items??[]); setError("");
+      setConnected(health.status==="ok"); setSupervisorConfigured(Boolean(gpuHealth.supervisor_online)); setModels(ml.data??[]); setTasks(tl.items??[]); setAgents(al.items??[]); setError("");
     }catch(e){setConnected(false);setError(e instanceof Error?e.message:"API request failed");}
   },[token]);
   useEffect(()=>{void refresh();if(!token)return;const t=window.setInterval(()=>void refresh(),5000);return()=>window.clearInterval(t);},[refresh,token]);
@@ -70,7 +70,7 @@ function App() {
   }),[tasks]);
   const connect=()=>{if(!draft.trim()){setError("Enter DREAD_API_TOKEN.");return;}setToken(draft.trim());setDraft("");};
   const create=async(type:"gpu_chat"|"service_discovery")=>{
-    if(!token)return;if(type==="gpu_chat"&&!supervisorConfigured){setError("GPU inference is locked until the Python GPU Supervisor bridge is configured.");return;}if(type==="gpu_chat"&&(!model||!prompt.trim())){setError("Select a model and enter a prompt.");return;}
+    if(!token)return;if(type==="gpu_chat"&&!supervisorOnline){setError("GPU inference is locked until the Python GPU Supervisor bridge is online and authenticated.");return;}if(type==="gpu_chat"&&(!model||!prompt.trim())){setError("Select a model and enter a prompt.");return;}
     setBusy(true);setError("");
     try{
       const payload=type==="gpu_chat"?{model,messages:[{role:"user",content:prompt.trim()}],max_tokens:1024}:{};
@@ -101,7 +101,7 @@ function App() {
         {!token&&<div className="connect"><LockKeyhole size={21}/><div><b>Unlock local control plane</b><small>API token stays in page memory; it is never written to browser storage.</small></div><div className="token"><KeyRound size={15}/><input type={show?"text":"password"} value={draft} onChange={e=>setDraft(e.target.value)} onKeyDown={e=>e.key==="Enter"&&connect()} placeholder="DREAD_API_TOKEN"/><button className="icon" onClick={()=>setShow(!show)}><Search size={14}/></button><button className="primary" onClick={connect}>Connect</button></div></div>}
         {error&&<div className="error"><AlertCircle size={16}/>{error}<button onClick={()=>setError("")}><X size={14}/></button></div>}
         <div className="metrics">
-          <Metric icon={<Cpu/>} label="GPU supervisor" value={supervisorConfigured?"Ready":"Locked"} detail="Python lease bridge · 127.0.0.1:11502"/>
+          <Metric icon={<Cpu/>} label="GPU supervisor" value={supervisorOnline?"Ready":"Locked"} detail="Python lease bridge · 127.0.0.1:11502"/>
           <Metric icon={<Activity/>} label="Active tasks" value={String(stats.active)} detail={`${stats.pending} awaiting approval`}/>
           <Metric icon={<MessageSquare/>} label="Available models" value={String(models.length)} detail="Discovered from local gateway"/>
           <Metric icon={<Server/>} label="Configured agents" value={String(agents.length)} detail={`${stats.done} completed tasks`}/>
@@ -110,8 +110,8 @@ function App() {
           <section className="panel compose"><PanelTitle icon={<MessageSquare/>} title="New local inference" meta="APPROVAL-GATED"/>
             <label>MODEL ROUTE</label><select value={model} onChange={e=>setModel(e.target.value)} disabled={!token||!models.length}><option value="">Connect to discover models</option>{models.map(x=><option key={x.id}>{x.id}</option>)}</select>
             <label>PROMPT</label><textarea rows={5} value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder="Ask your local model to reason, write, analyze or help..." disabled={!token}/>
-            <div className="compose-foot"><small>Text-only · non-streaming · result capped at 1 MiB</small><button className="primary" disabled={!token||!supervisorConfigured||busy||!model||!prompt.trim()} onClick={()=>void create("gpu_chat")}><Plus size={14}/>Create task</button></div>
-            <div className="approval"><ShieldCheck size={14}/>{supervisorConfigured?"Creating a task does not execute inference. Approve it first.":"GPU inference is locked until the Python Supervisor bridge is configured and authenticated."}</div>
+            <div className="compose-foot"><small>Text-only · non-streaming · result capped at 1 MiB</small><button className="primary" disabled={!token||!supervisorOnline||busy||!model||!prompt.trim()} onClick={()=>void create("gpu_chat")}><Plus size={14}/>Create task</button></div>
+            <div className="approval"><ShieldCheck size={14}/>{supervisorOnline?"Creating a task does not execute inference. Approve it first.":"GPU inference is locked until the Python Supervisor bridge is online and authenticated."}</div>
           </section>
           <section className="panel"><PanelTitle icon={<Activity/>} title="Task queue" meta="5 SEC POLL"/><TaskList tasks={tasks.slice(0,6)} active={active} select={setActive} action={action} busy={busy}/><button className="link" onClick={()=>setPage("tasks")}>Open all tasks <ChevronRight size={14}/></button></section>
           <section className="panel"><PanelTitle icon={<Bot/>} title="Agent health" meta="READ-ONLY PROBES"/>{agents.length?agents.map(x=><div className="row" key={x.id}><div><b>{x.name}</b><small>{x.adapter??x.id}</small></div><Pill value={x.status}/></div>):<Empty text="No agent health endpoints configured."/>}</section>

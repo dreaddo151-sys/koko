@@ -1461,7 +1461,12 @@ async fn gpu_health(State(state): State<AppState>) -> Result<Json<Value>, ApiErr
     })?;
 
     let mut value = serde_json::to_value(health).map_err(|e| ApiError::internal(e.to_string()))?;
+    let supervisor_online = match state.supervisor.as_ref() {
+        Some(supervisor) => supervisor.is_online().await.unwrap_or(false),
+        None => false,
+    };
     value["supervisor_configured"] = json!(state.supervisor.is_some());
+    value["supervisor_online"] = json!(supervisor_online);
     Ok(Json(value))
 }
 
@@ -1706,7 +1711,7 @@ mod tests {
     }
 
     async fn mock_health() -> Json<Value> {
-        Json(json!({"status": "ok", "gpu": "on-demand", "supervisor_configured": true}))
+        Json(json!({"status": "ok", "gpu": "on-demand", "supervisor": "configured"}))
     }
 
     async fn mock_models() -> Json<Value> {
@@ -2705,7 +2710,7 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         assert_eq!(
             serde_json::from_slice::<Value>(&body).unwrap(),
-            json!({"status": "ok", "gpu": "on-demand", "supervisor_configured": true})
+            json!({"status": "ok", "gpu": "on-demand", "supervisor_configured": true, "supervisor_online": true})
         );
 
         server.abort();

@@ -42,6 +42,38 @@ impl GpuSupervisorClient {
         })
     }
 
+    pub async fn is_online(&self) -> Result<bool> {
+        let mut response = self
+            .http
+            .get(format!("{}/health", self.base_url))
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .context("GPU Supervisor bridge health request failed")?;
+        if !response.status().is_success()
+            || response
+                .content_length()
+                .is_some_and(|length| length > 16_384)
+        {
+            return Ok(false);
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .context("Could not read GPU Supervisor bridge health response")?
+        {
+            if body.len().saturating_add(chunk.len()) > 16_384 {
+                return Ok(false);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let health: Value = serde_json::from_slice(&body)
+            .context("GPU Supervisor bridge returned invalid health JSON")?;
+        Ok(health.get("status").and_then(Value::as_str) == Some("ok")
+            && health.get("supervisor").and_then(Value::as_str) == Some("configured"))
+    }
+
     // The Python bridge owns the GPU lease. Rust only submits authenticated work.
     pub async fn chat_completion(&self, payload: &Value) -> Result<Value> {
         let body = serde_json::to_vec(payload).context("Could not encode GPU chat payload")?;
@@ -115,7 +147,14 @@ mod tests {
 
     #[tokio::test]
     async fn bridge_client_sends_authenticated_chat_without_lease_endpoints() {
-        let app = Router::new().route("/v1/chat/completions", post(completion));
+        let app = Router::new()
+            .route(
+                "/health",
+                axum::routing::get(|| async {
+                    Json(json!({"status": "ok", "supervisor": "configured"}))
+                }),
+            )
+            .route("/v1/chat/completions", post(completion));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -135,6 +174,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["received"]["model"], "qwen3.8:27b");
+        assert!(client.is_online().await.unwrap());
         server.abort();
     }
 
