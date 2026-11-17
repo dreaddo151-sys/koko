@@ -80,7 +80,8 @@ impl HermesApiAdapter {
                 false,
             ));
         }
-        url.set_path(url.path().trim_end_matches('/'));
+        let normalized_path = url.path().trim_end_matches('/').to_string();
+        url.set_path(&normalized_path);
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
