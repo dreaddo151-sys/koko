@@ -107,8 +107,15 @@ BUNDLE2="$(make_bundle v2)"
 run_installer "$BUNDLE2"
 [[ "$("$PREFIX/bin/dread-universal")" == v2 ]]
 [[ "$(cat "$STATE")" == active ]]
-grep -q 'keep-backup-marker' "$PREFIX".backup.*/previous-release-marker
+backup_marker="$(find "$HOME/.local/opt" -maxdepth 2 -type f -name previous-release-marker -print -quit)"
+if [[ -z "$backup_marker" ]]; then
+  printf 'Prior application backup did not retain the marker file. Backup directories:\n' >&2
+  find "$HOME/.local/opt" -maxdepth 2 -type d -name 'dread-universal.backup.*' -print >&2
+  exit 1
+fi
+grep -q 'keep-backup-marker' "$backup_marker"
 
+printf 'Portable update backup preserved the prior application tree.\n'
 BUNDLE3="$(make_bundle v3)"
 if HOME="$HOME" DREAD_INSTALL_DIR="$PREFIX" MOCK_SYSTEMD_STATE="$STATE" MOCK_FAIL_HEALTH=1 PATH="$MOCK_BIN:$PATH" bash "$BUNDLE3/install-user.sh" >/dev/null 2>&1; then
   printf 'Expected the forced health-check failure to trigger rollback.\n' >&2
