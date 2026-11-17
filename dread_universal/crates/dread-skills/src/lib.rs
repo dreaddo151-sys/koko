@@ -195,7 +195,11 @@ pub fn discover_agent_profiles(root: impl AsRef<Path>) -> Result<Vec<AgentProfil
     let root = root.as_ref().canonicalize()
         .map_err(|e| SkillError::InvalidRoot(e.to_string()))?;
     let agents = root.join("agents");
-    let agents_meta = fs::symlink_metadata(&agents).map_err(|_| SkillError::MissingSkillsDirectory)?;
+    let agents_meta = match fs::symlink_metadata(&agents) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(SkillError::Io(error.to_string())),
+    };
     if !agents_meta.is_dir() || agents_meta.file_type().is_symlink() {
         return Err(SkillError::MissingSkillsDirectory);
     }
