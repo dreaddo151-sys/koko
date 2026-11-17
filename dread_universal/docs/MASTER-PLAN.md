@@ -334,3 +334,23 @@ This addendum restores previously completed Ubuntu workstation evidence that mus
 ## Mission planning API status — 2026-11-18
 
 The Rust API now exposes persistent mission planning: authenticated `POST /api/missions` validates and stores a bounded dependency graph and deterministic priority-aware order; `GET /api/missions/{id}` retrieves it. Plans remain `planned` and are never auto-executed. This closes the plan-validation/persistence API gap only. Mission DAG execution, task dependency propagation, aggregation, retries, cancellation across a mission, provider delegation and resource-aware scheduling remain incomplete and must not be marked accepted until implemented and tested.
+
+
+## Acceptance evidence refresh — 2026-11-18, run #343
+
+The current candidate at `924cda887479741b67168f20524863b84e29bf49` passed GitHub Actions run #343 (`44184194589`) across all three jobs: Rust / Ubuntu 24.04, Web console / Ubuntu 24.04, and Ubuntu packages / smoke test. This includes formatting, strict Clippy, Rust tests, release build, installer syntax, portable migration/rollback tests, Python bridge/importer regression tests, GPU single-owner static guard, locked npm install and production build, package checksum/archive validation, disposable Ubuntu 24.04 `.deb` installation, API health, production UI, unauthenticated 401, and authenticated host-profile access. The mission planning API tests were included in the Rust workspace suite.
+
+This supersedes any earlier statement that run #343 was pending. It does **not** change the acceptance verdict for live workstation deployment or product-level gates. The implementation remains partial in these areas:
+
+- Mission DAG execution, dependency-aware task dispatch/aggregation/retry/cancel, resource scheduling and agent delegation.
+- Real Hermes/OpenHands/DeerFlow adapters; health probes and Pstack prompt profiles are not task execution.
+- Python Master Hub parity and safe live integration/rollback.
+- Complete hardware/storage/CUDA/model/tool inventory.
+- Signed provenance and transactional Pstack install/update/remove with atomic activation/rollback.
+- Current-candidate live Supervisor/llama.cpp integration regression and dual-GPU concurrency acceptance.
+- ComfyUI image, MiniMax H3 playable MP4, FlashVSR output, progress/cancel/download and resource coordination.
+- Complete PASS/DENY/ASK permission model, sandboxing, repair simulation/postconditions and recovery drills.
+- Signed updater and failed-upgrade rollback.
+- Clean Ubuntu 24.04 workstation install/upgrade/reboot, preservation baseline and service/data rollback acceptance.
+
+**Release verdict remains BLOCKED / NOT ACCEPTED.** The CI pipeline is green, but the remaining gates require additional implementation and/or direct evidence on the Ubuntu workstation. Do not merge or install the candidate on the strength of CI alone. Preserve the legacy Hub, ComfyUI and Python GPU Supervisor; do not create a second GPU lifecycle owner.
