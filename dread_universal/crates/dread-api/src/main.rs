@@ -3571,6 +3571,39 @@ mod tests {
     }
 
     #[test]
+    fn production_static_assets_are_served_safely() {
+        let root = std::env::temp_dir().join(format!("dread-web-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("assets")).unwrap();
+        fs::write(root.join("index.html"), "<!doctype html><title>DREAD</title>").unwrap();
+        fs::write(root.join("assets/app.js"), "console.log('dread')").unwrap();
+
+        let (content_type, index) = read_static_asset(&root, "/").unwrap();
+        assert_eq!(content_type, "text/html; charset=utf-8");
+        assert!(String::from_utf8(index).unwrap().contains("DREAD"));
+
+        let (content_type, script) = read_static_asset(&root, "/assets/app.js").unwrap();
+        assert_eq!(content_type, "text/javascript; charset=utf-8");
+        assert!(String::from_utf8(script).unwrap().contains("console.log"));
+
+        assert_eq!(read_static_asset(&root, "/../outside.txt"), Err(StatusCode::NOT_FOUND));
+        assert_eq!(read_static_asset(&root, "/api/tasks"), Err(StatusCode::NOT_FOUND));
+
+        #[cfg(unix)]
+        {
+            let outside = root.with_extension("outside");
+            fs::write(&outside, "not inside web root").unwrap();
+            std::os::unix::fs::symlink(&outside, root.join("assets/escape.js")).unwrap();
+            assert_eq!(
+                read_static_asset(&root, "/assets/escape.js"),
+                Err(StatusCode::NOT_FOUND)
+            );
+            fs::remove_file(outside).unwrap();
+        }
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn timestamp_is_unix_epoch_seconds() {
         assert!(now_epoch() > 1_700_000_000);
     }
