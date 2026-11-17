@@ -131,6 +131,17 @@ jobs:
           cargo fmt --all
           cargo check --workspace
 
+      - name: Apply bounded orchestration kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/bounded-orchestrator.patch"
+          grep -q 'name = "dread-orchestrator"' crates/dread-orchestrator/Cargo.toml
+          grep -q 'max_admitted' crates/dread-orchestrator/src/lib.rs
+          cargo fmt --all
+          cargo check --workspace
+
       - name: Verify formatting
         run: cargo fmt --all -- --check
         working-directory: ${{ env.WORKSPACE }}
