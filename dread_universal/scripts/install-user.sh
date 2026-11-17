@@ -34,28 +34,57 @@ for required in bin/dread-universal web/dist/index.html config/services.toml con
 done
 
 install -d -m 0700 "$CONFIG_DIR" "$DATA_DIR/data" "$UNIT_DIR"
+
+# Migrate legacy app-local config and SQLite data without overwriting newer user data.
+if [[ -d "$PREFIX/config" ]]; then
+  for name in services.toml agents.toml; do
+    if [[ ! -e "$CONFIG_DIR/$name" && -f "$PREFIX/config/$name" ]]; then
+      install -m 0600 "$PREFIX/config/$name" "$CONFIG_DIR/$name"
+    fi
+  done
+fi
 for name in services.toml agents.toml; do
   if [[ ! -e "$CONFIG_DIR/$name" ]]; then
     install -m 0600 "$BUNDLE_DIR/config/$name" "$CONFIG_DIR/$name"
   fi
 done
+if [[ -d "$PREFIX/data" ]]; then
+  cp -a -n "$PREFIX/data/." "$DATA_DIR/data/"
+fi
+
+# Preserve known runtime credentials/settings from a prior local .env, never copy unrelated variables.
 if [[ ! -e "$ENV_FILE" ]]; then
   umask 077
-  {
-    printf 'DREAD_API_TOKEN=%s\n' "$(openssl rand -hex 32)"
-    printf 'DREAD_OPERATOR_ID=local-operator\n'
-  } > "$ENV_FILE"
+  : > "$ENV_FILE"
+  if [[ -f "$PREFIX/.env" ]]; then
+    grep -E '^(DREAD_API_TOKEN|DREAD_OPERATOR_ID|DREAD_BIND|DREAD_DB_PATH|DREAD_WEB_ROOT|DREAD_SERVICES_CONFIG|DREAD_AGENTS_CONFIG|DREAD_GPU_GATEWAY_URL|DREAD_GPU_SUPERVISOR_URL|DREAD_GPU_SUPERVISOR_TOKEN|DREAD_SKILLS_ROOT|DREAD_PSTACK_VERSION|DREAD_PSTACK_REVISION)=' "$PREFIX/.env" >> "$ENV_FILE" || true
+  fi
+fi
+if ! grep -q '^DREAD_API_TOKEN=' "$ENV_FILE"; then
+  printf 'DREAD_API_TOKEN=%s\n' "$(openssl rand -hex 32)" >> "$ENV_FILE"
+fi
+if ! grep -q '^DREAD_OPERATOR_ID=' "$ENV_FILE"; then
+  printf 'DREAD_OPERATOR_ID=local-operator\n' >> "$ENV_FILE"
 fi
 chmod 0600 "$ENV_FILE"
 
 install -d -m 0700 "$(dirname -- "$PREFIX")"
 STAGE="$(mktemp -d "${PREFIX}.stage.XXXXXX")"
 cleanup() {
-  [[ -n "${STAGE:-}" && -d "$STAGE" ]] && rm -rf -- "$STAGE"
+  if [[ -n "${STAGE:-}" && -d "$STAGE" ]]; then
+    rm -rf -- "$STAGE"
+  fi
 }
 trap cleanup EXIT
 cp -a "$BUNDLE_DIR/bin" "$BUNDLE_DIR/web" "$BUNDLE_DIR/scripts" "$BUNDLE_DIR/docs" "$STAGE/"
 cp -a "$BUNDLE_DIR/config" "$STAGE/"
+if [[ -d "$PREFIX/config" ]]; then
+  cp -a "$PREFIX/config/." "$STAGE/config/"
+fi
+if [[ -d "$PREFIX/data" ]]; then
+  mkdir -p "$STAGE/data"
+  cp -a -n "$PREFIX/data/." "$STAGE/data/"
+fi
 
 was_active=false
 if systemctl --user is-active --quiet "$SERVICE"; then
