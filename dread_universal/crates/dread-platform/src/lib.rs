@@ -67,13 +67,18 @@ pub struct HostProfile {
     pub kernel_release: Option<String>,
     pub cpu_model: Option<String>,
     pub cpu_physical_cores: Option<usize>,
-    /// CUDA compatibility level advertised by the installed NVIDIA driver.\n    pub cuda_version: Option<String>,\n    /// CUDA Toolkit compiler version discovered from nvcc, when installed.\n    pub cuda_toolkit_version: Option<String>,
+    /// CUDA compatibility level advertised by the installed NVIDIA driver.
+    pub cuda_version: Option<String>,
+    /// CUDA Toolkit compiler version discovered from nvcc, when installed.
+    pub cuda_toolkit_version: Option<String>,
     pub cpu_threads: usize,
     pub memory_total_mib: Option<u64>,
     pub memory_available_mib: Option<u64>,
     pub root_disk_total_mib: Option<u64>,
     pub root_disk_available_mib: Option<u64>,
-    pub storage_devices: Vec<StorageDevice>,\n    /// Physical whole-disk inventory, including disks without mounted filesystems.\n    pub physical_storage_devices: Vec<PhysicalStorageDevice>,
+    pub storage_devices: Vec<StorageDevice>,
+    /// Physical whole-disk inventory, including disks without mounted filesystems.
+    pub physical_storage_devices: Vec<PhysicalStorageDevice>,
     pub gpu_devices: Vec<GpuDevice>,
     pub llama_server: Option<String>,
     pub nvidia_smi_available: bool,
@@ -638,7 +643,9 @@ pub fn detect_host() -> HostProfile {
     let (root_disk_total_mib, root_disk_available_mib) = root_disk_capacity_mib();
     let storage_devices = mounted_storage_devices();
     let cpu_physical_cores = cpu_physical_cores(&cpuinfo);
-    let cuda_version = nvidia.as_deref().and_then(nvidia_cuda_version);\n    let cuda_toolkit_version = cuda_toolkit_version();\n    let physical_storage_devices = physical_storage_devices();
+    let cuda_version = nvidia.as_deref().and_then(nvidia_cuda_version);
+    let cuda_toolkit_version = cuda_toolkit_version();
+    let physical_storage_devices = physical_storage_devices();
 
     HostProfile {
         os: env::consts::OS.into(),
@@ -651,7 +658,8 @@ pub fn detect_host() -> HostProfile {
             .filter(|value| !value.is_empty()),
         cpu_model: cpu_model(&cpuinfo),
         cpu_physical_cores,
-        cuda_version,\n        cuda_toolkit_version,
+        cuda_version,
+        cuda_toolkit_version,
         cpu_threads: std::thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1),
@@ -659,7 +667,8 @@ pub fn detect_host() -> HostProfile {
         memory_available_mib: memory_info_mib(&meminfo, "MemAvailable"),
         root_disk_total_mib,
         root_disk_available_mib,
-        storage_devices,\n        physical_storage_devices,
+        storage_devices,
+        physical_storage_devices,
         gpu_devices,
         llama_server: llama_server_path(),
         nvidia_smi_available: nvidia.is_some(),
