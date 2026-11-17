@@ -354,3 +354,27 @@ This supersedes any earlier statement that run #343 was pending. It does **not**
 - Clean Ubuntu 24.04 workstation install/upgrade/reboot, preservation baseline and service/data rollback acceptance.
 
 **Release verdict remains BLOCKED / NOT ACCEPTED.** The CI pipeline is green, but the remaining gates require additional implementation and/or direct evidence on the Ubuntu workstation. Do not merge or install the candidate on the strength of CI alone. Preserve the legacy Hub, ComfyUI and Python GPU Supervisor; do not create a second GPU lifecycle owner.
+
+
+## Candidate acceptance refresh — 2026-11-18, PR run #359
+
+Latest code candidate `482a1bc1526a64160e2047600cea2c3214365512` passed GitHub Actions PR run #359 (`44186835645`) across all three jobs: Rust / Ubuntu 24.04, Web console / Ubuntu 24.04, and Ubuntu packages / smoke test. The installer now restores the prior app, credentials and systemd unit on failed upgrade, and cleans up a newly enabled unit on failed first install; both paths are regression-tested. The console now renders the host GPU telemetry that the API already exposes and reports Supervisor lease availability independently. The passing pipeline includes formatting, strict Clippy, Rust tests, release build, installer syntax, portable migration/rollback tests, Python bridge/importer tests, GPU single-owner guard, TypeScript type-check/Vite build, package checksum/content validation and disposable Ubuntu 24.04 `.deb` installation/API/UI/auth smoke tests.
+
+### Updated phase ledger (acceptance, not code-presence)
+
+| Phase | Status after run #359 | Remaining acceptance |
+|---|---|---|
+| 0 — Baseline and preservation | Historical workstation evidence documented; read-only baseline tool packaged | Fresh current-candidate baseline on the physical Ubuntu workstation, including exact unit/port/process/model/output inventory and backup verification |
+| 1 — Rust foundation and Hub continuity | Rust API, auth, persistence and packaging CI pass | Legacy `dread_web_hub.py` source is not in this repository; no live Hub integration/parity, handoff or rollback evidence |
+| 2 — Durable registry and discovery | Loopback service/agent probes, model discovery, host RAM/CPU thread/root-disk and NVIDIA telemetry; UI displays actual GPU readings | Full CPU topology, all mounted/physical storage, CUDA/runtime/model/tool inventory and durable provenance/health reconciliation |
+| 3 — Task kernel and mission orchestration | Task state/approval/events/cancel/recovery baseline; authenticated mission graph planning and persistence with cycle/dependency validation | DAG execution, dependency-aware dispatch, priority/resource admission, aggregation, retry/cancel semantics and delegation |
+| 4 — Real agent adapters | OpenHands/LangGraph health probes only | Verified Hermes/OpenHands/DeerFlow start/status/events/cancel/result adapters, sandbox contract, timeouts and recovery |
+| 5 — Extension manager | Pstack discover/import/preview/enable/disable, SHA-256 fingerprint check, untrusted Markdown-only context | Pinned source provenance, signed manifests, transactional install/update/remove, atomic activation, compatibility/permission UI and rollback |
+| 6 — llama.cpp/GPU integration | Supervisor-routed inference bridge; historical dual-3090 inference evidence; current CI single-owner guard | Current-candidate live inference regression and concurrent chat + ComfyUI + video lease contention test on the workstation |
+| 7 — Media parity | ComfyUI endpoint and H3 assets documented historically | Integrated image pipeline artifact, playable MiniMax H3 MP4, FlashVSR output, progress/cancel/download and concurrent GPU ownership |
+| 8 — Security and self-repair | Bearer auth, loopback-only boundaries, task approval gate, bounded inputs, untrusted Pstack context and audit events | Full PASS/DENY/ASK policy, caller/approval identity, sandbox isolation, repair simulation/postconditions, backups and live recovery drills |
+| 9 — Unified interface | React console production build and API-backed overview/tasks/agents/capabilities/models/GPU pages | Python Hub parity, sessions/checkpoints/history, live event/tool activity, media outputs and live browser acceptance |
+| 10 — Ubuntu install/updater | `.deb` and portable package CI smoke tests; migration and rollback regression tests now include credentials/unit/first-install cleanup | Signed manifest/provenance verification, atomic updater, upgrade/reboot/preservation and rollback on the physical workstation |
+| 11 — Release acceptance | Current CI fully green | All remaining phases above, dual-3090 workstation report, SBOM/license inventory, recovery instructions and verified release artifacts |
+
+**Release remains BLOCKED / NOT ACCEPTED.** CI run #359 is green, but it is not live workstation acceptance. Do not merge or install this candidate on CI evidence alone. The current tool connection exposes GitHub and documentation actions but no SSH/terminal session to the Ubuntu workstation; therefore this run did not touch the user's services or files. Preserve the existing Python Hub, ComfyUI and Python GPU Supervisor until a controlled live acceptance window is available.
