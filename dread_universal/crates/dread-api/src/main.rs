@@ -1,3 +1,4 @@
+#[cfg(test)]
 use axum::body::Body;
 use axum::{
     Json, Router,
@@ -14,7 +15,6 @@ use dread_agents::{CapabilityKind, CapabilityProvenance, CapabilityRecord, Capab
 use dread_discovery::{discover, discover_agents, load_agents, load_services};
 use dread_gpu::{GpuGatewayClient, GpuSupervisorClient};
 use dread_orchestrator::{ExecutionConfig, ExecutionError, ExecutionGate};
-use futures::StreamExt;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1030,10 +1030,10 @@ fn validate_gpu_chat_payload(payload: &Value) -> Result<(), String> {
     if total_content_bytes > 1_048_576 {
         return Err("gpu_chat total message content exceeds 1 MiB".to_string());
     }
-    if let Some(stream) = object.get("stream") {
-        if stream.as_bool() != Some(false) {
-            return Err("gpu_chat supports non-streaming inference only".to_string());
-        }
+    if let Some(stream) = object.get("stream")
+        && stream.as_bool() != Some(false)
+    {
+        return Err("gpu_chat supports non-streaming inference only".to_string());
     }
     if let Some(temperature) = object.get("temperature") {
         temperature
@@ -2582,8 +2582,14 @@ mod tests {
             axum::serve(listener, mock).await.unwrap();
         });
         let gpu = GpuGatewayClient::new(format!("http://{address}")).unwrap();
+        let supervisor = GpuSupervisorClient::new(
+            format!("http://{address}"),
+            "test-supervisor-token-that-is-long-enough",
+        )
+        .unwrap();
         let error = execute_gpu_chat(
             &gpu,
+            &supervisor,
             &json!({
                 "model": "not-allowed",
                 "messages": [{"role": "user", "content": "hello"}]
