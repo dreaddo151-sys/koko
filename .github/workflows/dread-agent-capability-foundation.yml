@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: dread-task-approval-foundation
+  group: dread-agent-readonly-discovery
   cancel-in-progress: true
 
 jobs:
@@ -47,7 +47,7 @@ jobs:
             !skip { print }
           ' "$GITHUB_WORKSPACE/audit-tools/docs.patch" | patch --batch --forward -p0
           cp "$GITHUB_WORKSPACE/audit-tools/PSTACK_README.md" "$WORKSPACE/integrations/pstack/README.md"
-          patch --batch --forward -p0 < "$GITHUB_WORKSPACE/audit-tools/pstack-pin-correction.patch"
+          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/pstack-pin-correction.patch"
           cp "$GITHUB_WORKSPACE/audit-tools/PROJECT_STATUS.md" "$WORKSPACE/docs/PROJECT_STATUS.md"
 
       - name: Apply provider-neutral agent and capability foundation
@@ -63,16 +63,21 @@ jobs:
           patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/task-lifecycle-approval.patch"
           grep -q 'api/tasks' crates/dread-api/src/main.rs
           grep -q 'task_events' crates/dread-api/src/main.rs
+          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/agent-readonly-discovery.patch"
+          grep -q 'api/agents' crates/dread-api/src/main.rs
+          test -f config/agents.toml
           cat >> "$WORKSPACE/docs/PROJECT_STATUS.md" <<'EOF'
-          
-          ## Durable task and approval foundation — candidate implementation
-          
-          The API persists task records and append-only task events in SQLite. New tasks
-          enter pending_approval; approval requires an operator identity and reason, and
-          records an audit event. Approval does not execute the task. Cancellation is
-          limited to pending/approved/queued tasks and is recorded in the event history.
-          Task list/detail/event endpoints expose durable state. There is no worker,
-          provider dispatch, WebSocket stream, or autonomous execution in this slice.
+
+          ## Read-only local agent discovery — candidate implementation
+
+          GET /api/agents reads config/agents.toml (or DREAD_AGENTS_CONFIG) and probes
+          only explicitly configured endpoints. The configuration is empty by default;
+          entries are capped at 32, IDs must be unique, and health URLs must be explicit-
+          port loopback HTTP URLs without credentials, query strings or fragments.
+          Enabled probes use GET only, a two-second timeout, and no redirects. Disabled
+          entries generate no network request. Discovery does not enumerate arbitrary
+          ports, inspect processes, start agents, dispatch tasks, or execute plugins.
+          Provider-specific adapters and task dispatch remain separate future work.
           EOF
 
       - name: Install stable Rust, rustfmt and Clippy
@@ -111,13 +116,13 @@ jobs:
           cp -a "$RUNNER_TEMP/dread-source/tmp/dread_zip_check/legacy-reference" "$RUNNER_TEMP/dread-final/"
           rm -rf "$RUNNER_TEMP/dread-final/DREAD-UNIVERSAL/dread_universal/target"
           cd "$RUNNER_TEMP/dread-final"
-          zip -qr "$RUNNER_TEMP/DREAD_UNIVERSAL_TASK_APPROVAL_FOUNDATION.zip" DREAD-UNIVERSAL legacy-reference
-          sha256sum "$RUNNER_TEMP/DREAD_UNIVERSAL_TASK_APPROVAL_FOUNDATION.zip"
+          zip -qr "$RUNNER_TEMP/DREAD_UNIVERSAL_AGENT_DISCOVERY_FOUNDATION.zip" DREAD-UNIVERSAL legacy-reference
+          sha256sum "$RUNNER_TEMP/DREAD_UNIVERSAL_AGENT_DISCOVERY_FOUNDATION.zip"
 
       - name: Upload verified candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: DREAD_UNIVERSAL_TASK_APPROVAL_FOUNDATION
-          path: ${{ runner.temp }}/DREAD_UNIVERSAL_TASK_APPROVAL_FOUNDATION.zip
+          name: DREAD_UNIVERSAL_AGENT_DISCOVERY_FOUNDATION
+          path: ${{ runner.temp }}/DREAD_UNIVERSAL_AGENT_DISCOVERY_FOUNDATION.zip
           if-no-files-found: error
           retention-days: 7
