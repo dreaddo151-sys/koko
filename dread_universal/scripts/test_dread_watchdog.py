@@ -32,6 +32,21 @@ class WatchdogPolicyTests(unittest.TestCase):
             self.assertEqual(watchdog.read_state(path)["attempts"], [1.0])
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
+    def test_corrupt_attempts_are_ignored_safely(self):
+        allowed, _ = watchdog.restart_allowed({"attempts": ["broken", None, 100.0]}, 200.0)
+        self.assertTrue(allowed)
+
+    def test_incidents_are_appended_as_private_jsonl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "watchdog.json"
+            watchdog.append_incident(state_path, {"action": "dry_run"})
+            watchdog.append_incident(state_path, {"action": "escalate"})
+            journal = state_path.with_name("incidents.jsonl")
+            lines = journal.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 2)
+            self.assertEqual(__import__("json").loads(lines[0])["action"], "dry_run")
+            self.assertEqual(journal.stat().st_mode & 0o777, 0o600)
+
     def test_health_check_accepts_only_status_ok(self):
         class Response:
             status = 200
