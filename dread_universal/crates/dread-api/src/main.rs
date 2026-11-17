@@ -1,3 +1,5 @@
+mod comfyui;
+
 use axum::{
     Json, Router,
     extract::{
@@ -1681,6 +1683,7 @@ async fn require_api_token(
 fn app(state: AppState) -> Router {
     let protected = Router::new()
         .route("/api/gpu/health", get(gpu_health))
+        .route("/api/comfyui/monitor", get(comfyui::monitor))
         .route("/api/gpu/models", get(gpu_models))
         .route("/api/usage/tokens", get(token_usage))
         .route("/api/prompt/enhance", axum::routing::post(enhance_prompt))
