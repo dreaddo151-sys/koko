@@ -1882,22 +1882,22 @@ fn dispatch_ready_mission_tasks(state: AppState, mission_id: String) {
     };
 
     for task_id in ready {
-        if let Err(error) = queue_task(state.clone(), task_id.clone()) {
-            if error.status != StatusCode::CONFLICT {
-                error!(
-                    mission_id = %mission_id,
-                    task_id = %task_id,
-                    error = %error.message,
-                    "Mission scheduler could not queue a ready task"
+        if let Err(error) = queue_task(state.clone(), task_id.clone())
+            && error.status != StatusCode::CONFLICT
+        {
+            error!(
+                mission_id = %mission_id,
+                task_id = %task_id,
+                error = %error.message,
+                "Mission scheduler could not queue a ready task"
+            );
+            if let Ok(conn) = state.db.lock() {
+                let _ = conn.execute(
+                    "UPDATE missions SET status = 'blocked' WHERE id = ?1 AND status = 'running'",
+                    params![mission_id],
                 );
-                if let Ok(conn) = state.db.lock() {
-                    let _ = conn.execute(
-                        "UPDATE missions SET status = 'blocked' WHERE id = ?1 AND status = 'running'",
-                        params![mission_id],
-                    );
-                }
-                break;
             }
+            break;
         }
     }
 }
@@ -2548,10 +2548,8 @@ async fn execute_approved_task(
     if let Ok(mut cancellations) = state.cancellations.lock() {
         cancellations.remove(&task_id);
     }
-    if advance_mission {
-        if let Some(mission_id) = mission_id {
-            dispatch_ready_mission_tasks(state.clone(), mission_id);
-        }
+    if advance_mission && let Some(mission_id) = mission_id {
+        dispatch_ready_mission_tasks(state.clone(), mission_id);
     }
 }
 
