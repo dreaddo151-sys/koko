@@ -74,6 +74,38 @@ impl GpuSupervisorClient {
             && health.get("supervisor").and_then(Value::as_str) == Some("configured"))
     }
 
+    // Telemetry is a read-only nvidia-smi sample produced by the Python bridge.
+    pub async fn telemetry(&self) -> Result<Value> {
+        let mut response = self
+            .http
+            .get(format!("{}/v1/telemetry", self.base_url))
+            .bearer_auth(&self.token)
+            .timeout(Duration::from_secs(4))
+            .send()
+            .await
+            .context("Python GPU Supervisor telemetry request failed")?;
+        let status = response.status();
+        if response.content_length().is_some_and(|length| length > 1_048_576) {
+            anyhow::bail!("GPU telemetry response exceeds the 1 MiB limit");
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .context("Could not read GPU telemetry response")?
+        {
+            ensure!(
+                body.len().saturating_add(chunk.len()) <= 1_048_576,
+                "GPU telemetry response exceeds the 1 MiB limit"
+            );
+            body.extend_from_slice(&chunk);
+        }
+        if !status.is_success() {
+            anyhow::bail!("GPU Supervisor telemetry returned HTTP {}", status.as_u16());
+        }
+        serde_json::from_slice(&body).context("GPU Supervisor returned invalid telemetry JSON")
+    }
+
     // The Python bridge owns the GPU lease. Rust only submits authenticated work.
     pub async fn chat_completion(&self, payload: &Value) -> Result<Value> {
         let body = serde_json::to_vec(payload).context("Could not encode GPU chat payload")?;
@@ -149,6 +181,12 @@ mod tests {
     async fn bridge_client_sends_authenticated_chat_without_lease_endpoints() {
         let app = Router::new()
             .route(
+                "/v1/telemetry",
+                axum::routing::get(|| async {
+                    Json(json!({"read_only":true,"devices":[{"index":0,"name":"RTX 3090"}]}))
+                }),
+            )
+            .route(
                 "/health",
                 axum::routing::get(|| async {
                     Json(json!({"status": "ok", "supervisor": "configured"}))
@@ -174,6 +212,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["received"]["model"], "qwen3.8:27b");
+        let telemetry = client.telemetry().await.unwrap();
+        assert_eq!(telemetry["read_only"], true);
+        assert_eq!(telemetry["devices"][0]["index"], 0);
         assert!(client.is_online().await.unwrap());
         server.abort();
     }
