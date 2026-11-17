@@ -13,6 +13,7 @@ use dread_agents::{CapabilityKind, CapabilityProvenance, CapabilityRecord, Capab
 use dread_discovery::{discover, discover_agents, load_agents, load_services};
 use dread_gpu::{GpuGatewayClient, GpuSupervisorClient};
 use dread_orchestrator::{ExecutionConfig, ExecutionError, ExecutionGate};
+use dread_skills::discover_skills;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -20,7 +21,7 @@ use std::{
     collections::HashMap,
     env, fs,
     net::SocketAddr,
-    path::Path as FsPath,
+    path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -64,6 +65,11 @@ struct CreateRegistryEntry {
 
 fn empty_object() -> Value {
     json!({})
+}
+
+#[derive(Debug, Deserialize)]
+struct ApproveCapability {
+    reason: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -482,6 +488,186 @@ async fn get_capability(
     let item: CapabilityRecord = serde_json::from_str(&encoded)
         .map_err(|e| ApiError::internal(format!("Stored capability is invalid: {e}")))?;
     Ok(Json(json!({ "item": item })))
+}
+
+fn pstack_skills_root() -> Result<PathBuf, ApiError> {
+    if let Ok(configured) = env::var("DREAD_SKILLS_ROOT") {
+        let path = PathBuf::from(configured);
+        return Ok(if path.is_absolute() {
+            path
+        } else {
+            env::current_dir()
+                .map_err(|e| ApiError::internal(e.to_string()))?
+                .join(path)
+        });
+    }
+    let cwd = env::current_dir().map_err(|e| ApiError::internal(e.to_string()))?;
+    for candidate in [
+        cwd.join("integrations/cursor-plugins/pstack"),
+        cwd.join("integrations/pstack/upstream"),
+    ] {
+        if candidate.join("skills").is_dir() {
+            return Ok(candidate);
+        }
+    }
+    Err(ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        message: "Pstack skill catalog not found; set DREAD_SKILLS_ROOT to its root directory".into(),
+    })
+}
+
+async fn discover_pstack_skills() -> Result<Json<Value>, ApiError> {
+    let root = pstack_skills_root()?;
+    let items = discover_skills(&root).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let values = items.iter().map(|item| json!({
+        "id": item.id,
+        "name": item.name,
+        "description": item.description,
+        "relative_path": item.relative_path,
+        "bytes": item.bytes,
+        "fingerprint": item.fingerprint,
+        "status": "not_imported",
+        "execution": "never"
+    })).collect::<Vec<_>>();
+    Ok(Json(json!({
+        "source": "Pstack",
+        "root_configured": true,
+        "count": values.len(),
+        "items": values
+    })))
+}
+
+async fn import_discovered_skills(
+    State(state): State<AppState>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let root = pstack_skills_root()?;
+    let items = discover_skills(&root).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let now = now_epoch();
+    let source_revision = env::var("DREAD_PSTACK_REVISION")
+        .unwrap_or_else(|_| "unverified-local-copy".to_string());
+    let source_version = env::var("DREAD_PSTACK_VERSION")
+        .unwrap_or_else(|_| "0.15.43".to_string());
+    let mut conn = db_lock(&state)?;
+    let tx = conn.transaction().map_err(|e| ApiError::internal(e.to_string()))?;
+    let mut imported = 0usize;
+    let mut already_present = 0usize;
+    for item in &items {
+        let record = CapabilityRecord {
+            id: item.id.clone(),
+            name: item.name.clone(),
+            kind: CapabilityKind::Skill,
+            description: item.description.clone(),
+            version: Some(source_version.clone()),
+            license: Some("MIT".into()),
+            provenance: CapabilityProvenance {
+                source_name: "Pstack".into(),
+                source_uri: Some("https://github.com/cursor/plugins/tree/main/pstack".into()),
+                source_version: Some(source_version.clone()),
+                source_revision: Some(source_revision.clone()),
+                imported_at: now,
+            },
+            compatibility: "review_required".into(),
+            dependencies: Vec::new(),
+            adapter: Some("local.markdown_context".into()),
+            status: CapabilityStatus::Disabled,
+            manifest: json!({
+                "source_relative_path": item.relative_path,
+                "fingerprint": item.fingerprint,
+                "fingerprint_algorithm": "fnv1a64_non_cryptographic",
+                "trust": "untrusted_context",
+                "execution": "never",
+                "approval": null
+            }),
+        };
+        record.validate().map_err(|e| ApiError::bad_request(e.to_string()))?;
+        let encoded = serde_json::to_string(&record)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        let changed = tx.execute(
+            "INSERT OR IGNORE INTO capabilities (id, record_json, created_at) VALUES (?1, ?2, ?3)",
+            params![record.id, encoded, now],
+        ).map_err(|e| ApiError::internal(e.to_string()))?;
+        if changed == 1 { imported += 1; } else { already_present += 1; }
+    }
+    tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok((StatusCode::CREATED, Json(json!({
+        "source": "Pstack",
+        "discovered": items.len(),
+        "imported": imported,
+        "already_present": already_present,
+        "status": "disabled",
+        "execution": "never"
+    }))))
+}
+
+async fn enable_capability(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<ApproveCapability>,
+) -> Result<Json<Value>, ApiError> {
+    let reason = input.reason.trim();
+    let approved_by = state.operator_id.trim();
+    if reason.is_empty() || reason.len() > 2000 {
+        return Err(ApiError::bad_request("A review reason of 1 to 2000 characters is required"));
+    }
+    let now = now_epoch();
+    let mut conn = db_lock(&state)?;
+    let encoded = conn.query_row(
+        "SELECT record_json FROM capabilities WHERE id = ?1",
+        params![id],
+        |row| row.get::<_, String>(0),
+    ).optional().map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Capability not found"))?;
+    let mut record: CapabilityRecord = serde_json::from_str(&encoded)
+        .map_err(|e| ApiError::internal(format!("Stored capability is invalid: {e}")))?;
+    if record.kind != CapabilityKind::Skill {
+        return Err(ApiError { status: StatusCode::CONFLICT, message: "Only reviewed Markdown skills can be enabled by this workflow".into() });
+    }
+    if record.status == CapabilityStatus::Rejected {
+        return Err(ApiError { status: StatusCode::CONFLICT, message: "Rejected capabilities cannot be enabled".into() });
+    }
+    let root = pstack_skills_root()?;
+    let context = dread_skills::load_skill_context(&root, &record.id)
+        .map_err(|e| ApiError::conflict(format!("Skill source is no longer valid: {e}")))?;
+    let expected = record.manifest.get("fingerprint").and_then(Value::as_str).unwrap_or_default();
+    if expected != context.descriptor.fingerprint {
+        return Err(ApiError { status: StatusCode::CONFLICT, message: "Skill content changed since import; re-import and review it before enabling".into() });
+    }
+    let manifest = record.manifest.as_object_mut()
+        .ok_or_else(|| ApiError::bad_request("Capability manifest must be a JSON object"))?;
+    manifest.insert("approval".into(), json!({
+        "approved_by": approved_by,
+        "approved_at": now,
+        "reason": reason
+    }));
+    record.status = CapabilityStatus::Enabled;
+    record.validate().map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let updated = serde_json::to_string(&record).map_err(|e| ApiError::internal(e.to_string()))?;
+    conn.execute("UPDATE capabilities SET record_json = ?2 WHERE id = ?1", params![id, updated])
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(json!({"item": record, "execution": "never"})))
+}
+
+async fn disable_capability(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let mut conn = db_lock(&state)?;
+    let encoded = conn.query_row(
+        "SELECT record_json FROM capabilities WHERE id = ?1",
+        params![id],
+        |row| row.get::<_, String>(0),
+    ).optional().map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Capability not found"))?;
+    let mut record: CapabilityRecord = serde_json::from_str(&encoded)
+        .map_err(|e| ApiError::internal(format!("Stored capability is invalid: {e}")))?;
+    record.status = CapabilityStatus::Disabled;
+    if let Some(manifest) = record.manifest.as_object_mut() {
+        manifest.remove("approval");
+    }
+    let updated = serde_json::to_string(&record).map_err(|e| ApiError::internal(e.to_string()))?;
+    conn.execute("UPDATE capabilities SET record_json = ?2 WHERE id = ?1", params![id, updated])
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(json!({"item": record, "execution": "never"})))
 }
 
 fn append_task_event(
@@ -1581,6 +1767,10 @@ fn app(state: AppState) -> Router {
             "/api/capabilities",
             get(list_capabilities).post(create_capability),
         )
+        .route("/api/capabilities/discover", get(discover_pstack_skills))
+        .route("/api/capabilities/import", axum::routing::post(import_discovered_skills))
+        .route("/api/capabilities/{id}/enable", axum::routing::post(enable_capability))
+        .route("/api/capabilities/{id}/disable", axum::routing::post(disable_capability))
         .route("/api/capabilities/{id}", get(get_capability))
         .route("/api/registry", get(list_registry).post(create_registry))
         .route(
