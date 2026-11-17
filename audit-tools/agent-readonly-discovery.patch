@@ -1,6 +1,6 @@
 --- a/crates/dread-discovery/src/lib.rs
 +++ b/crates/dread-discovery/src/lib.rs
-@@ -72,5 +72,134 @@
+@@ -72,6 +72,114 @@
      Ok(())
  }
  
@@ -112,6 +112,10 @@
 +    join_all(agents.into_iter().map(|agent| probe_agent(client.clone(), agent))).await
 +}
 +
++pub fn classify_http_status(code: u16) -> &'static str {
+     match code {
+         200..=399 => "ONLINE",
+@@ -84,1 +192,21 @@
 +fn classify_agent_http_status(code: u16) -> &'static str {
 +    match code {
 +        200..=299 => "ONLINE",
@@ -132,10 +136,11 @@
 +    }
 +}
 +
-+pub fn classify_http_status(code: u16) -> &'static str {
-     match code {
-         200..=399 => "ONLINE",
-@@ -179,4 +308,19 @@
+ fn status_detail(code: u16) -> &'static str {
+@@ -148,1 +276,1 @@
+-    use super::{classify_http_status, validate_local_service_url};
++    use super::{classify_agent_http_status, classify_http_status, validate_local_service_url};
+@@ -179,4 +307,19 @@
          assert_eq!(classify_http_status(500), "DEGRADED");
          assert_eq!(classify_http_status(503), "DEGRADED");
      }
