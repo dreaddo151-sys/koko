@@ -235,6 +235,83 @@ impl CapabilityRecord {
     }
 }
 
+/// In-memory registry for explicitly enabled, reviewed provider adapters.
+///
+/// This registry is intentionally inert: registration does not probe endpoints,
+/// start tasks, load code, or discover plugins. Callers must construct adapters
+/// in trusted application code and opt in by setting `descriptor.enabled = true`.
+#[derive(Default)]
+pub struct AgentAdapterRegistry {
+    adapters: std::collections::BTreeMap<String, std::sync::Arc<dyn AgentAdapter>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdapterRegistryError {
+    InvalidDescriptor(&'static str),
+    Disabled,
+    DuplicateId(String),
+}
+
+impl fmt::Display for AdapterRegistryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidDescriptor(field) => write!(f, "adapter descriptor {field} is invalid"),
+            Self::Disabled => write!(f, "disabled adapter cannot be registered"),
+            Self::DuplicateId(id) => write!(f, "adapter id is already registered: {id}"),
+        }
+    }
+}
+
+impl std::error::Error for AdapterRegistryError {}
+
+impl AgentAdapterRegistry {
+    /// Register one adapter after explicit enablement and descriptor validation.
+    pub fn register(
+        &mut self,
+        adapter: std::sync::Arc<dyn AgentAdapter>,
+    ) -> Result<(), AdapterRegistryError> {
+        let descriptor = adapter.descriptor();
+        if descriptor.id.trim().is_empty() || descriptor.id.len() > 160 {
+            return Err(AdapterRegistryError::InvalidDescriptor("id"));
+        }
+        if descriptor.display_name.trim().is_empty() || descriptor.display_name.len() > 200 {
+            return Err(AdapterRegistryError::InvalidDescriptor("display_name"));
+        }
+        if descriptor.adapter.trim().is_empty() || descriptor.adapter.len() > 128 {
+            return Err(AdapterRegistryError::InvalidDescriptor("adapter"));
+        }
+        if !descriptor.enabled {
+            return Err(AdapterRegistryError::Disabled);
+        }
+        if self.adapters.contains_key(&descriptor.id) {
+            return Err(AdapterRegistryError::DuplicateId(descriptor.id.clone()));
+        }
+        self.adapters.insert(descriptor.id.clone(), adapter);
+        Ok(())
+    }
+
+    /// Return a registered adapter by its stable descriptor ID.
+    pub fn get(&self, id: &str) -> Option<std::sync::Arc<dyn AgentAdapter>> {
+        self.adapters.get(id).cloned()
+    }
+
+    /// Return a stable, ID-sorted snapshot of registered adapter descriptors.
+    pub fn descriptors(&self) -> Vec<AgentDescriptor> {
+        self.adapters
+            .values()
+            .map(|adapter| adapter.descriptor().clone())
+            .collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.adapters.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.adapters.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,5 +370,133 @@ mod tests {
         let mut item = sample();
         item.provenance.source_name.clear();
         assert_eq!(item.validate(), Err(ValidationError::MissingProvenance));
+    }
+    struct StubAdapter {
+        descriptor: AgentDescriptor,
+    }
+
+    impl AgentAdapter for StubAdapter {
+        fn descriptor(&self) -> &AgentDescriptor {
+            &self.descriptor
+        }
+
+        fn health<'a>(&'a self) -> AdapterFuture<'a, AgentHealth> {
+            Box::pin(async {
+                Ok(AgentHealth {
+                    state: AgentHealthState::Online,
+                    checked_at: 1,
+                    detail: None,
+                })
+            })
+        }
+
+        fn capabilities<'a>(&'a self) -> AdapterFuture<'a, Vec<AgentCapability>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn start_task<'a>(&'a self, request: StartTaskRequest) -> AdapterFuture<'a, AgentTask> {
+            Box::pin(async move {
+                Ok(AgentTask {
+                    task_id: request.task_id,
+                    state: AgentTaskState::Queued,
+                    provider_task_id: None,
+                    result: None,
+                    error: None,
+                    updated_at: 1,
+                })
+            })
+        }
+
+        fn task_status<'a>(&'a self, task_id: &'a str) -> AdapterFuture<'a, AgentTask> {
+            Box::pin(async move {
+                Ok(AgentTask {
+                    task_id: task_id.to_string(),
+                    state: AgentTaskState::Unknown,
+                    provider_task_id: None,
+                    result: None,
+                    error: None,
+                    updated_at: 1,
+                })
+            })
+        }
+
+        fn events<'a>(
+            &'a self,
+            _task_id: &'a str,
+            _after_sequence: u64,
+        ) -> AdapterFuture<'a, Vec<AgentEvent>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn cancel_task<'a>(&'a self, task_id: &'a str) -> AdapterFuture<'a, AgentTask> {
+            Box::pin(async move {
+                Ok(AgentTask {
+                    task_id: task_id.to_string(),
+                    state: AgentTaskState::Cancelled,
+                    provider_task_id: None,
+                    result: None,
+                    error: None,
+                    updated_at: 1,
+                })
+            })
+        }
+
+        fn task_result<'a>(&'a self, task_id: &'a str) -> AdapterFuture<'a, AgentTask> {
+            self.task_status(task_id)
+        }
+    }
+
+    fn stub_adapter(id: &str, enabled: bool) -> std::sync::Arc<dyn AgentAdapter> {
+        std::sync::Arc::new(StubAdapter {
+            descriptor: AgentDescriptor {
+                id: id.into(),
+                display_name: format!("Adapter {id}"),
+                adapter: "test".into(),
+                version: Some("0.1.0".into()),
+                endpoint: None,
+                enabled,
+            },
+        })
+    }
+
+    #[test]
+    fn adapter_registry_rejects_disabled_adapters() {
+        let mut registry = AgentAdapterRegistry::default();
+        assert_eq!(
+            registry
+                .register(stub_adapter("disabled-agent", false))
+                .unwrap_err(),
+            AdapterRegistryError::Disabled
+        );
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn adapter_registry_rejects_duplicate_ids_without_replacing_existing_adapter() {
+        let mut registry = AgentAdapterRegistry::default();
+        registry
+            .register(stub_adapter("local-agent", true))
+            .unwrap();
+        assert_eq!(
+            registry
+                .register(stub_adapter("local-agent", true))
+                .unwrap_err(),
+            AdapterRegistryError::DuplicateId("local-agent".into())
+        );
+        assert_eq!(registry.len(), 1);
+        assert!(registry.get("local-agent").is_some());
+    }
+
+    #[test]
+    fn adapter_registry_exposes_stable_descriptors() {
+        let mut registry = AgentAdapterRegistry::default();
+        registry.register(stub_adapter("z-agent", true)).unwrap();
+        registry.register(stub_adapter("a-agent", true)).unwrap();
+        let ids: Vec<_> = registry
+            .descriptors()
+            .into_iter()
+            .map(|item| item.id)
+            .collect();
+        assert_eq!(ids, vec!["a-agent", "z-agent"]);
     }
 }

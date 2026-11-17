@@ -5,6 +5,7 @@ on:
     branches:
       - feature/agent-capability-foundation-2026-11-17
       - integration/dread-canonical-source-run81
+      - work/agent-adapter-registry-contract-2026-11-17
     paths:
       - .github/workflows/dread-canonical-source.yml
       - dread_universal/Cargo.toml
@@ -29,10 +30,10 @@ concurrency:
 
 jobs:
   canonical-source:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      TARGET_BRANCH: integration/dread-canonical-source-run81
+      TARGET_BRANCH: ${{ github.ref_name }}
       SOURCE_RUN_ID: "44017474488"
       OUTER_SHA256: dfeaffa4fcac30f2a6d7353e9c2b4b138cf88573f9244b443ca00075429419e6
       INNER_SHA256: 004bfb598fed41c1024467ff3a354e4bceb09dbbc14f113d5b1998cc2ff9fe50
