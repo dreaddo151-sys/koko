@@ -46,6 +46,13 @@ The release archive is produced from the exact uploaded baseline after applying 
   - Uses a bounded broadcast channel and recovers missed events from SQLite if a subscriber falls behind.
   - CI verifies formatting, Clippy, compilation and a unit test that confirms committed task events reach subscribers. A full browser/client WebSocket handshake and reconnect test remains outstanding.
 
+- Pstack capability-import candidate (CI pending):
+  - The catalog pins Pstack `0.15.43`, commit `2f87c854fe3e2fcda44ca86b46ede35aad3c46b7`, subtree `71d8e1d1d718e2149dc43b2535618064f29cba6b`, MIT; inventory is 58 skills and 2 agents.
+  - The bundled `integrations/pstack-upstream` snapshot reports `0.15.42`; it is intentionally not imported as `0.15.43`.
+  - `scripts/import-pstack.sh` verifies the pinned commit/tree and manifest before writing a provenance marker with per-file SHA-256 values.
+  - `scripts/import_pstack_capabilities.py` defaults to dry-run; `--apply` is required to POST metadata to the explicit-port loopback API. It refuses missing/mismatched markers, changed files, unsafe paths, redirects and existing capabilities not confirmed disabled.
+  - Imported metadata starts disabled. No skills, agents, scripts or hooks are executed. The pinned remote fetch and live API import have not been run in this CI candidate.
+
 ## Runtime safety boundaries
 
 - The existing Python GPU Supervisor remains the sole GPU ownership, VRAM lease and process-lifecycle authority.
