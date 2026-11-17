@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ ! -r /etc/os-release ]]; then
+  printf 'PROJECT DREAD supports Ubuntu 24.04 LTS and later only.\n' >&2
+  exit 1
+fi
+# shellcheck disable=SC1091
+. /etc/os-release
+if [[ "${ID:-}" != ubuntu ]] || ! dpkg --compare-versions "${VERSION_ID:-0}" ge 24.04; then
+  printf 'Unsupported operating system: %s %s (requires Ubuntu 24.04 or later).\n' "${PRETTY_NAME:-unknown}" "${VERSION_ID:-unknown}" >&2
+  exit 1
+fi
+
 ROOT="$(cd -- "$(dirname -- "\${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
