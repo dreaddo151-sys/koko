@@ -175,9 +175,69 @@ jobs:
         run: cargo test --workspace --locked
         working-directory: dread_universal
 
-      - name: Optimized release build
-        run: cargo build --workspace --release --locked
+      - name: Exercise authenticated Pstack API apply and idempotent re-import
+        shell: bash
         working-directory: dread_universal
+        run: |
+          set -euo pipefail
+          temp_dir="$(mktemp -d)"
+          api_base="http://127.0.0.1:18765"
+          export DREAD_API_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+          export DREAD_OPERATOR_ID="ci-pstack-import"
+          export DREAD_DB_PATH="$temp_dir/registry.sqlite3"
+          export DREAD_BIND="127.0.0.1:18765"
+
+          target/release/dread-universal > "$temp_dir/api.log" 2>&1 &
+          api_pid=$!
+          cleanup() {
+            kill "$api_pid" 2>/dev/null || true
+            wait "$api_pid" 2>/dev/null || true
+            rm -rf "$temp_dir"
+          }
+          trap cleanup EXIT
+
+          ready=0
+          for _ in $(seq 1 40); do
+            if curl -fsS "$api_base/health" >/dev/null; then
+              ready=1
+              break
+            fi
+            if ! kill -0 "$api_pid" 2>/dev/null; then
+              cat "$temp_dir/api.log"
+              exit 1
+            fi
+            sleep 0.25
+          done
+          if [ "$ready" -ne 1 ]; then
+            cat "$temp_dir/api.log"
+            echo "DREAD API did not become ready" >&2
+            exit 1
+          fi
+
+          unauthenticated_status="$(curl -sS -o /dev/null -w '%{http_code}' "$api_base/api/capabilities")"
+          test "$unauthenticated_status" = "401"
+
+          python3 scripts/import_pstack_capabilities.py --root "$PWD" --api-base "$api_base" --apply
+          curl -fsS -H "Authorization: Bearer $DREAD_API_TOKEN" "$api_base/api/capabilities" > "$temp_dir/capabilities.json"
+          python3 - "$temp_dir/capabilities.json" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              body = json.load(handle)
+          items = body.get("items", [])
+          assert body.get("count") == 60, f"expected 60 imported records, got {body.get('count')}"
+          assert len(items) == 60, f"expected 60 records, got {len(items)}"
+          assert sum(item.get("kind") == "skill" for item in items) == 58
+          assert sum(item.get("kind") == "agent" for item in items) == 2
+          assert all(item.get("status") == "disabled" for item in items)
+          print("Authenticated Pstack API apply: 58 skills + 2 agents, all disabled: PASS")
+          PY
+
+          second_apply="$(python3 scripts/import_pstack_capabilities.py --root "$PWD" --api-base "$api_base" --apply)"
+          printf '%s\\n' "$second_apply"
+          grep -q 'created=0, already_present=60' <<<"$second_apply"
+          echo "Pstack importer idempotency and provenance reconciliation: PASS"
 
       - name: Record source inventory and hashes
         shell: bash
