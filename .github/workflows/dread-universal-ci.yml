@@ -106,6 +106,7 @@ jobs:
           dpkg-deb --info dist/release/dread-universal_*.deb
           tar -tzf dist/release/dread-universal-ubuntu-*.tar.gz | grep -q 'bundle/bin/dread-universal'
           tar -tzf dist/release/dread-universal-ubuntu-*.tar.gz | grep -q 'bundle/web/dist/index.html'
+          tar -tzf dist/release/dread-universal-ubuntu-*.tar.gz | grep -q 'bundle/scripts/capture-workstation-baseline.sh'
       - name: Install and smoke-test packaged API and production console
         working-directory: dread_universal
         run: |
@@ -114,6 +115,7 @@ jobs:
           test -x /usr/bin/dread-universal
           test -x /usr/share/dread-universal/configure-user.sh
           test -f /usr/lib/systemd/user/dread-universal.service
+          test -x /usr/share/dread-universal/scripts/capture-workstation-baseline.sh
           db_dir="$(mktemp -d)"
           api_log="$(mktemp)"
           token="$(openssl rand -hex 32)"
