@@ -14,14 +14,17 @@ Loopback bind by default. No arbitrary shell endpoint. Job rows are metadata onl
 - `GET /health`, `GET /api/services`, `GET /api/models`
 - `POST /api/chat`: non-stream JSON or SSE relay to llama.cpp.
 - `GET /api/usage`: aggregate SQLite token ledger.
+- `POST /api/tokenize`: exact token count delegated to llama.cpp `/tokenize`.
+- `POST /api/prompt/boost`: lossless prompt whitespace normalization plus tokenizer-backed before/after counts and budget check.
+- `GET /api/conversations/{id}`: persisted conversation messages.
 - `GET /api/comfyui/status`
 - `POST/GET /api/jobs`, `POST /api/jobs/{id}/cancel`: durable metadata lifecycle only.
 
 ## SQLite
-WAL database at `data/dread.sqlite3` by default. Tables: conversations, messages, token_usage, jobs. Non-stream request/response persistence and usage aggregation are transactional. Streamed content/usage is not yet captured. No migration framework or backup/restore automation yet.
+WAL database at `data/dread.sqlite3` by default. Tables: conversations, messages, token_usage, jobs. Non-stream request/response persistence and usage aggregation are transactional. Streamed content/usage is not yet captured. No migration framework or backup/restore automation yet. Conversation retrieval is capped at 200 most recent messages.
 
 ## Token quality and "booster"
-Current token accounting records actual `prompt_tokens`, `completion_tokens`, and `total_tokens` reported by llama.cpp for non-stream responses. It does not fabricate tokenizer estimates or claim to increase model context. Prompt enhancement, context compression, model-aware token budgeting and tokenizer parity are future features and must be measured against baseline quality/latency.
+Current token accounting records actual `prompt_tokens`, `completion_tokens`, and `total_tokens` reported by llama.cpp for non-stream responses. It does not fabricate tokenizer estimates or claim to increase model context. Exact tokenization is delegated to the configured llama.cpp `/tokenize` endpoint. The first prompt booster is intentionally lossless whitespace normalization; it reports token deltas and optional budget compliance. Semantic compression, model-aware context selection and quality/latency benchmarks remain future work; no claim of semantic improvement is made.
 
 ## Explicitly incomplete
 Auth/TLS, streaming persistence, conversation retrieval, job execution/recovery, pstack sandbox adapter, prompt booster, ComfyUI render lifecycle, installer/rollback and physical dual-GPU acceptance remain release gates.
