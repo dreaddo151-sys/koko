@@ -258,3 +258,16 @@ Do not repeat basic GPU enumeration, generic API health or standalone llama.cpp 
 - Source commit: `1d04452c05739a759988bedb40ee638debc32909`.
 - CI runs #336/#337 were queued for this commit at the time of this entry. Do not mark this vertical slice CI-verified until the run for this exact SHA completes.
 - This is a mission-planning API slice, not mission orchestration completion. Dependency-aware scheduling, task creation/aggregation, failure propagation, retries, pause/resume and provider delegation remain outstanding.
+
+
+## Expanded CI acceptance — 2026-11-18 (run #343)
+
+- Candidate HEAD tested: `924cda887479741b67168f20524863b84e29bf49`.
+- GitHub Actions run #343 (`44184194589`) completed with **all three jobs successful**: Web console / Ubuntu 24.04; Rust / Ubuntu 24.04; Ubuntu packages / smoke test.
+- Rust job passed `cargo fmt --all -- --check`, strict workspace Clippy, workspace tests (including mission planning persistence/order/validation cases), optimized locked release build, installer shell syntax, portable installer migration/rollback regression tests, Python bridge/importer tests, and the single-owner GPU boundary guard.
+- Web job passed committed lockfile verification, `npm ci`, and production console build.
+- Package job assembled the Ubuntu `.deb` and portable `.tar.gz`, verified SHA-256 manifest and archive contents, installed the `.deb` in a disposable Ubuntu 24.04 runner, started the packaged API, checked production UI serving, verified unauthenticated API rejection (401), and authenticated host-profile access.
+- The earlier formatting-only failure during this implementation was corrected; the final run passed formatting and all downstream gates.
+- This proves CI behavior for the exact candidate SHA above. It does not prove clean physical workstation install/upgrade/reboot, preservation of the running legacy Hub/ComfyUI/Supervisor, live dual-3090 operation, provider task execution, real image/video artifacts, or rollback on the user's machine.
+- PR #12 remains open and unmerged. No live workstation service or user data was modified by this GitHub-only work.
+- Mission execution/provider delegation, concrete Hermes/OpenHands/DeerFlow adapters, full legacy Hub parity, signed/transactional Pstack extension management, media pipelines, complete security/repair lifecycle, signed updater, and live workstation acceptance remain open.
