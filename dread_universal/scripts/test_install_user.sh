@@ -78,7 +78,7 @@ make_bundle() {
   printf '# docs\n' > "$bundle/README.md"
   printf '# docs\n' > "$bundle/docs/README.md"
   printf '#!/usr/bin/env bash\n' > "$bundle/scripts/helper.sh"
-  printf '#!/usr/bin/env bash\n' > "$bundle/install-user.sh"
+  install -m 0755 "$ROOT/scripts/install-user.sh" "$bundle/install-user.sh"
   printf 'test\n' > "$bundle/.env.example"
   printf '%s\n' "$bundle"
 }
