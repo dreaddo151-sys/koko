@@ -1,0 +1,11 @@
+[Unit]
+Description=Run PROJECT DREAD API watchdog every 30 seconds
+
+[Timer]
+OnBootSec=90
+OnUnitActiveSec=30
+AccuracySec=5
+Unit=dread-watchdog.service
+
+[Install]
+WantedBy=timers.target
