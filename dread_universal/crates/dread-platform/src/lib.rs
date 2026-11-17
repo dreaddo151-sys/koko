@@ -396,11 +396,7 @@ fn mounted_storage_devices() -> Vec<StorageDevice> {
     };
     let Some(output) = run_probe(
         &binary,
-        &[
-            "-B1",
-            "-P",
-            "--output=source,fstype,size,used,avail,target",
-        ],
+        &["-B1", "-P", "--output=source,fstype,size,used,avail,target"],
     ) else {
         return Vec::new();
     };
