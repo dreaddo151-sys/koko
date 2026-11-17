@@ -10,6 +10,7 @@ The Rust workspace is the portable control plane. GPU ownership remains behind a
 
 - Rust API, registry, task approval/audit, discovery and GPU gateway client.
 - Read-only host discovery reports OS, architecture, logical CPU threads, known NVIDIA/AMD/Apple GPU metadata and a llama.cpp server executable found in PATH or configured by environment.
+- Agent health discovery probes a small allowlist of loopback endpoints for OpenHands Agent Server (`127.0.0.1:8000/health`) and LangGraph (`127.0.0.1:2024/ok`), alongside explicitly configured endpoints. It does not scan arbitrary ports or launch agents.
 - `DREAD_GPU_GATEWAY_URL` configures the loopback OpenAI-compatible llama.cpp gateway. Default: `http://127.0.0.1:11500`.
 - Active service discovery uses llama.cpp `/api/tags`; Ollama is not an active backend.
 - Pstack scanner discovers `skills/<name>/SKILL.md` and optional `agents/<name>.md`.
@@ -34,7 +35,7 @@ The current authenticated Python GPU Supervisor bridge is the workstation implem
 
 A live agent is a process or service with a reviewed adapter implementing the AgentAdapter lifecycle (health, start, status, events, cancellation and result). A Markdown file under Pstack `agents/` is an agent prompt profile, not a running agent. The current extension manager imports such files as untrusted context profiles; it does not pretend to launch a remote agent.
 
-Live agent discovery must use explicit known local endpoints or operator-configured endpoints. Do not sweep arbitrary ports, contact arbitrary LAN hosts, or launch discovered executables.
+Live agent discovery uses explicit known local endpoints or operator-configured endpoints. Current built-in probes cover OpenHands and LangGraph health routes only. A healthy endpoint is not yet an executable adapter: task lifecycle integration still requires a reviewed AgentAdapter. Do not sweep arbitrary ports, contact arbitrary LAN hosts, or launch discovered executables.
 
 ### Skills and extensions
 
