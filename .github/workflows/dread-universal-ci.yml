@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: dread-universal-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
@@ -82,6 +82,18 @@ jobs:
           name: dread-universal-npm-lockfile
           path: dread_universal/web/package-lock.json
           if-no-files-found: error
+      - name: Commit generated lockfile to the project branch
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feature/universal-capability-discovery-clean-2026-11-17'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json
+          if git diff --cached --quiet; then
+            echo "npm lockfile is already current"
+          else
+            git commit -m "build: lock web dependency tree"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
 
   package:
     name: Ubuntu packages / smoke test
