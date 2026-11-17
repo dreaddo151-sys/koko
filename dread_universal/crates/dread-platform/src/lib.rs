@@ -276,7 +276,9 @@ fn os_release_value(contents: &str, key: &str) -> Option<String> {
 }
 
 fn memory_info_mib(contents: &str, key: &str) -> Option<u64> {
-    let line = contents.lines().find(|line| line.starts_with(&format!("{key}:")))?;
+    let line = contents
+        .lines()
+        .find(|line| line.starts_with(&format!("{key}:")))?;
     let mut fields = line.split_whitespace();
     fields.next()?;
     let value = fields.next()?.parse::<u64>().ok()?;
@@ -388,7 +390,9 @@ pub fn detect_host() -> HostProfile {
 pub fn cached_host_profile() -> HostProfile {
     static PROFILE: OnceLock<Mutex<Option<(Instant, HostProfile)>>> = OnceLock::new();
     let cache = PROFILE.get_or_init(|| Mutex::new(None));
-    let mut guard = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let refresh = guard
         .as_ref()
         .is_none_or(|(updated, _)| updated.elapsed() >= Duration::from_secs(15));
@@ -416,7 +420,8 @@ mod tests {
 
     #[test]
     fn nvidia_csv_parser_includes_driver_pcie_and_live_telemetry() {
-        let sample = "NVIDIA GeForce RTX 3090, 24576, 12000, 12576, 550.90.07, 1, 1, 4, 16, 37, 52, 280.5\n";
+        let sample =
+            "NVIDIA GeForce RTX 3090, 24576, 12000, 12576, 550.90.07, 1, 1, 4, 16, 37, 52, 280.5\n";
         let parsed = parse_nvidia_csv(sample);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].vram_used_mib, Some(12000));
