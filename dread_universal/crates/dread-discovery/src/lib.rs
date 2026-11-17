@@ -452,9 +452,11 @@ mod tests {
         let agents = super::known_agent_endpoints();
         assert_eq!(agents.len(), 2);
         assert!(agents.iter().all(|agent| agent.enabled));
-        assert!(agents.iter().all(|agent| {
-            agent.health_url.starts_with("http://127.0.0.1:")
-        }));
+        assert!(
+            agents
+                .iter()
+                .all(|agent| { agent.health_url.starts_with("http://127.0.0.1:") })
+        );
     }
 
     #[test]
