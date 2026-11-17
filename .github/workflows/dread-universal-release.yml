@@ -1,24 +1,21 @@
-name: DREAD Universal Release
+name: DREAD Universal Ubuntu Release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: dread-release-${{ github.ref }}
+  group: dread-ubuntu-release
   cancel-in-progress: false
 
 jobs:
   build:
-    name: Build / ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    name: Build Ubuntu 24.04 x86_64 API
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: dread_universal
@@ -26,20 +23,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build portable API executable
+      - name: Build API executable
         run: cargo build --release --locked --bin dread-universal
-      - name: Upload executable
+      - name: Upload API executable
         uses: actions/upload-artifact@v4
         with:
-          name: dread-universal-${{ runner.os }}-${{ runner.arch }}
-          path: |
-            dread_universal/target/release/dread-universal
-            dread_universal/target/release/dread-universal.exe
+          name: dread-universal-api-ubuntu-x86_64
+          path: dread_universal/target/release/dread-universal
           if-no-files-found: error
 
   web:
     name: Build web console
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: dread_universal/web
@@ -52,23 +47,32 @@ jobs:
       - run: npm run build
       - uses: actions/upload-artifact@v4
         with:
-          name: dread-universal-web
+          name: dread-universal-web-ubuntu
           path: dread_universal/web/dist/
+          if-no-files-found: error
 
   publish:
-    name: Publish checksummed release assets
+    name: Publish Ubuntu bundle and checksums
     needs: [build, web]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
         with:
-          path: dist
+          path: release
           merge-multiple: true
-      - name: Create SHA-256 manifest
+      - name: Assemble portable Ubuntu build bundle
         run: |
-          cd dist
-          find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          set -euo pipefail
+          mkdir -p release/bundle/bin release/bundle/web
+          test -x release/dread-universal
+          install -m 0755 release/dread-universal release/bundle/bin/dread-universal
+          find release -maxdepth 1 -type f ! -name dread-universal -exec cp {} release/bundle/web/ \;
+          tar -C release -czf release/dread-universal-ubuntu-24.04-x86_64.tar.gz bundle
+          cd release
+          sha256sum dread-universal-ubuntu-24.04-x86_64.tar.gz > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: dist/**/*
+          files: |
+            release/dread-universal-ubuntu-24.04-x86_64.tar.gz
+            release/SHA256SUMS
