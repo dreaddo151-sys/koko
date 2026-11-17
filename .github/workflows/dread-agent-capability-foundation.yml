@@ -151,7 +151,7 @@ jobs:
           PY
           cat >> "$WORKSPACE/docs/PROJECT_STATUS.md" <<'EOF'
 
-          ## Read-only local agent discovery — candidate implementation
+          ## Read-only local agent discovery — CI verified
 
           GET /api/agents reads config/agents.toml (or DREAD_AGENTS_CONFIG) and probes
           only explicitly configured endpoints. The configuration is empty by default;
