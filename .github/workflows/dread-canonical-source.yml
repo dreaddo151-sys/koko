@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   canonical-source:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       TARGET_BRANCH: ${{ github.ref_name }}
