@@ -234,6 +234,7 @@ dependencies = [
  "axum",
  "dread-agents",
  "dread-discovery",
+ "dread-skills",
  "dread-gpu",
  "dread-orchestrator",
  "futures",
@@ -271,6 +272,10 @@ dependencies = [
  "serde_json",
  "tokio",
 ]
+
+[[package]]
+name = "dread-skills"
+version = "0.4.0"
 
 [[package]]
 name = "dread-orchestrator"
