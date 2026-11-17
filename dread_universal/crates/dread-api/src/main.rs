@@ -278,7 +278,15 @@ fn open_database(path: &str) -> anyhow::Result<Connection> {
              execution_order_json TEXT NOT NULL,
              status TEXT NOT NULL DEFAULT 'planned',
              created_at INTEGER NOT NULL
-         );",
+         );
+         CREATE TABLE IF NOT EXISTS mission_tasks (
+             mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+             node_id TEXT NOT NULL,
+             task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+             depends_on_json TEXT NOT NULL DEFAULT '[]',
+             PRIMARY KEY(mission_id, node_id)
+         );
+         CREATE INDEX IF NOT EXISTS idx_mission_tasks_mission ON mission_tasks(mission_id);",
     )?;
     Ok(conn)
 }
@@ -2349,6 +2357,10 @@ fn app(state: AppState) -> Router {
         .route("/api/gpu/health", get(gpu_health))
         .route("/api/gpu/models", get(gpu_models))
         .route("/api/missions", axum::routing::post(create_mission))
+        .route(
+            "/api/missions/{id}/instantiate",
+            axum::routing::post(instantiate_mission),
+        )
         .route("/api/missions/{id}", get(get_mission))
         .route("/api/tasks", get(list_tasks).post(create_task))
         .route("/api/tasks/{id}", get(get_task))
