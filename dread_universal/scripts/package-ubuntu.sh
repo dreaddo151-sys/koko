@@ -38,7 +38,6 @@ install -m 0644 config/services.toml config/agents.toml "$BUNDLE/config/"
 install -m 0644 .env.example "$BUNDLE/.env.example"
 install -m 0755 scripts/install-user.sh "$BUNDLE/install-user.sh"
 install -m 0644 scripts/dread_gpu_supervisor_bridge.py "$BUNDLE/scripts/"
-install -m 0755 scripts/configure-user.sh "$BUNDLE/scripts/"
 install -m 0644 README.md "$BUNDLE/README.md"
 install -m 0644 docs/MASTER-PLAN.md docs/VERIFICATION.md docs/GPU_OWNERSHIP_BOUNDARY.md "$BUNDLE/docs/"
 
