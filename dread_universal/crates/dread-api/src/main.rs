@@ -4664,6 +4664,147 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mission_auto_dispatches_a_dependent_node_approved_after_its_prerequisite() {
+        let (router, server) = test_app().await;
+        let graph = json!({
+            "mission_id":"late-approval-mission",
+            "nodes":[
+                {"id":"first","depends_on":[],"priority":1,"task_type":"service_discovery"},
+                {"id":"second","depends_on":["first"],"priority":2,"task_type":"service_discovery"}
+            ]
+        });
+        let created = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/missions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(graph.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let instantiated = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/missions/late-approval-mission/instantiate")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(instantiated.status(), StatusCode::ACCEPTED);
+        let body = to_bytes(instantiated.into_body(), usize::MAX).await.unwrap();
+        let result: Value = serde_json::from_slice(&body).unwrap();
+        let first_id = result["item"]["tasks"][0]["task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let second_id = result["item"]["tasks"][1]["task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let approved = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/tasks/{first_id}/approve"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"reason":"start mission"}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(approved.status(), StatusCode::OK);
+
+        let started = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/tasks/{first_id}/run"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(started.status(), StatusCode::ACCEPTED);
+
+        let waiting_for_approval = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let fetched = router
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri("/api/missions/late-approval-mission")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let body = to_bytes(fetched.into_body(), usize::MAX).await.unwrap();
+                let stored: Value = serde_json::from_slice(&body).unwrap();
+                if stored["item"]["tasks"][0]["status"] == "completed"
+                    && stored["item"]["tasks"][1]["status"] == "pending_approval"
+                {
+                    break stored;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("first mission node should complete while the dependent awaits approval");
+        assert_eq!(waiting_for_approval["item"]["status"], "running");
+
+        let approved = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/tasks/{second_id}/approve"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"reason":"approve dependent after review"}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(approved.status(), StatusCode::OK);
+
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let fetched = router
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri("/api/missions/late-approval-mission")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let body = to_bytes(fetched.into_body(), usize::MAX).await.unwrap();
+                let stored: Value = serde_json::from_slice(&body).unwrap();
+                if stored["item"]["status"] == "completed" {
+                    break stored;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("newly approved dependent task should be dispatched automatically");
+        assert_eq!(completed["item"]["tasks"][0]["status"], "completed");
+        assert_eq!(completed["item"]["tasks"][1]["status"], "completed");
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn mission_instantiation_rejects_unreviewed_runner_without_partial_tasks() {
         let (router, server) = test_app().await;
         let graph = json!({
