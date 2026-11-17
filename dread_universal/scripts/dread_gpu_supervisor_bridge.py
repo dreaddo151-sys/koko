@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Authenticated loopback inference bridge using the existing Python GPU Supervisor lease."""
+"""Authenticated loopback inference bridge; owns the sole Python GPU lease."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Callable
 
 MAX_BODY_BYTES = 1_048_576
-GATEWAY_URL = "http://127.0.0.1:11500/v1/chat/completions"
+TENSOR_UPSTREAM_URL = "http://127.0.0.1:11501/v1/chat/completions"
 INFERENCE_TIMEOUT = 1805
 
 
@@ -26,7 +26,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-GATEWAY_OPENER = urllib.request.build_opener(NoRedirect())
+UPSTREAM_OPENER = urllib.request.build_opener(NoRedirect())
 
 
 def validate_payload(payload: object) -> dict:
@@ -68,9 +68,13 @@ def validate_payload(payload: object) -> dict:
 
 
 class SupervisorBridge:
-    def __init__(self, gpu_lease: Callable[[str], AbstractContextManager], gateway_open=GATEWAY_OPENER.open):
+    def __init__(
+        self,
+        gpu_lease: Callable[[str], AbstractContextManager],
+        upstream_open=UPSTREAM_OPENER.open,
+    ):
         self.gpu_lease = gpu_lease
-        self.gateway_open = gateway_open
+        self.upstream_open = upstream_open
 
     def execute(self, payload: object) -> tuple[int, dict]:
         try:
@@ -78,33 +82,34 @@ class SupervisorBridge:
         except ValueError as error:
             return 400, {"error": str(error)}
         request = urllib.request.Request(
-            GATEWAY_URL,
+            TENSOR_UPSTREAM_URL,
             data=json.dumps(normalized).encode(),
             method="POST",
             headers={"Content-Type": "application/json", "Accept": "application/json"},
         )
         try:
-            # The existing Supervisor owns the lock, waits for ComfyUI idle,
-            # and starts/stops its managed tensor service for this request.
+            # The lease starts the managed tensor service. Call its upstream
+            # directly: port 11500 would acquire this same lease a second time.
             with self.gpu_lease("tensor"):
-                with self.gateway_open(request, timeout=INFERENCE_TIMEOUT) as response:
-                    status = response.status
-                    body = response.read(MAX_BODY_BYTES + 1)
-        except urllib.error.HTTPError as error:
-            status = error.code
-            body = error.read(MAX_BODY_BYTES + 1)
+                try:
+                    with self.upstream_open(request, timeout=INFERENCE_TIMEOUT) as response:
+                        status = response.status
+                        body = response.read(MAX_BODY_BYTES + 1)
+                except urllib.error.HTTPError as error:
+                    status = error.code
+                    body = error.read(MAX_BODY_BYTES + 1)
         except Exception as error:
             return 503, {"error": f"GPU Supervisor lease or inference failed: {error}"}
         if len(body) > MAX_BODY_BYTES:
-            return 502, {"error": "GPU gateway response exceeds the 1 MiB result limit"}
+            return 502, {"error": "tensor upstream response exceeds the 1 MiB result limit"}
         try:
             decoded = json.loads(body.decode())
         except (UnicodeDecodeError, json.JSONDecodeError):
-            return 502, {"error": "GPU gateway returned invalid JSON"}
+            return 502, {"error": "tensor upstream returned invalid JSON"}
         if not 200 <= status < 300:
-            return status, decoded if isinstance(decoded, dict) else {"error": "GPU gateway request failed"}
+            return status, decoded if isinstance(decoded, dict) else {"error": "tensor upstream request failed"}
         if not isinstance(decoded, dict):
-            return 502, {"error": "GPU gateway response must be a JSON object"}
+            return 502, {"error": "tensor upstream response must be a JSON object"}
         return status, decoded
 
 
