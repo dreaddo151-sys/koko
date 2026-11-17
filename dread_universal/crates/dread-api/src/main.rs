@@ -2910,6 +2910,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prompt_enhancement_uses_supervisor_and_returns_review_only_suggestion() {
+        let (router, server) = test_app().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/prompt/enhance")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "qwen3.8:27b",
+                            "prompt": "write a test plan"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["enhanced_prompt"], "hello");
+        assert_eq!(value["requires_operator_review"], true);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn gpu_api_rejects_paths_outside_v1() {
         let (router, server) = test_app().await;
 
