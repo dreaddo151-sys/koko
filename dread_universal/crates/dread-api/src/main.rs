@@ -4152,6 +4152,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mission_instantiation_is_approval_gated_and_enforces_dependencies() {
+        let (router, server) = test_app().await;
+        let graph = json!({
+            "mission_id":"dependency-mission",
+            "nodes":[
+                {"id":"first","depends_on":[],"priority":1,"task_type":"service_discovery"},
+                {"id":"second","depends_on":["first"],"priority":2,"task_type":"service_discovery"}
+            ]
+        });
+        let created = router.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/missions")
+                .header("content-type","application/json")
+                .body(Body::from(graph.to_string()))
+                .unwrap()
+        ).await.unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let instantiated = router.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/missions/dependency-mission/instantiate")
+                .body(Body::empty())
+                .unwrap()
+        ).await.unwrap();
+        assert_eq!(instantiated.status(), StatusCode::ACCEPTED);
+        let body = to_bytes(instantiated.into_body(), usize::MAX).await.unwrap();
+        let result: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(result["item"]["status"], "awaiting_approval");
+        assert_eq!(result["item"]["execution_started"], false);
+        assert_eq!(result["item"]["tasks"].as_array().unwrap().len(), 2);
+
+        let first_id = result["item"]["tasks"]
+            .as_array().unwrap().iter()
+            .find(|task| task["node_id"] == "first")
+            .and_then(|task| task["task_id"].as_str()).unwrap().to_string();
+        let second_id = result["item"]["tasks"]
+            .as_array().unwrap().iter()
+            .find(|task| task["node_id"] == "second")
+            .and_then(|task| task["task_id"].as_str()).unwrap().to_string();
+
+        let approved = router.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/tasks/{second_id}/approve"))
+                .header("content-type","application/json")
+                .body(Body::from(json!({"reason":"dependency gate regression"}).to_string()))
+                .unwrap()
+        ).await.unwrap();
+        assert_eq!(approved.status(), StatusCode::OK);
+        let blocked = router.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/tasks/{second_id}/run"))
+                .body(Body::empty())
+                .unwrap()
+        ).await.unwrap();
+        assert_eq!(blocked.status(), StatusCode::CONFLICT);
+
+        let first_approved = router.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/tasks/{first_id}/approve"))
+                .header("content-type","application/json")
+                .body(Body::from(json!({"reason":"approve prerequisite"}).to_string()))
+                .unwrap()
+        ).await.unwrap();
+        assert_eq!(first_approved.status(), StatusCode::OK);
+
+        let duplicate = router.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/missions/dependency-mission/instantiate")
+                .body(Body::empty())
+                .unwrap()
+        ).await.unwrap();
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+
+        let fetched = router.oneshot(
+            Request::builder()
+                .uri("/api/missions/dependency-mission")
+                .body(Body::empty())
+                .unwrap()
+        ).await.unwrap();
+        let body = to_bytes(fetched.into_body(), usize::MAX).await.unwrap();
+        let stored: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(stored["item"]["status"], "awaiting_approval");
+        assert_eq!(stored["item"]["tasks"].as_array().unwrap().len(), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn mission_instantiation_rejects_unreviewed_runner_without_partial_tasks() {
+        let (router, server) = test_app().await;
+        let graph = json!({
+            "mission_id":"unsupported-runner-mission",
+            "nodes":[
+                {"id":"first","depends_on":[],"priority":1,"task_type":"service_discovery"},
+                {"id":"unsupported","depends_on":["first"],"priority":2,"task_type":"build"}
+            ]
+        });
+        let created = router.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/missions")
+                .header("content-type","application/json")
+                .body(Body::from(graph.to_string()))
+                .unwrap()
+        ).await.unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let instantiated = router.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/missions/unsupported-runner-mission/instantiate")
+                .body(Body::empty())
+                .unwrap()
+        ).await.unwrap();
+        assert_eq!(instantiated.status(), StatusCode::CONFLICT);
+
+        let fetched = router.oneshot(
+            Request::builder()
+                .uri("/api/missions/unsupported-runner-mission")
+                .body(Body::empty())
+                .unwrap()
+        ).await.unwrap();
+        let body = to_bytes(fetched.into_body(), usize::MAX).await.unwrap();
+        let stored: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(stored["item"]["status"], "planned");
+        assert_eq!(stored["item"]["tasks"].as_array().unwrap().len(), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn mission_plan_rejects_cycles_and_oversized_graphs() {
         let (router, server) = test_app().await;
         let cyclic = json!({
