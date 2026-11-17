@@ -31,7 +31,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf -- "$TMP"' EXIT
 
 BUNDLE="$TMP/bundle"
-mkdir -p "$BUNDLE/bin" "$BUNDLE/web/dist" "$BUNDLE/config" "$BUNDLE/scripts" "$BUNDLE/docs" "$BUNDLE/systemd"
+mkdir -p "$BUNDLE/bin" "$BUNDLE/web/dist" "$BUNDLE/config" "$BUNDLE/scripts" "$BUNDLE/docs" 
 install -m 0755 "$API_BIN" "$BUNDLE/bin/dread-universal"
 cp -a "$WEB_ROOT/." "$BUNDLE/web/dist/"
 install -m 0644 config/services.toml config/agents.toml "$BUNDLE/config/"
@@ -39,7 +39,6 @@ install -m 0644 .env.example "$BUNDLE/.env.example"
 install -m 0755 scripts/install-user.sh "$BUNDLE/install-user.sh"
 install -m 0644 scripts/dread_gpu_supervisor_bridge.py "$BUNDLE/scripts/"
 install -m 0755 scripts/configure-user.sh "$BUNDLE/scripts/"
-install -m 0644 systemd/dread-universal.service "$BUNDLE/systemd/"
 install -m 0644 README.md "$BUNDLE/README.md"
 install -m 0644 docs/MASTER-PLAN.md docs/VERIFICATION.md docs/GPU_OWNERSHIP_BOUNDARY.md "$BUNDLE/docs/"
 
