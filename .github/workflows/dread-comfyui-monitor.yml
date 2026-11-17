@@ -57,6 +57,9 @@ jobs:
       - name: Test Python Supervisor bridge
         working-directory: dread_universal
         run: python3 -m unittest discover -s scripts -p 'test_gpu_supervisor_bridge.py' -v
+      - name: Test bounded watchdog policy
+        working-directory: dread_universal
+        run: python3 -m unittest discover -s scripts -p 'test_dread_watchdog.py' -v
       - name: Verify single-owner GPU boundary
         working-directory: dread_universal
         run: python3 scripts/check_gpu_ownership_boundary.py
