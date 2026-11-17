@@ -1,5 +1,5 @@
 pub mod supervisor;
-pub use supervisor::{GpuLeaseGuard, GpuSupervisorClient};
+pub use supervisor::GpuSupervisorClient;
 
 use anyhow::{Context, Result, ensure};
 use reqwest::{Response, Url};
