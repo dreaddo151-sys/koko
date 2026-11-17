@@ -1882,7 +1882,7 @@ fn dispatch_ready_mission_tasks(state: AppState, mission_id: String) {
     };
 
     for task_id in ready {
-        if let Err(error) = run_task(State(state.clone()), Path(task_id.clone())) {
+        if let Err(error) = queue_task(state.clone(), task_id.clone()) {
             if error.status != StatusCode::CONFLICT {
                 error!(
                     mission_id = %mission_id,
@@ -1902,9 +1902,16 @@ fn dispatch_ready_mission_tasks(state: AppState, mission_id: String) {
     }
 }
 
-fn run_task(
+async fn run_task(
     State(state): State<AppState>,
     Path(id): Path<String>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    queue_task(state, id)
+}
+
+fn queue_task(
+    state: AppState,
+    id: String,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let now = now_epoch();
     let mut conn = db_lock(&state)?;
