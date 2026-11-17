@@ -309,3 +309,23 @@ GitHub Actions run #316 (`44169900862`) for candidate HEAD `116406e7eb99dc89c3da
 The passing CI evidence covers source formatting, strict Clippy, Rust tests and release build; Python bridge/importer tests; the GPU single-owner static guard; installer syntax and portable migration/rollback tests; locked web dependency installation and production build; package checksum/archive verification; disposable Ubuntu 24.04 `.deb` installation; API health; production static UI; and API authentication rejection/acceptance.
 
 This is not live workstation acceptance. Agent execution, mission orchestration, Hub parity, transactional signed extension management, real dual-3090 concurrent inference, ComfyUI image/video pipelines, MiniMax H3/FlashVSR output, complete repair/security policy, signed updater, and install/upgrade/reboot preservation remain open. PR #12 must remain unmerged until those gates are met on the Ubuntu workstation.
+
+
+## Workstation evidence reconciliation — 2026-11-18
+
+This addendum restores previously completed Ubuntu workstation evidence that must not be treated as untested. It is historical evidence from earlier checkpoints, not a claim that PR #12 has been installed or that every integration remains healthy today.
+
+### Historical live/API checks already completed
+
+- **2026-11-08 — Hub and service API checks:** DREAD Hub at `127.0.0.1:8080`, ComfyUI at `127.0.0.1:8188`, Ollama API at `127.0.0.1:11434`, and OpenCode at `127.0.0.1:4096` were exercised through health/model/process/info/telemetry endpoints, including ComfyUI `/system_stats`, Ollama `/api/tags` and `/api/ps`, and DREAD `/api/hub/vram` and `/api/telemetry`. The recorded model `qwen3.8:27b` was resident with approximately 29.3 GB VRAM reported; two RTX 3090 devices were detected. These checks prove those API observations at that checkpoint only. Ollama is not the approved active runtime for the final architecture; llama.cpp remains the required backend.
+- **2026-11-16 — Rust API and discovery:** `127.0.0.1:8765/health` returned HTTP 200 with project `PROJECT DREAD UNIVERSAL`, status `online`, version `0.1.0`. `/api/services` returned nine discovered services. The same checkpoint reported ComfyUI, GPU Gateway, Hermes and OpenHands ingress/server reachable, while legacy Hub 8080, Ollama 11434, llama.cpp 11501 and OpenCode 4096 were unreachable. This was useful discovery evidence, not proof that all nine services were usable task adapters.
+- **2026-11-17 — GPU inference:** dual-RTX-3090 inference through the Python GPU Supervisor was previously proven. The Rust API → authenticated bridge → Supervisor lease → managed llama.cpp path returned HTTP 200 and exact content `DREAD GPU INFERENCE OK`. This is a real prior inference proof and must be credited. It does not prove that PR #12's new candidate has been installed or that concurrent ComfyUI/video workloads are safe.
+- **ComfyUI:** the live API/system-stats endpoint and installed ComfyUI version were previously checked. MiniMax H3 model assets and relevant workflow nodes were inspected. A valid image artifact from the current integrated path, playable H3 MP4, and FlashVSR output were not accepted by those checks.
+
+### Revised interpretation
+
+- GPU hardware detection and basic managed llama.cpp inference are **historically verified**, not blank/unstarted.
+- DREAD API health and service discovery are **historically verified at specific checkpoints**; service reachability must not be conflated with executable agent capability.
+- ComfyUI API health/model-node presence are **historically verified**; media artifact production remains open.
+- Do not repeat broad GPU discovery, generic API health, or standalone inference tests without a reason. For the PR #12 candidate, run only a compact integration regression: candidate API → authenticated Supervisor bridge → existing Supervisor-owned llama.cpp inference, plus health responsiveness during inference. Then test dual-GPU/concurrent media lease behavior only when media integration is ready.
+- Capture a fresh preservation baseline before any workstation install or mutation. Historical service states are not a substitute for a current baseline.
