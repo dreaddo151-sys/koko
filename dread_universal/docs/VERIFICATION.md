@@ -48,7 +48,7 @@ The historical run #77 workflow applied candidate patches to the exact uploaded 
 - Capability imports/records remain disabled by default; no imported code or hooks execute.
 - Pstack importer dry-run needs no API token. Live `--apply` requires `DREAD_API_TOKEN` and sends `Authorization: Bearer` on every lookup/create request.
 - WebSocket task events are emitted only after the corresponding SQLite transaction commits.
-- WebSocket replay uses `after_sequence`, bounded 1,000-event pages, and SQLite recovery after broadcast-channel lag.
+- WebSocket replay uses `after_sequence`, bounded 1,000-event pages, and SQLite recovery after broadcast-channel lag. A network-level test validates authenticated 101 handshake, persisted replay, live event delivery and reconnect replay.
 - A unit test verifies committed task events reach broadcast subscribers; a full network/browser WebSocket handshake and reconnect integration test remains outstanding.
 
 ## Pstack importer (CI verified; live API apply pending)
