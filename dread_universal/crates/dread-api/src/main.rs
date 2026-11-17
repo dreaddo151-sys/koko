@@ -2546,7 +2546,7 @@ async fn execute_approved_task(
     }
     if advance_mission {
         if let Some(mission_id) = mission_id {
-            dispatch_ready_mission_tasks(state.clone(), mission_id).await;
+            dispatch_ready_mission_tasks(state.clone(), mission_id);
         }
     }
 }
