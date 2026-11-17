@@ -111,3 +111,39 @@ The Python GPU Supervisor is the sole authority for GPU leases and process lifec
 ## Completion criteria
 
 See [docs/MASTER-PLAN.md](docs/MASTER-PLAN.md) for clean Ubuntu installation, real model/agent discovery and task execution, dual-3090 lease safety, valid image/video artifacts, legacy Hub regression coverage, self-repair/rollback drills and workstation acceptance.
+
+
+## Ubuntu packaging
+
+After building the API and console:
+
+```bash
+cargo build --release --locked --bin dread-universal
+cd web
+npm install --ignore-scripts --no-audit --no-fund
+npm run build
+cd ..
+bash scripts/package-ubuntu.sh
+```
+
+The packaging script creates an Ubuntu `.deb`, a portable `.tar.gz`, and `SHA256SUMS` under `dist/release/`. It packages the API, production console, default service/agent configuration, bridge helper, user systemd unit and operating documentation.
+
+Portable install (run as the regular desktop user, not with sudo):
+
+```bash
+tar -xzf dist/release/dread-universal-ubuntu-*.tar.gz
+./bundle/install-user.sh
+```
+
+Debian package install:
+
+```bash
+sudo dpkg -i dist/release/dread-universal_*.deb
+/usr/share/dread-universal/configure-user.sh
+```
+
+Both installers create a per-user API token file at `~/.config/dread-universal/dread.env`; keep it private and enter its token in the console. Existing user configuration and database files are preserved. The portable installer backs up the previous application directory and performs a health check before accepting the update; a failed update restores the previous application files. Neither installer stops or replaces the legacy Python Master Hub, ComfyUI or the Python GPU Supervisor.
+
+The packaged API listens only on `127.0.0.1:8765`. GPU inference remains disabled until the already-running authenticated Supervisor bridge URL and token are configured in the private environment file. Do not copy the bridge token into Git or browser storage.
+
+The `.deb` and tarball are packaging candidates, not yet a release acceptance claim: clean-machine installation, upgrade/rollback, reboot persistence, and workstation service-preservation tests remain required.
