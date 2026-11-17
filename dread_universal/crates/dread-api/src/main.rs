@@ -1478,13 +1478,16 @@ async fn gpu_health(State(state): State<AppState>) -> Result<Json<Value>, ApiErr
 
 async fn token_usage(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let conn = db_lock(&state)?;
-    let mut statement = conn.prepare(
-        "SELECT r.result_json FROM task_results r
-         INNER JOIN tasks t ON t.id = r.task_id
-         WHERE t.task_type = 'gpu_chat' AND t.status = 'completed'
-         AND r.result_json IS NOT NULL ORDER BY r.completed_at DESC"
-    ).map_err(|error| ApiError::internal(error.to_string()))?;
-    let rows = statement.query_map([], |row| row.get::<_, String>(0))
+    let mut statement = conn
+        .prepare(
+            "SELECT r.result_json FROM task_results r
+             INNER JOIN tasks t ON t.id = r.task_id
+             WHERE t.task_type = 'gpu_chat' AND t.status = 'completed'
+             AND r.result_json IS NOT NULL ORDER BY r.completed_at DESC",
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
         .map_err(|error| ApiError::internal(error.to_string()))?;
     let mut prompt_tokens = 0_u64;
     let mut completion_tokens = 0_u64;
@@ -1536,22 +1539,29 @@ async fn enhance_prompt(
 ) -> Result<Json<Value>, ApiError> {
     let prompt = input.prompt.trim();
     if prompt.is_empty() || prompt.len() > 32_768 {
-        return Err(ApiError::bad_request("prompt must contain 1 to 32768 bytes"));
+        return Err(ApiError::bad_request(
+            "prompt must contain 1 to 32768 bytes",
+        ));
     }
     let model = input.model.trim();
     if model.is_empty() || model.len() > 200 {
-        return Err(ApiError::bad_request("model must contain 1 to 200 characters"));
+        return Err(ApiError::bad_request(
+            "model must contain 1 to 200 characters",
+        ));
     }
     let supervisor = state.supervisor.as_ref().ok_or_else(|| ApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
-        message: "Prompt enhancement requires the authenticated Python GPU Supervisor bridge".into(),
+        message: "Prompt enhancement requires the authenticated Python GPU Supervisor bridge"
+            .into(),
     })?;
     let available = state.gpu.models().await.map_err(|error| ApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
         message: format!("llama.cpp model discovery failed: {error}"),
     })?;
     if !available.data.iter().any(|item| item.id == model) {
-        return Err(ApiError::bad_request("Requested model is not exposed by the local llama.cpp gateway"));
+        return Err(ApiError::bad_request(
+            "Requested model is not exposed by the local llama.cpp gateway",
+        ));
     }
     let request = json!({
         "model": model,
@@ -1559,15 +1569,22 @@ async fn enhance_prompt(
         "temperature": 0.2,
         "max_tokens": 2048,
         "messages": [
-            {"role": "system", "content": "Improve the user's prompt for clarity, specificity, useful constraints, and measurable output. Preserve the user's intent. Do not answer the prompt. Return only the improved prompt, with no preamble or commentary."},
+            {
+                "role": "system",
+                "content": "Improve the user's prompt for clarity, specificity, useful constraints, and measurable output. Preserve the user's intent. Do not answer the prompt. Return only the improved prompt, with no preamble or commentary."
+            },
             {"role": "user", "content": prompt}
         ]
     });
-    let response = supervisor.chat_completion(&request).await.map_err(|error| ApiError {
-        status: StatusCode::SERVICE_UNAVAILABLE,
-        message: format!("Local prompt enhancement failed: {error}"),
-    })?;
-    let enhanced = response.pointer("/choices/0/message/content")
+    let response = supervisor
+        .chat_completion(&request)
+        .await
+        .map_err(|error| ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: format!("Local prompt enhancement failed: {error}"),
+        })?;
+    let enhanced = response
+        .pointer("/choices/0/message/content")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty() && value.len() <= 65_536)
