@@ -1051,77 +1051,31 @@ async fn execute_gpu_chat(
     payload: &Value,
 ) -> Result<Value, String> {
     validate_gpu_chat_payload(payload)?;
-    let lease = supervisor
-        .acquire_tensor_lease()
+    let model = payload["model"].as_str().unwrap_or_default();
+    let available = gpu
+        .models()
         .await
-        .map_err(|error| format!("Python GPU Supervisor lease acquisition failed: {error}"))?;
-
-    let inference = async {
-        let model = payload["model"].as_str().unwrap_or_default();
-        let available = gpu
-            .models()
-            .await
-            .map_err(|error| format!("GPU model discovery failed: {error}"))?;
-        if !available.data.iter().any(|item| item.id == model) {
-            return Err(format!(
-                "Requested model '{model}' is not exposed by the local GPU gateway"
-            ));
-        }
-        let mut request = json!({
-            "model": model,
-            "messages": payload["messages"],
-            "stream": false
-        });
-        if let Some(temperature) = payload.get("temperature") {
-            request["temperature"] = temperature.clone();
-        }
-        if let Some(max_tokens) = payload.get("max_tokens") {
-            request["max_tokens"] = max_tokens.clone();
-        }
-        let response = gpu
-            .post_v1("/v1/chat/completions", &request)
-            .await
-            .map_err(|error| format!("GPU inference request failed: {error}"))?;
-        let status = response.status();
-        if response
-            .content_length()
-            .is_some_and(|length| length > 1_048_576)
-        {
-            return Err("GPU inference response exceeds the 1 MiB task-result limit".to_string());
-        }
-        let mut stream = response.bytes_stream();
-        let mut body = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk
-                .map_err(|error| format!("Could not read GPU inference response: {error}"))?;
-            if body.len().saturating_add(chunk.len()) > 1_048_576 {
-                return Err("GPU inference response exceeds the 1 MiB task-result limit".to_string());
-            }
-            body.extend_from_slice(&chunk);
-        }
-        if !status.is_success() {
-            return Err(format!(
-                "GPU gateway returned HTTP {}: {}",
-                status.as_u16(),
-                String::from_utf8_lossy(&body)
-            ));
-        }
-        serde_json::from_slice(&body)
-            .map_err(|error| format!("GPU gateway returned invalid JSON: {error}"))
+        .map_err(|error| format!("GPU model discovery failed: {error}"))?;
+    if !available.data.iter().any(|item| item.id == model) {
+        return Err(format!(
+            "Requested model '{model}' is not exposed by the local GPU gateway"
+        ));
     }
-    .await;
-
-    let release = lease.release().await;
-    match (inference, release) {
-        (Ok(result), Ok(())) => Ok(result),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(error)) => Err(format!(
-            "Inference completed but GPU Supervisor lease release failed: {error}"
-        )),
-        (Err(inference_error), Err(release_error)) => Err(format!(
-            "{inference_error}; GPU Supervisor lease release also failed: {release_error}"
-        )),
+    let mut request = json!({
+        "model": model,
+        "messages": payload["messages"],
+        "stream": false
+    });
+    if let Some(temperature) = payload.get("temperature") {
+        request["temperature"] = temperature.clone();
     }
+    if let Some(max_tokens) = payload.get("max_tokens") {
+        request["max_tokens"] = max_tokens.clone();
+    }
+    supervisor
+        .chat_completion(&request)
+        .await
+        .map_err(|error| format!("Python GPU Supervisor inference failed: {error}"))
 }
 
 async fn execute_approved_task(
@@ -1524,91 +1478,37 @@ async fn gpu_inference(
     State(state): State<AppState>,
     Path(path): Path<String>,
     Json(payload): Json<Value>,
-) -> Result<Response, ApiError> {
-    if !path.starts_with("v1/") {
+) -> Result<Json<Value>, ApiError> {
+    if path != "v1/chat/completions" {
         return Err(ApiError::not_found(
-            "Only GPU gateway /v1/ endpoints are exposed",
+            "Only Supervisor-managed non-streaming chat completions are enabled",
         ));
     }
-
+    validate_gpu_chat_payload(&payload).map_err(ApiError::bad_request)?;
     let supervisor = state.supervisor.as_ref().ok_or_else(|| ApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
         message: "GPU inference is disabled until the authenticated Python GPU Supervisor bridge is configured".into(),
     })?;
-    let lease = supervisor
-        .acquire_tensor_lease()
+    let model = payload["model"].as_str().unwrap_or_default();
+    let available = state.gpu.models().await.map_err(|error| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        message: format!("GPU model discovery failed: {error}"),
+    })?;
+    if !available.data.iter().any(|item| item.id == model) {
+        return Err(ApiError::bad_request(
+            "Requested model is not exposed by the local GPU gateway",
+        ));
+    }
+    let mut request = payload;
+    request["stream"] = Value::Bool(false);
+    let result = supervisor
+        .chat_completion(&request)
         .await
         .map_err(|error| ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
-            message: format!("Python GPU Supervisor lease acquisition failed: {error}"),
+            message: format!("Python GPU Supervisor inference failed: {error}"),
         })?;
-    let gateway_path = format!("/{path}");
-
-    let upstream = state
-        .gpu
-        .post_v1(&gateway_path, &payload)
-        .await
-        .map_err(|e| ApiError {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            message: format!("GPU inference gateway request failed: {e}"),
-        })?;
-
-    let status =
-        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-
-    let content_type = upstream
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/json")
-        .to_string();
-
-    let cache_control = upstream
-        .headers()
-        .get(reqwest::header::CACHE_CONTROL)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
-
-    let buffering = upstream
-        .headers()
-        .get("x-accel-buffering")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
-
-    let body_stream = Box::pin(
-        upstream
-            .bytes_stream()
-            .map(|chunk| chunk.map_err(std::io::Error::other)),
-    );
-    let stream = futures::stream::unfold((body_stream, Some(lease)), |(mut body, mut lease)| async move {
-        match body.next().await {
-            Some(chunk) => Some((chunk, (body, lease))),
-            None => {
-                if let Some(lease) = lease.take()
-                    && let Err(error) = lease.release().await
-                {
-                    eprintln!("[DREAD GPU] Supervisor lease release after streamed inference failed: {error}");
-                }
-                None
-            }
-        }
-    });
-
-    let mut builder = Response::builder()
-        .status(status)
-        .header("content-type", content_type);
-
-    if let Some(value) = cache_control {
-        builder = builder.header("cache-control", value);
-    }
-
-    if let Some(value) = buffering {
-        builder = builder.header("x-accel-buffering", value);
-    }
-
-    builder
-        .body(Body::from_stream(stream))
-        .map_err(|e| ApiError::internal(format!("Could not forward GPU response: {e}")))
+    Ok(Json(result))
 }
 
 fn constant_time_eq(expected: &[u8], actual: &[u8]) -> bool {
@@ -2827,9 +2727,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gpu_inference_forwards_sse_and_headers() {
+    async fn gpu_inference_routes_non_streaming_chat_through_supervisor_bridge() {
         let (router, server) = test_app().await;
-
         let response = router
             .oneshot(
                 Request::builder()
@@ -2839,7 +2738,7 @@ mod tests {
                     .body(Body::from(
                         json!({
                             "model": "qwen3.8:27b",
-                            "stream": true,
+                            "stream": false,
                             "messages": [{"role": "user", "content": "hello"}]
                         })
                         .to_string(),
@@ -2848,21 +2747,10 @@ mod tests {
             )
             .await
             .unwrap();
-
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers().get("content-type").unwrap(),
-            "text/event-stream"
-        );
-        assert_eq!(response.headers().get("cache-control").unwrap(), "no-cache");
-        assert_eq!(response.headers().get("x-accel-buffering").unwrap(), "no");
-
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let text = String::from_utf8(body.to_vec()).unwrap();
-
-        assert!(text.contains("hello"));
-        assert!(text.contains("[DONE]"));
-
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["choices"][0]["message"]["content"], "hello");
         server.abort();
     }
 

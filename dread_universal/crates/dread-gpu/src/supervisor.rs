@@ -55,6 +55,52 @@ impl GpuSupervisorClient {
         })
     }
 
+    pub async fn chat_completion(&self, payload: &Value) -> Result<Value> {
+        let body = serde_json::to_vec(payload).context("Could not encode GPU chat payload")?;
+        ensure!(
+            body.len() <= 1_048_576,
+            "GPU chat request exceeds the 1 MiB Supervisor bridge limit"
+        );
+        let mut response = self
+            .http
+            .post(format!("{}/v1/chat/completions", self.base_url))
+            .bearer_auth(&self.token)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .timeout(Duration::from_secs(1805))
+            .body(body)
+            .send()
+            .await
+            .context("Python GPU Supervisor bridge request failed")?;
+        let status = response.status();
+        if response
+            .content_length()
+            .is_some_and(|length| length > 1_048_576)
+        {
+            anyhow::bail!("GPU Supervisor response exceeds the 1 MiB result limit");
+        }
+        let mut response_body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .context("Could not read GPU Supervisor response")?
+        {
+            ensure!(
+                response_body.len().saturating_add(chunk.len()) <= 1_048_576,
+                "GPU Supervisor response exceeds the 1 MiB result limit"
+            );
+            response_body.extend_from_slice(&chunk);
+        }
+        if !status.is_success() {
+            anyhow::bail!(
+                "GPU Supervisor returned HTTP {}: {}",
+                status.as_u16(),
+                String::from_utf8_lossy(&response_body)
+            );
+        }
+        serde_json::from_slice(&response_body)
+            .context("GPU Supervisor returned invalid JSON")
+    }
+
     pub async fn acquire_tensor_lease(&self) -> Result<GpuLeaseGuard> {
         let response = self
             .http
