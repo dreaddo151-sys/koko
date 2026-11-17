@@ -2922,6 +2922,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn task_payload_round_trips_5k_10k_and_20k_prompts_exactly() {
+        let (router, server) = test_app().await;
+        for size in [5_000, 10_000, 20_000] {
+            let prompt = "x".repeat(size);
+            let payload = json!({
+                "title": format!("Long prompt {size}"),
+                "task_type": "test",
+                "payload": {"prompt": prompt}
+            });
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/tasks")
+                        .header("content-type", "application/json")
+                        .body(Body::from(payload.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let created: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                created["item"]["payload"]["prompt"].as_str(),
+                Some(prompt.as_str()),
+                "prompt payload changed at {size} bytes"
+            );
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn task_creation_requires_approval_and_persists_event_history() {
         let (router, server) = test_app().await;
         let payload = json!({"title": "Audit workflow", "task_type": "security_audit", "payload": {"target": "local-project"}});
