@@ -458,9 +458,7 @@ fn parse_cuda_toolkits(
 fn cuda_toolkits() -> Vec<CudaToolkit> {
     let candidates = find_cuda_nvcc_candidates()
         .into_iter()
-        .filter_map(|compiler| {
-            Some((compiler.clone(), run_probe(&compiler, &["--version"])?))
-        })
+        .filter_map(|compiler| Some((compiler.clone(), run_probe(&compiler, &["--version"])?)))
         .collect::<Vec<_>>();
     parse_cuda_toolkits(candidates)
 }
@@ -844,15 +842,9 @@ mod tests {
         ]);
         assert_eq!(inventory.len(), 2);
         assert_eq!(inventory[0].version, "12.8");
-        assert_eq!(
-            inventory[0].compiler_path,
-            "/usr/local/cuda-12.8/bin/nvcc"
-        );
+        assert_eq!(inventory[0].compiler_path, "/usr/local/cuda-12.8/bin/nvcc");
         assert_eq!(inventory[1].version, "13.0");
-        assert_eq!(
-            inventory[1].compiler_path,
-            "/usr/local/cuda-13.0/bin/nvcc"
-        );
+        assert_eq!(inventory[1].compiler_path, "/usr/local/cuda-13.0/bin/nvcc");
     }
 
     #[test]
