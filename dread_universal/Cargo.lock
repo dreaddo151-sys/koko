@@ -235,6 +235,7 @@ dependencies = [
  "dread-agents",
  "dread-discovery",
  "dread-gpu",
+ "dread-orchestrator",
  "futures",
  "reqwest",
  "rusqlite",
