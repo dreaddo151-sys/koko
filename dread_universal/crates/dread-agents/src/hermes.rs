@@ -380,9 +380,13 @@ impl AgentAdapter for HermesApiAdapter {
         })
     }
 
-    fn task_status<'a>(&'a self, task_id: &'a str) -> AdapterFuture<'a, AgentTask> {
+    fn task_status<'a>(
+        &'a self,
+        task_id: &'a str,
+        provider_task_id: &'a str,
+    ) -> AdapterFuture<'a, AgentTask> {
         Box::pin(async move {
-            let run = self.read_run(task_id).await?;
+            let run = self.read_run(provider_task_id).await?;
             Ok(self.to_task(task_id, &run))
         })
     }
@@ -390,15 +394,17 @@ impl AgentAdapter for HermesApiAdapter {
     fn events<'a>(
         &'a self,
         task_id: &'a str,
+        provider_task_id: &'a str,
         after_sequence: u64,
     ) -> AdapterFuture<'a, Vec<AgentEvent>> {
         Box::pin(async move {
-            validate_run_id(task_id)?;
+            validate_run_id(provider_task_id)?;
             let response = self
                 .client
-                .get(self.endpoint(&format!("/v1/runs/{task_id}/events")))
+                .get(self.endpoint(&format!("/v1/runs/{provider_task_id}/events")))
                 .bearer_auth(&self.api_key)
                 .header("Accept", "text/event-stream")
+                .timeout(Duration::from_secs(30))
                 .send()
                 .await
                 .map_err(|error| {
@@ -445,25 +451,33 @@ impl AgentAdapter for HermesApiAdapter {
         })
     }
 
-    fn cancel_task<'a>(&'a self, task_id: &'a str) -> AdapterFuture<'a, AgentTask> {
+    fn cancel_task<'a>(
+        &'a self,
+        task_id: &'a str,
+        provider_task_id: &'a str,
+    ) -> AdapterFuture<'a, AgentTask> {
         Box::pin(async move {
-            validate_run_id(task_id)?;
+            validate_run_id(provider_task_id)?;
             let _ack = self
                 .json_request(
                     reqwest::Method::POST,
-                    &format!("/v1/runs/{task_id}/stop"),
+                    &format!("/v1/runs/{provider_task_id}/stop"),
                     Some(json!({})),
                     None,
                 )
                 .await?;
-            let run = self.read_run(task_id).await?;
+            let run = self.read_run(provider_task_id).await?;
             Ok(self.to_task(task_id, &run))
         })
     }
 
-    fn task_result<'a>(&'a self, task_id: &'a str) -> AdapterFuture<'a, AgentTask> {
+    fn task_result<'a>(
+        &'a self,
+        task_id: &'a str,
+        provider_task_id: &'a str,
+    ) -> AdapterFuture<'a, AgentTask> {
         Box::pin(async move {
-            let run = self.read_run(task_id).await?;
+            let run = self.read_run(provider_task_id).await?;
             Ok(self.to_task(task_id, &run))
         })
     }
