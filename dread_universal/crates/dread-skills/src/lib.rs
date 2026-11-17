@@ -362,18 +362,37 @@ pub fn load_skill_context(
         .canonicalize()
         .map_err(|e| SkillError::InvalidRoot(e.to_string()))?;
     let descriptor = read_descriptor(&root, id)?;
-    let path = root.join(PathBuf::from(&descriptor.relative_path));
-
-    if path.components().any(|part| {
-        matches!(
-            part,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    }) {
+    let relative_path = PathBuf::from(&descriptor.relative_path);
+    if relative_path.is_absolute()
+        || relative_path.components().any(|part| {
+            matches!(
+                part,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
         return Err(SkillError::UnsafePath);
     }
 
-    let bytes = fs::read(path).map_err(|e| SkillError::Io(e.to_string()))?;
+    let path = root.join(relative_path);
+    let metadata = fs::symlink_metadata(&path).map_err(|e| SkillError::Io(e.to_string()))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(SkillError::UnsafePath);
+    }
+    if metadata.len() > MAX_SKILL_BYTES as u64 {
+        return Err(SkillError::TooLarge);
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| SkillError::Io(e.to_string()))?;
+    if !canonical.starts_with(&root) {
+        return Err(SkillError::UnsafePath);
+    }
+
+    let bytes = fs::read(canonical).map_err(|e| SkillError::Io(e.to_string()))?;
+    if bytes.len() > MAX_SKILL_BYTES {
+        return Err(SkillError::TooLarge);
+    }
     let text = String::from_utf8(bytes).map_err(|_| SkillError::InvalidUtf8)?;
     Ok(SkillContext {
         descriptor,
