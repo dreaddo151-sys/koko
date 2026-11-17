@@ -55,16 +55,10 @@ impl HermesApiAdapter {
                 false,
             ));
         }
-        let loopback = match url.host_str() {
-            Some("localhost") => true,
-            Some(host) => host
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .parse::<IpAddr>()
-                .map(|ip| ip.is_loopback())
-                .unwrap_or(false),
-            None => false,
-        };
+        let loopback = url
+            .host_str()
+            .and_then(|host| host.parse::<IpAddr>().ok())
+            .is_some_and(|ip| ip.is_loopback());
         if !loopback {
             return Err(adapter_error(
                 "unsafe_endpoint",
@@ -225,10 +219,14 @@ impl AgentAdapter for HermesApiAdapter {
                 .json_request(reqwest::Method::GET, "/v1/capabilities", None, None)
                 .await?;
             let features = value.get("features").and_then(Value::as_object);
-            let supports_runs = features
-                .and_then(|items| items.get("run_submission"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
+            let supports_runs = ["run_submission", "run_status", "run_events_sse", "run_stop"]
+                .iter()
+                .all(|feature| {
+                    features
+                        .and_then(|items| items.get(*feature))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                });
             if !supports_runs {
                 return Ok(Vec::new());
             }
@@ -311,8 +309,40 @@ impl AgentAdapter for HermesApiAdapter {
                             false,
                         ));
                     }
+                    if field == "previous_response_id"
+                        && (!value.is_string()
+                            || value.as_str().unwrap_or_default().len() > 160)
+                    {
+                        return Err(adapter_error(
+                            "invalid_input",
+                            "Hermes previous_response_id must be text of at most 160 bytes".into(),
+                            false,
+                        ));
+                    }
+                    if field == "conversation_history" {
+                        let history_size = serde_json::to_vec(value)
+                            .map(|encoded| encoded.len())
+                            .unwrap_or(usize::MAX);
+                        if !value.is_array() || history_size > 512 * 1024 {
+                            return Err(adapter_error(
+                                "invalid_input",
+                                "Hermes conversation_history must be an array no larger than 512 KiB".into(),
+                                false,
+                            ));
+                        }
+                    }
                     body[field] = value.clone();
                 }
+            }
+            let body_size = serde_json::to_vec(&body)
+                .map(|encoded| encoded.len())
+                .unwrap_or(usize::MAX);
+            if body_size > MAX_INPUT_BYTES + 65536 {
+                return Err(adapter_error(
+                    "invalid_input",
+                    "Hermes run request body exceeded the 1.0625 MiB adapter limit".into(),
+                    false,
+                ));
             }
             let value = self
                 .json_request(
@@ -516,8 +546,10 @@ fn run_state(status: &str) -> AgentTaskState {
 }
 
 fn parse_sse_events(task_id: &str, body: &str, after_sequence: u64) -> Vec<AgentEvent> {
+    let normalized_body = body.replace("\r\n", "\n");
     let mut events = Vec::new();
-    for block in body.split("\n\n") {
+    let mut fallback_sequence = 0_u64;
+    for block in normalized_body.split("\n\n") {
         let mut event_type = "message".to_string();
         let mut data = String::new();
         let mut event_id = None;
@@ -536,6 +568,7 @@ fn parse_sse_events(task_id: &str, body: &str, after_sequence: u64) -> Vec<Agent
         if data.is_empty() {
             continue;
         }
+        fallback_sequence += 1;
         let payload =
             serde_json::from_str::<Value>(&data).unwrap_or_else(|_| json!({"data": data}));
         let sequence = payload
@@ -543,7 +576,7 @@ fn parse_sse_events(task_id: &str, body: &str, after_sequence: u64) -> Vec<Agent
             .or_else(|| payload.get("sequence_number"))
             .and_then(Value::as_u64)
             .or_else(|| event_id.as_deref().and_then(|value| value.parse().ok()))
-            .unwrap_or(events.len() as u64 + 1);
+            .unwrap_or(fallback_sequence);
         if sequence <= after_sequence {
             continue;
         }
@@ -585,6 +618,15 @@ mod tests {
         assert_eq!(run_state("interrupted"), AgentTaskState::Failed);
         assert_eq!(run_state("stopping"), AgentTaskState::Running);
         assert_eq!(run_state("unknown"), AgentTaskState::Unknown);
+    }
+
+    #[test]
+    fn parses_crlf_streams_and_advances_fallback_sequence_after_filtering() {
+        let body = "event: tool.started\r\ndata: {\"tool\":\"terminal\"}\r\n\r\nevent: run.completed\r\ndata: {\"output\":\"done\"}\r\n\r\n";
+        let parsed = parse_sse_events("run_abc123", body, 1);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].sequence, 2);
+        assert_eq!(parsed[0].event_type, "run.completed");
     }
 
     #[test]
