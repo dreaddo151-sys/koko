@@ -137,11 +137,16 @@ fn nvidia_devices(binary: &Path) -> Vec<GpuDevice> {
                 vendor: "nvidia".into(),
                 name: name.into(),
                 vram_mib: memory.trim().parse().ok(),
+                vram_used_mib: None,
+                vram_free_mib: None,
                 driver_version: None,
                 pcie_link_gen: None,
                 pcie_link_width: None,
+                pcie_link_gen_max: None,
+                pcie_link_width_max: None,
                 utilization_percent: None,
                 temperature_c: None,
+                power_draw_mw: None,
             })
         })
         .collect()
@@ -168,11 +173,16 @@ fn amd_devices(binary: &Path) -> Vec<GpuDevice> {
                 vendor: "amd".into(),
                 name: name.into(),
                 vram_mib: None,
+                vram_used_mib: None,
+                vram_free_mib: None,
                 driver_version: None,
                 pcie_link_gen: None,
                 pcie_link_width: None,
+                pcie_link_gen_max: None,
+                pcie_link_width_max: None,
                 utilization_percent: None,
                 temperature_c: None,
+                power_draw_mw: None,
             })
         })
         .collect()
@@ -195,11 +205,16 @@ fn apple_devices(binary: &Path) -> Vec<GpuDevice> {
                     vendor: "apple".into(),
                     name,
                     vram_mib: current_vram.take(),
+                    vram_used_mib: None,
+                    vram_free_mib: None,
                     driver_version: None,
                     pcie_link_gen: None,
                     pcie_link_width: None,
+                    pcie_link_gen_max: None,
+                    pcie_link_width_max: None,
                     utilization_percent: None,
                     temperature_c: None,
+                    power_draw_mw: None,
                 });
             }
             current_name = Some(value.trim().to_string());
@@ -213,11 +228,16 @@ fn apple_devices(binary: &Path) -> Vec<GpuDevice> {
             vendor: "apple".into(),
             name,
             vram_mib: current_vram,
+            vram_used_mib: None,
+            vram_free_mib: None,
             driver_version: None,
             pcie_link_gen: None,
             pcie_link_width: None,
+            pcie_link_gen_max: None,
+            pcie_link_width_max: None,
             utilization_percent: None,
             temperature_c: None,
+            power_draw_mw: None,
         });
     }
     devices
@@ -396,14 +416,19 @@ mod tests {
 
     #[test]
     fn nvidia_csv_parser_includes_driver_pcie_and_live_telemetry() {
-        let sample = "NVIDIA GeForce RTX 3090, 24576, 550.90.07, 1, 16, 37, 52\n";
+        let sample = "NVIDIA GeForce RTX 3090, 24576, 12000, 12576, 550.90.07, 1, 1, 4, 16, 37, 52, 280.5\n";
         let parsed = parse_nvidia_csv(sample);
         assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].vram_used_mib, Some(12000));
+        assert_eq!(parsed[0].vram_free_mib, Some(12576));
         assert_eq!(parsed[0].driver_version.as_deref(), Some("550.90.07"));
         assert_eq!(parsed[0].pcie_link_gen, Some(1));
-        assert_eq!(parsed[0].pcie_link_width, Some(16));
+        assert_eq!(parsed[0].pcie_link_width, Some(1));
+        assert_eq!(parsed[0].pcie_link_gen_max, Some(4));
+        assert_eq!(parsed[0].pcie_link_width_max, Some(16));
         assert_eq!(parsed[0].utilization_percent, Some(37));
         assert_eq!(parsed[0].temperature_c, Some(52));
+        assert_eq!(parsed[0].power_draw_mw, Some(280_500));
     }
 
     #[test]
@@ -438,11 +463,16 @@ mod tests {
                     vendor: "nvidia".into(),
                     name: name.trim().into(),
                     vram_mib: memory.trim().parse().ok(),
+                    vram_used_mib: None,
+                    vram_free_mib: None,
                     driver_version: None,
                     pcie_link_gen: None,
                     pcie_link_width: None,
+                    pcie_link_gen_max: None,
+                    pcie_link_width_max: None,
                     utilization_percent: None,
                     temperature_c: None,
+                    power_draw_mw: None,
                 })
             })
             .collect::<Vec<_>>();
