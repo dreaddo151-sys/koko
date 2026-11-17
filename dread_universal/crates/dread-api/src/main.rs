@@ -1694,8 +1694,15 @@ async fn execute_approved_task(
                     }
                     "gpu_chat" => match runner_supervisor.as_ref() {
                         Some(supervisor) => {
-                            let contexts = load_enabled_skill_contexts(&runner_db, &runner_payload)?;
-                            execute_gpu_chat(&runner_gpu, supervisor, &runner_payload, &contexts).await
+                            let contexts =
+                                load_enabled_skill_contexts(&runner_db, &runner_payload)?;
+                            execute_gpu_chat(
+                                &runner_gpu,
+                                supervisor,
+                                &runner_payload,
+                                &contexts,
+                            )
+                            .await
                         }
                         None => Err("GPU chat is disabled until the Python GPU Supervisor bridge is configured".into()),
                     },
@@ -2410,7 +2417,11 @@ mod tests {
         let valid = json!({
             "model": "qwen3.8:27b",
             "messages": [{"role": "user", "content": "Use the reviewed skill"}],
-            "skill_ids": ["pstack.skill.architect", "pstack.skill.correct", "pstack.agent.poteto-agent"]
+            "skill_ids": [
+                "pstack.skill.architect",
+                "pstack.skill.correct",
+                "pstack.agent.poteto-agent"
+            ]
         });
         assert!(validate_gpu_chat_payload(&valid).is_ok());
 
