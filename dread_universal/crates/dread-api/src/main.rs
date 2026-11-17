@@ -606,6 +606,39 @@ async fn import_discovered_skills(
     }))))
 }
 
+async fn preview_capability(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let encoded = conn.query_row(
+        "SELECT record_json FROM capabilities WHERE id = ?1",
+        params![id],
+        |row| row.get::<_, String>(0),
+    ).optional().map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Capability not found"))?;
+    let record: CapabilityRecord = serde_json::from_str(&encoded)
+        .map_err(|e| ApiError::internal(format!("Stored capability is invalid: {e}")))?;
+    if record.kind != CapabilityKind::Skill {
+        return Err(ApiError::bad_request("Only Markdown skill capabilities support preview"));
+    }
+    let root = pstack_skills_root()?;
+    let context = load_skill_context(&root, &record.id)
+        .map_err(|e| ApiError::conflict(format!("Skill source is unavailable: {e}")))?;
+    let expected = record.manifest.get("fingerprint").and_then(Value::as_str).unwrap_or_default();
+    if expected != context.descriptor.fingerprint {
+        return Err(ApiError::conflict("Skill content changed since import; re-import before review"));
+    }
+    Ok(Json(json!({
+        "id": record.id,
+        "name": record.name,
+        "description": record.description,
+        "content": context.content,
+        "trust": "untrusted_context",
+        "execution": "never"
+    })))
+}
+
 async fn enable_capability(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1853,6 +1886,7 @@ fn app(state: AppState) -> Router {
         )
         .route("/api/capabilities/discover", get(discover_pstack_skills))
         .route("/api/capabilities/import", axum::routing::post(import_discovered_skills))
+        .route("/api/capabilities/{id}/preview", get(preview_capability))
         .route("/api/capabilities/{id}/enable", axum::routing::post(enable_capability))
         .route("/api/capabilities/{id}/disable", axum::routing::post(disable_capability))
         .route("/api/capabilities/{id}", get(get_capability))
