@@ -15,13 +15,13 @@ if [[ ! -r /etc/os-release ]]; then
 fi
 # shellcheck disable=SC1091
 . /etc/os-release
-if [[ "\${ID:-}" != ubuntu ]] || ! dpkg --compare-versions "\${VERSION_ID:-0}" ge 24.04; then
-  printf 'Unsupported operating system: %s (requires Ubuntu 24.04 or later).\n' "\${PRETTY_NAME:-unknown}" >&2
+if [[ "${ID:-}" != ubuntu ]] || ! dpkg --compare-versions "${VERSION_ID:-0}" ge 24.04; then
+  printf 'Unsupported operating system: %s (requires Ubuntu 24.04 or later).\n' "${PRETTY_NAME:-unknown}" >&2
   exit 1
 fi
 
-WORKSPACE="\${DREAD_WORKSPACE:-$HOME/dread_workspace}"
-if [[ -d /mnt/sabrent/dread_workspace && -z "\${DREAD_WORKSPACE:-}" ]]; then
+WORKSPACE="${DREAD_WORKSPACE:-$HOME/dread_workspace}"
+if [[ -d /mnt/sabrent/dread_workspace && -z "${DREAD_WORKSPACE:-}" ]]; then
   WORKSPACE=/mnt/sabrent/dread_workspace
 fi
 BASE_DIR="$HOME/.local/share/dread-universal/baselines"
@@ -34,7 +34,7 @@ OUT="$BASE_DIR/workstation-baseline-$STAMP.txt"
   printf 'Captured UTC: %s\n' "$(date -u -Is)"
   printf 'Hostname: %s\n' "$(hostname)"
   printf 'Kernel: %s\n' "$(uname -a)"
-  printf 'OS: %s\n' "\${PRETTY_NAME:-unknown}"
+  printf 'OS: %s\n' "${PRETTY_NAME:-unknown}"
   printf 'Architecture: %s\n' "$(dpkg --print-architecture)"
   printf 'Workspace: %s\n' "$WORKSPACE"
   printf '\n=== USER SERVICES (READ ONLY) ===\n'
@@ -55,10 +55,10 @@ OUT="$BASE_DIR/workstation-baseline-$STAMP.txt"
     'GPU Supervisor gateway|http://127.0.0.1:11500/' \
     'Authenticated bridge|http://127.0.0.1:11502/health' \
     'Rust API|http://127.0.0.1:8765/health'; do
-    label="\${entry%%|*}"
-    url="\${entry#*|}"
+    label="${entry%%|*}"
+    url="${entry#*|}"
     code="$(curl --connect-timeout 2 --max-time 3 --silent --output /dev/null --write-out '%{http_code}' "$url" 2>/dev/null || true)"
-    printf '%s: HTTP %s\n' "$label" "\${code:-unreachable}"
+    printf '%s: HTTP %s\n' "$label" "${code:-unreachable}"
   done
   printf '\n=== NVIDIA DEVICES / LINK STATE ===\n'
   if command -v nvidia-smi >/dev/null 2>&1; then
