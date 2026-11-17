@@ -22,6 +22,10 @@ pub struct ExecutionConfig {
     pub max_admitted: usize,
     pub max_attempts: u8,
     pub attempt_timeout: Duration,
+    /// Initial delay before a retry; zero disables retry waiting.
+    pub retry_backoff: Duration,
+    /// Upper bound for exponential retry delay.
+    pub max_retry_backoff: Duration,
 }
 
 impl Default for ExecutionConfig {
@@ -31,6 +35,8 @@ impl Default for ExecutionConfig {
             max_admitted: 8,
             max_attempts: 1,
             attempt_timeout: Duration::from_secs(1805),
+            retry_backoff: Duration::from_millis(250),
+            max_retry_backoff: Duration::from_secs(5),
         }
     }
 }
@@ -41,6 +47,7 @@ pub enum ConfigError {
     AdmissionBelowConcurrency,
     ZeroAttempts,
     ZeroTimeout,
+    MaxRetryBackoffBelowInitial,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +99,9 @@ impl ExecutionGate {
         if config.attempt_timeout.is_zero() {
             return Err(ConfigError::ZeroTimeout);
         }
+        if config.max_retry_backoff < config.retry_backoff {
+            return Err(ConfigError::MaxRetryBackoffBelowInitial);
+        }
         Ok(Self {
             semaphore: Arc::new(Semaphore::new(config.max_concurrency)),
             admitted: Arc::new(AtomicUsize::new(0)),
@@ -101,6 +111,39 @@ impl ExecutionGate {
 
     pub fn admitted_count(&self) -> usize {
         self.admitted.load(Ordering::Acquire)
+    }
+
+    async fn wait_before_retry(
+        &self,
+        attempts: u8,
+        cancellation: &mut watch::Receiver<bool>,
+    ) -> Result<(), ExecutionError> {
+        if *cancellation.borrow() {
+            return Err(ExecutionError::Cancelled { attempts });
+        }
+        if self.config.retry_backoff.is_zero() {
+            return Ok(());
+        }
+
+        let shift = u32::from(attempts.saturating_sub(1)).min(31);
+        let multiplier = 1u32 << shift;
+        let delay = self
+            .config
+            .retry_backoff
+            .checked_mul(multiplier)
+            .unwrap_or(self.config.max_retry_backoff)
+            .min(self.config.max_retry_backoff);
+
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => Ok(()),
+            changed = cancellation.changed() => {
+                if changed.is_err() || *cancellation.borrow() {
+                    Err(ExecutionError::Cancelled { attempts })
+                } else {
+                    self.wait_before_retry(attempts, cancellation).await
+                }
+            }
+        }
     }
 
     fn try_admit(&self) -> Result<AdmissionGuard, ExecutionError> {
@@ -183,7 +226,10 @@ impl ExecutionGate {
                 Some(Err(message)) if attempts == self.config.max_attempts => {
                     return Err(ExecutionError::RunnerFailed { attempts, message });
                 }
-                Some(Err(_)) | None if attempts < self.config.max_attempts => continue,
+                Some(Err(_)) | None if attempts < self.config.max_attempts => {
+                    self.wait_before_retry(attempts, &mut cancellation).await?;
+                    continue;
+                }
                 None => return Err(ExecutionError::TimedOut { attempts }),
                 Some(Err(message)) => {
                     return Err(ExecutionError::RunnerFailed { attempts, message });
@@ -407,6 +453,8 @@ mod tests {
             max_admitted,
             max_attempts: 1,
             attempt_timeout: Duration::from_secs(2),
+            retry_backoff: Duration::ZERO,
+            max_retry_backoff: Duration::ZERO,
         }
     }
 
@@ -427,6 +475,13 @@ mod tests {
         assert_eq!(
             ExecutionGate::new(config(2, 1)).err(),
             Some(ConfigError::AdmissionBelowConcurrency)
+        );
+        let mut invalid_backoff = config(1, 1);
+        invalid_backoff.retry_backoff = Duration::from_secs(2);
+        invalid_backoff.max_retry_backoff = Duration::from_secs(1);
+        assert_eq!(
+            ExecutionGate::new(invalid_backoff).err(),
+            Some(ConfigError::MaxRetryBackoffBelowInitial)
         );
     }
 
@@ -544,6 +599,38 @@ mod tests {
 
         assert_eq!(result.attempts, 2);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_wait_is_cancellable_before_next_attempt() {
+        let mut retry_config = config(1, 1);
+        retry_config.max_attempts = 3;
+        retry_config.retry_backoff = Duration::from_secs(5);
+        retry_config.max_retry_backoff = Duration::from_secs(10);
+        let gate = ExecutionGate::new(retry_config).unwrap();
+        let (cancel, receiver) = watch::channel(false);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_runner = Arc::clone(&calls);
+
+        let task = tokio::spawn(async move {
+            gate.run("cancel-during-backoff", receiver, move |_, _| {
+                let calls = Arc::clone(&calls_for_runner);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err("retryable transport failure".to_string())
+                }
+            }).await
+        });
+        for _ in 0..50 {
+            if calls.load(Ordering::SeqCst) == 1 { break; }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        cancel.send(true).unwrap();
+        assert_eq!(
+            task.await.unwrap(),
+            Err(ExecutionError::Cancelled { attempts: 1 })
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
