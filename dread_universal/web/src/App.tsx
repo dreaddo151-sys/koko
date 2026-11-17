@@ -39,7 +39,7 @@ function App() {
   const [connected,setConnected]=useState(false); const [supervisorOnline,setSupervisorConfigured]=useState(false); const [error,setError]=useState(""); const [busy,setBusy]=useState(false);
   const [models,setModels]=useState<Model[]>([]); const [model,setModel]=useState("");
   const [tasks,setTasks]=useState<Task[]>([]); const [agents,setAgents]=useState<Agent[]>([]); const [capabilities,setCapabilities]=useState<Capability[]>([]); const [services,setServices]=useState<Service[]>([]);
-  const [skillPreview,setSkillPreview]=useState<SkillPreview|null>(null); const [notice,setNotice]=useState("");
+  const [skillPreview,setSkillPreview]=useState<SkillPreview|null>(null); const [notice,setNotice]=useState(""); const [selectedSkills,setSelectedSkills]=useState<string[]>([]);
   const [prompt,setPrompt]=useState(""); const [active,setActive]=useState("");
   const [events,setEvents]=useState<Event[]>([]); const [result,setResult]=useState<Result|null>(null);
   const [page,setPage]=useState<Page>("overview"); const [lastRefresh,setLastRefresh]=useState<number|null>(null);
@@ -74,7 +74,7 @@ function App() {
     if(!token)return;if(type==="gpu_chat"&&!supervisorOnline){setError("GPU inference is locked until the Python GPU Supervisor bridge is online and authenticated.");return;}if(type==="gpu_chat"&&(!model||!prompt.trim())){setError("Select a model and enter a prompt.");return;}
     setBusy(true);setError("");
     try{
-      const payload=type==="gpu_chat"?{model,messages:[{role:"user",content:prompt.trim()}],max_tokens:1024}:{};
+      const payload=type==="gpu_chat"?{model,messages:[{role:"user",content:prompt.trim()}],max_tokens:1024,skill_ids:selectedSkills}:{};
       const out=await api<{item:Task}>("/api/tasks",token,{method:"POST",body:JSON.stringify({title:type==="gpu_chat"?`Chat · ${model}`:"Local service discovery",task_type:type,payload})});
       setTasks(x=>[out.item,...x]);setActive(out.item.id);setPage("tasks");if(type==="gpu_chat")setPrompt("");
     }catch(e){setError(e instanceof Error?e.message:"Task creation failed");}finally{setBusy(false);}
@@ -144,6 +144,7 @@ function App() {
           <section className="panel inference-panel"><PanelTitle icon={<Zap/>} title="INFERENCE COMMAND" meta="APPROVAL REQUIRED"/><div className="panel-intro">Submit a local task. Execution remains gated until an operator approves it.</div>
             <label>MODEL ROUTE</label><select value={model} onChange={e=>setModel(e.target.value)} disabled={!token||!models.length}><option value="">Connect to discover local models</option>{models.map(x=><option key={x.id}>{x.id}</option>)}</select>
             <label>MISSION PROMPT</label><textarea rows={5} value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder="Define the objective for your local model..." disabled={!token}/>
+            <div className="skill-picker"><label>APPROVED SKILL CONTEXT / OPTIONAL</label>{capabilities.filter(x=>x.kind==="skill"&&x.status==="enabled").length?capabilities.filter(x=>x.kind==="skill"&&x.status==="enabled").map(skill=><label className="skill-choice" key={skill.id}><input type="checkbox" checked={selectedSkills.includes(skill.id)} onChange={e=>setSelectedSkills(current=>e.target.checked?[...current,skill.id]:current.filter(id=>id!==skill.id))}/><span>{skill.name}<small>{skill.id}</small></span></label>):<small>No enabled skills. Import, preview and approve them in the Pstack registry.</small>}</div>
             <div className="compose-foot"><small>TEXT ONLY / NON-STREAMING / RESULT CAP 1 MiB</small><button className="primary" disabled={!token||!supervisorOnline||busy||!model||!prompt.trim()} onClick={()=>void create("gpu_chat")}><Plus size={14}/>QUEUE INFERENCE</button></div>
             <div className="approval"><ShieldCheck size={14}/>{supervisorOnline?"Task creation does not execute inference. Operator approval is required.":"GPU inference locked — authenticated Python Supervisor bridge unavailable."}</div>
           </section>
