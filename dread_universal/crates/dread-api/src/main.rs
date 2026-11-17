@@ -812,14 +812,18 @@ async fn enable_capability(
 
     let root = pstack_skills_root()?;
     let fingerprint = match record.kind {
-        CapabilityKind::Skill => load_skill_context(&root, &record.id)
-            .map_err(|e| ApiError::conflict(format!("Skill source is no longer valid: {e}")))?
-            .descriptor
-            .fingerprint,
-        CapabilityKind::Agent => load_agent_profile_context(&root, &record.id)
-            .map_err(|e| ApiError::conflict(format!("Agent profile is no longer valid: {e}")))?
-            .descriptor
-            .fingerprint,
+        CapabilityKind::Skill => {
+            load_skill_context(&root, &record.id)
+                .map_err(|e| ApiError::conflict(format!("Skill source is no longer valid: {e}")))?
+                .descriptor
+                .fingerprint
+        }
+        CapabilityKind::Agent => {
+            load_agent_profile_context(&root, &record.id)
+                .map_err(|e| ApiError::conflict(format!("Agent profile is no longer valid: {e}")))?
+                .descriptor
+                .fingerprint
+        }
         _ => unreachable!(),
     };
     let expected = record
