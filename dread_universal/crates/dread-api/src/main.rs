@@ -1864,28 +1864,21 @@ mod tests {
             .unwrap();
         assert_eq!(approved.status(), StatusCode::OK);
 
-        let mut request =
-            format!("ws://{address}/api/tasks/{task_id}/stream?after_sequence=1")
-                .into_client_request()
-                .unwrap();
-        request.headers_mut().insert(
-            AUTHORIZATION,
-            "Bearer test-token".parse().unwrap(),
-        );
-        let (mut socket, response) =
-            tokio_tungstenite::connect_async(request).await.unwrap();
+        let mut request = format!("ws://{address}/api/tasks/{task_id}/stream?after_sequence=1")
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert(AUTHORIZATION, "Bearer test-token".parse().unwrap());
+        let (mut socket, response) = tokio_tungstenite::connect_async(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
 
-        let replayed = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            socket.next(),
-        )
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-        let replayed: Value =
-            serde_json::from_str(&replayed.into_text().unwrap()).unwrap();
+        let replayed = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let replayed: Value = serde_json::from_str(&replayed.into_text().unwrap()).unwrap();
         assert_eq!(replayed["event_type"], "task_approved");
         assert_eq!(replayed["sequence"], 2);
 
@@ -1897,38 +1890,29 @@ mod tests {
             .unwrap();
         assert_eq!(cancelled.status(), StatusCode::OK);
 
-        let live = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            socket.next(),
-        )
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+        let live = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         let live: Value = serde_json::from_str(&live.into_text().unwrap()).unwrap();
         assert_eq!(live["event_type"], "task_cancelled");
         assert_eq!(live["sequence"], 3);
         drop(socket);
 
-        let mut reconnect =
-            format!("ws://{address}/api/tasks/{task_id}/stream?after_sequence=2")
-                .into_client_request()
-                .unwrap();
-        reconnect.headers_mut().insert(
-            AUTHORIZATION,
-            "Bearer test-token".parse().unwrap(),
-        );
-        let (mut resumed, response) =
-            tokio_tungstenite::connect_async(reconnect).await.unwrap();
+        let mut reconnect = format!("ws://{address}/api/tasks/{task_id}/stream?after_sequence=2")
+            .into_client_request()
+            .unwrap();
+        reconnect
+            .headers_mut()
+            .insert(AUTHORIZATION, "Bearer test-token".parse().unwrap());
+        let (mut resumed, response) = tokio_tungstenite::connect_async(reconnect).await.unwrap();
         assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
-        let resumed_event = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            resumed.next(),
-        )
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+        let resumed_event = tokio::time::timeout(std::time::Duration::from_secs(2), resumed.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         let resumed_event: Value =
             serde_json::from_str(&resumed_event.into_text().unwrap()).unwrap();
         assert_eq!(resumed_event["event_type"], "task_cancelled");
