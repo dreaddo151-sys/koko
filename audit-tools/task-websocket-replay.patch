@@ -1,0 +1,78 @@
+--- a/crates/dread-api/src/main.rs
++++ b/crates/dread-api/src/main.rs
+@@ -658,7 +658,7 @@
+     }
+     let mut stmt = conn.prepare(
+         "SELECT sequence, event_type, payload_json, actor, created_at
+-         FROM task_events WHERE task_id = ?1 AND sequence > ?2 ORDER BY sequence",
++         FROM task_events WHERE task_id = ?1 AND sequence > ?2 ORDER BY sequence LIMIT 1000",
+     ).map_err(|e| ApiError::internal(e.to_string()))?;
+     let rows = stmt.query_map(params![task_id, after_sequence], |row| {
+         let encoded: String = row.get(2)?;
+@@ -678,6 +678,30 @@
+     Ok(events)
+ }
+ 
++async fn send_event_pages(
++    socket: &mut WebSocket,
++    state: &AppState,
++    task_id: &str,
++    last_sequence: &mut u64,
++) -> Result<(), String> {
++    loop {
++        let events = load_task_events_after(state, task_id, *last_sequence)
++            .map_err(|error| error.message)?;
++        let page_len = events.len();
++        for event in events {
++            *last_sequence = (*last_sequence).max(event.sequence);
++            let text = serde_json::to_string(&event).map_err(|error| error.to_string())?;
++            socket
++                .send(Message::Text(text.into()))
++                .await
++                .map_err(|error| error.to_string())?;
++        }
++        if page_len < 1000 {
++            return Ok(());
++        }
++    }
++}
++
+ async fn task_event_stream(
+     ws: WebSocketUpgrade,
+     State(state): State<AppState>,
+@@ -707,6 +731,11 @@
+         if socket.send(Message::Text(text.into())).await.is_err() {
+             return;
+         }
++    }
++    if let Err(message) = send_event_pages(&mut socket, &state, &task_id, &mut last_sequence).await {
++        let text = json!({"error": message}).to_string();
++        let _ = socket.send(Message::Text(text.into())).await;
++        return;
+     }
+ 
+     loop {
+@@ -729,19 +758,10 @@
+                     }
+                     Ok(_) => {}
+                     Err(broadcast::error::RecvError::Lagged(_)) => {
+-                        match load_task_events_after(&state, &task_id, last_sequence) {
+-                            Ok(events) => {
+-                                for event in events {
+-                                    last_sequence = last_sequence.max(event.sequence);
+-                                    let Ok(text) = serde_json::to_string(&event) else { continue };
+-                                    if socket.send(Message::Text(text.into())).await.is_err() { return; }
+-                                }
+-                            }
+-                            Err(error) => {
+-                                let text = json!({"error": error.message}).to_string();
+-                                let _ = socket.send(Message::Text(text.into())).await;
+-                                break;
+-                            }
++                        if let Err(message) = send_event_pages(&mut socket, &state, &task_id, &mut last_sequence).await {
++                            let text = json!({"error": message}).to_string();
++                            let _ = socket.send(Message::Text(text.into())).await;
++                            break;
+                         }
+                     }
+                     Err(broadcast::error::RecvError::Closed) => break,
