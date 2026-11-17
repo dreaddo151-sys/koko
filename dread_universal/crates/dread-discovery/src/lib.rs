@@ -123,6 +123,26 @@ pub struct AgentProbeResult {
     pub detail: String,
 }
 
+/// Small allowlist of known loopback agent runtimes. This is not a port sweep.
+pub fn known_agent_endpoints() -> Vec<AgentEndpoint> {
+    vec![
+        AgentEndpoint {
+            id: "openhands.agent-server".into(),
+            name: "OpenHands Agent Server".into(),
+            adapter: "openhands.agent_server".into(),
+            health_url: "http://127.0.0.1:8000/health".into(),
+            enabled: true,
+        },
+        AgentEndpoint {
+            id: "langgraph.agent-server".into(),
+            name: "LangGraph Agent Server".into(),
+            adapter: "langgraph.agent_server".into(),
+            health_url: "http://127.0.0.1:2024/ok".into(),
+            enabled: true,
+        },
+    ]
+}
+
 pub fn load_agents(path: &str) -> Result<Vec<AgentEndpoint>, String> {
     let contents = fs::read_to_string(path).map_err(|e| format!("Cannot read {path}: {e}"))?;
     let config: AgentConfig =
