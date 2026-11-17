@@ -1,64 +1,67 @@
 # PROJECT DREAD UNIVERSAL — Engineering Status
 
-**Baseline:** uploaded source bundle `DREAD_UNIVERSAL_COMPLETE_20261117_032111.zip`  
-**Baseline SHA-256:** `87a9f53911599a06d1501ed1c4ae5751f523be95184932fe3a446f7cd8927305`  
-**Project version in Cargo manifests:** `0.4.0`
+**Project version:** 0.4.0  
+**Development branch:** `feature/agent-capability-foundation-2026-11-17`  
+**Integration policy:** additive development alongside the existing Python Hub; no merge to `main` or workstation service migration is implied.
 
-## Verified in GitHub Actions
+## Verified source and CI results
 
-The exact uploaded archive was downloaded from the GitHub release and its SHA-256 was checked before compilation. Rust 1.100.0 was used.
+The baseline hardened source passed formatting, Clippy with warnings denied, workspace tests, and an optimized release build in GitHub Actions run `44002596952`.
 
-Baseline source:
+The task-lifecycle and read-only agent-discovery candidate passed the same four gates in GitHub Actions run `44009858035`:
 - `cargo fmt --all -- --check`: PASS
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: PASS
-- `cargo test --workspace --locked`: PASS — 13 tests (6 API, 3 discovery, 4 GPU)
+- `cargo test --workspace --locked`: PASS — 27 tests
 - `cargo build --workspace --release --locked`: PASS
 
-Hardened candidate (GitHub Actions run `44001336976`):
-- Rust formatting: PASS
-- Clippy with warnings denied: PASS
-- Workspace tests: PASS — 16 tests (8 API, 4 discovery, 4 GPU)
-- Optimized release build: PASS
+The candidate archive was downloaded and independently checked: ZIP integrity PASS and SHA-256 matched the generated checksum. These CI results validate the Rust workspace build and tests; they do not constitute end-to-end testing against the user's live workstation services.
 
-The hardened candidate adds strict local URL validation, redirects disabled, loopback-only API binding, a 32 MiB JSON body ceiling, and exact-value round-trip tests for 5 KB / 10 KB / 20 KB payloads.
+## Implemented
 
-## Implemented in this bundle
+- Axum Rust API foundation with SQLite persistence.
+- Strict loopback-only API binding until authentication and authorization are implemented.
+- 32 MiB JSON request-body ceiling; large-message exact-value round-trip tests for 5 KB, 10 KB and 20 KB.
+- Local service discovery for explicitly configured loopback HTTP endpoints.
+- GPU gateway client for health, model discovery and OpenAI-compatible inference/SSE forwarding.
+- Provider-neutral agent/task/event contracts in `dread-agents`; no provider-specific adapter is enabled.
+- SQLite-backed capability registry. Imported/API-created capability records are forced to disabled by default; no plugin, skill or hook is run by cataloging it.
+- Durable SQLite task records and ordered task-event audit history:
+  - `POST /api/tasks` creates a task in `pending_approval`.
+  - `GET /api/tasks`, `GET /api/tasks/{id}` and `GET /api/tasks/{id}/events` read task state/history.
+  - `POST /api/tasks/{id}/approve` records an approver label and reason and allows a single transition to `approved`.
+  - `POST /api/tasks/{id}/cancel` records cancellation.
+  - Approval does **not** execute a task; the response reports `execution_started: false`. No task executor or provider dispatch is present.
+- Read-only local agent health discovery at `GET /api/agents`:
+  - Reads `config/agents.toml` or `DREAD_AGENTS_CONFIG`.
+  - Empty configuration by default; at most 32 entries and unique IDs.
+  - Explicit-port loopback HTTP URLs only; userinfo, query strings and fragments are rejected.
+  - GET-only health probes with a two-second timeout and redirects disabled.
+  - Agent probe status: 2xx ONLINE, 3xx REDIRECTED, 4xx REACHABLE, 5xx DEGRADED, connection failure OFFLINE, timeout UNKNOWN.
+  - Disabled entries generate no network request.
+  - It does not scan arbitrary ports, inspect processes, start agents, dispatch tasks or execute plugins.
 
-- Rust API foundation using Axum and SQLite.
-- Local service discovery for configured loopback endpoints.
-- GPU gateway client for health, model discovery, and OpenAI-compatible inference/SSE forwarding.
-- Strict local URL validation and no-follow redirect policy for discovery and GPU gateway HTTP clients.
-- API startup rejects non-loopback bind addresses until authentication exists.
-- JSON request body limit of 32 MiB.
-- Existing Python Hub, ComfyUI and GPU Supervisor retained as separate reference/runtime components.
-- Pstack and Cursor plugin source inventories, with Pstack disabled until reviewed.
+## Runtime safety boundaries
 
-## Not yet a complete Universal Hub
-
-The following capabilities are not implemented as complete Rust product features in this source bundle:
-
-- Provider-neutral agent adapters with live health, capabilities, task lifecycle, events, cancellation and result retrieval.
-- Multi-agent planning, execution, scheduling, resource-aware concurrency and durable task state.
-- First-class Pstack/Cursor/MCP/OpenAPI/CLI capability registry and safe import/review lifecycle.
-- Approval queue, repair simulation, bounded apply/monitor/rollback lifecycle and audit log.
-- Complete React/TypeScript operator frontend and live WebSocket event stream.
-- Full migration parity for image/video, mission, terminal, diagnostics, visual development and existing Python Hub workflows.
-- Installer, upgrade/rollback tooling, backup/restore validation and hardware acceptance tests on the dual-RTX-3090 workstation.
-
-## Non-negotiable runtime boundaries
-
-- The existing Python GPU Supervisor remains the only GPU ownership and VRAM lease authority.
-- Rust may call only the local GPU gateway at `127.0.0.1:11500`; it must not call the upstream model server or acquire a second GPU lock.
+- The existing Python GPU Supervisor remains the sole GPU ownership, VRAM lease and process-lifecycle authority.
+- Rust may communicate only with the local GPU gateway at `127.0.0.1:11500`; it must not call the upstream model server directly or acquire a second GPU lock.
 - Keep the Python Hub and ComfyUI running while Rust features are developed and tested.
-- No imported skill, plugin hook, automation or agent instruction is executed merely because it is present in the catalog.
+- The Rust API is loopback-only and currently has no authentication. Do not expose it to a LAN or public network.
+- The `approved_by` value is a caller-supplied audit label, not a verified identity. Approval is not an authorization boundary until authentication is added.
+- Agent discovery is read-only. Provider endpoints remain unconfigured until verified on the workstation.
 - OpenCode is intentionally excluded from the current integration direction.
-- No live service migration, destructive repair, credential change or GitHub main-branch merge is implied by this source package.
+- No destructive repair, credential change, live service migration or GitHub `main` merge is authorized by this work.
 
-## Recommended implementation sequence
+## Remaining blueprint
 
-1. Add structured capability and agent-adapter contracts, then implement read-only discovery for verified local agents.
-2. Add durable tasks, approval gates, event streaming and bounded orchestration.
-3. Implement the Pstack/Cursor importer and capability review registry with pinned provenance and disabled-by-default execution.
-4. Build the React operator UI against the real API and WebSocket events.
-5. Port legacy Hub workflows incrementally behind adapters, verifying parity without interrupting existing services.
-6. Run end-to-end acceptance on the user's workstation before calling the platform complete.
+1. [x] Rust API foundation, local service discovery and GPU gateway boundary.
+2. [x] Provider-neutral agent/capability contracts and disabled-by-default capability registry.
+3. [x] Durable SQLite task lifecycle and approval/cancellation audit history.
+4. [x] Read-only, loopback-only configured agent health discovery.
+5. [ ] WebSocket task-event streaming, reconnect/replay semantics and bounded orchestration.
+6. [ ] Authentication/authorization before any network exposure or trusted approval identity.
+7. [ ] Provider-specific adapters, enabled only after each local endpoint contract is verified.
+8. [ ] Pstack/Cursor/MCP/OpenAPI/CLI importer, provenance/license/dependency review and disabled-by-default activation.
+9. [ ] React/TypeScript operator UI driven by real API and event state.
+10. [ ] Incremental legacy Python Hub workflow parity, installer/upgrade/rollback, backup/restore tests and dual-RTX-3090 workstation acceptance.
+
+The Python Hub, ComfyUI, Ollama and GPU Supervisor remain separate runtime/reference components. Full Universal Hub parity has not been achieved.
