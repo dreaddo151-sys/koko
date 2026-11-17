@@ -1849,18 +1849,21 @@ fn ready_mission_task_ids(state: &AppState, mission_id: &str) -> Result<Vec<Stri
         let (node_id, task_id, dependencies_json, status) =
             row.map_err(|error| ApiError::internal(error.to_string()))?;
         status_by_node.insert(node_id.clone(), status.clone());
-        let dependencies: Vec<String> = serde_json::from_str(&dependencies_json).map_err(|error| {
-            ApiError::internal(format!("Stored mission dependencies are invalid: {error}"))
-        })?;
+        let dependencies: Vec<String> =
+            serde_json::from_str(&dependencies_json).map_err(|error| {
+                ApiError::internal(format!("Stored mission dependencies are invalid: {error}"))
+            })?;
         entries.push((task_id, dependencies, status));
     }
 
     let mut ready = Vec::new();
     for (task_id, dependencies, status) in entries {
         if status == "approved"
-            && dependencies
-                .iter()
-                .all(|dependency| status_by_node.get(dependency).is_some_and(|value| value == "completed"))
+            && dependencies.iter().all(|dependency| {
+                status_by_node
+                    .get(dependency)
+                    .is_some_and(|value| value == "completed")
+            })
         {
             ready.push(task_id);
         }
