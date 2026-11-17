@@ -5,6 +5,7 @@
 
 use serde::Serialize;
 use std::{
+    collections::BTreeSet,
     env, fs,
     path::{Path, PathBuf},
     process::Command,
@@ -16,6 +17,7 @@ use std::{
 pub struct GpuDevice {
     pub vendor: String,
     pub name: String,
+    pub compute_capability: Option<String>,
     pub vram_mib: Option<u64>,
     pub vram_used_mib: Option<u64>,
     pub vram_free_mib: Option<u64>,
@@ -47,6 +49,8 @@ pub struct HostProfile {
     pub distribution_version: Option<String>,
     pub kernel_release: Option<String>,
     pub cpu_model: Option<String>,
+    pub cpu_physical_cores: Option<usize>,
+    pub cuda_version: Option<String>,
     pub cpu_threads: usize,
     pub memory_total_mib: Option<u64>,
     pub memory_available_mib: Option<u64>,
@@ -103,6 +107,10 @@ fn parse_nvidia_csv(output: &str) -> Vec<GpuDevice> {
             Some(GpuDevice {
                 vendor: "nvidia".into(),
                 name: fields[0].into(),
+                compute_capability: fields
+                    .get(12)
+                    .filter(|value| !value.is_empty() && **value != "N/A")
+                    .map(|value| (*value).to_string()),
                 vram_mib: fields[1].parse().ok(),
                 vram_used_mib: fields[2].parse().ok(),
                 vram_free_mib: fields[3].parse().ok(),
@@ -128,7 +136,7 @@ fn nvidia_devices(binary: &Path) -> Vec<GpuDevice> {
     if let Some(output) = run_probe(
         binary,
         &[
-            "--query-gpu=name,memory.total,memory.used,memory.free,driver_version,pcie.link.gen.current,pcie.link.width.current,pcie.link.gen.max,pcie.link.width.max,utilization.gpu,temperature.gpu,power.draw",
+            "--query-gpu=name,memory.total,memory.used,memory.free,driver_version,pcie.link.gen.current,pcie.link.width.current,pcie.link.gen.max,pcie.link.width.max,utilization.gpu,temperature.gpu,power.draw,compute_cap",
             "--format=csv,noheader,nounits",
         ],
     ) {
@@ -158,6 +166,7 @@ fn nvidia_devices(binary: &Path) -> Vec<GpuDevice> {
             Some(GpuDevice {
                 vendor: "nvidia".into(),
                 name: name.into(),
+                compute_capability: None,
                 vram_mib: memory.trim().parse().ok(),
                 vram_used_mib: None,
                 vram_free_mib: None,
@@ -194,6 +203,7 @@ fn amd_devices(binary: &Path) -> Vec<GpuDevice> {
             Some(GpuDevice {
                 vendor: "amd".into(),
                 name: name.into(),
+                compute_capability: None,
                 vram_mib: None,
                 vram_used_mib: None,
                 vram_free_mib: None,
@@ -226,6 +236,7 @@ fn apple_devices(binary: &Path) -> Vec<GpuDevice> {
                 devices.push(GpuDevice {
                     vendor: "apple".into(),
                     name,
+                    compute_capability: None,
                     vram_mib: current_vram.take(),
                     vram_used_mib: None,
                     vram_free_mib: None,
@@ -249,6 +260,7 @@ fn apple_devices(binary: &Path) -> Vec<GpuDevice> {
         devices.push(GpuDevice {
             vendor: "apple".into(),
             name,
+            compute_capability: None,
             vram_mib: current_vram,
             vram_used_mib: None,
             vram_free_mib: None,
@@ -306,6 +318,32 @@ fn cpu_model(contents: &str) -> Option<String> {
         } else {
             None
         }
+    })
+}
+
+fn cpu_physical_cores(contents: &str) -> Option<usize> {
+    let mut cores = BTreeSet::new();
+    for block in contents.split("\n\n") {
+        let physical_id = block.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            (key.trim() == "physical id").then(|| value.trim().parse::<u32>().ok()).flatten()
+        });
+        let core_id = block.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            (key.trim() == "core id").then(|| value.trim().parse::<u32>().ok()).flatten()
+        });
+        if let (Some(physical_id), Some(core_id)) = (physical_id, core_id) {
+            cores.insert((physical_id, core_id));
+        }
+    }
+    (!cores.is_empty()).then_some(cores.len())
+}
+
+fn nvidia_cuda_version(binary: &Path) -> Option<String> {
+    run_probe(binary, &[])?.lines().find_map(|line| {
+        let (_, version) = line.split_once("CUDA Version:")?;
+        let version = version.split_whitespace().next()?;
+        (!version.is_empty() && version != "N/A").then(|| version.to_string())
     })
 }
 
@@ -455,6 +493,8 @@ pub fn detect_host() -> HostProfile {
     let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
     let (root_disk_total_mib, root_disk_available_mib) = root_disk_capacity_mib();
     let storage_devices = mounted_storage_devices();
+    let cpu_physical_cores = cpu_physical_cores(&cpuinfo);
+    let cuda_version = nvidia.as_deref().and_then(nvidia_cuda_version);
 
     HostProfile {
         os: env::consts::OS.into(),
@@ -466,6 +506,8 @@ pub fn detect_host() -> HostProfile {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
         cpu_model: cpu_model(&cpuinfo),
+        cpu_physical_cores,
+        cuda_version,
         cpu_threads: std::thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1),
@@ -508,6 +550,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cpu_topology_counts_unique_physical_and_core_pairs() {
+        let sample = "processor : 0\nphysical id : 0\ncore id : 0\n\nprocessor : 1\nphysical id : 0\ncore id : 0\n\nprocessor : 2\nphysical id : 0\ncore id : 1\n\nprocessor : 3\nphysical id : 1\ncore id : 0\n";
+        assert_eq!(cpu_physical_cores(sample), Some(3));
+        assert_eq!(cpu_physical_cores("processor : 0\nprocessor : 1\n"), None);
+    }
+
+    #[test]
+    fn nvidia_cuda_banner_is_parsed_without_guessing() {
+        let binary = Path::new("/unused");
+        let _ = binary;
+        let banner = "NVIDIA-SMI 550.90.07 Driver Version: 550.90.07 CUDA Version: 12.4\n";
+        let parsed = banner.lines().find_map(|line| {
+            let (_, version) = line.split_once("CUDA Version:")?;
+            version.split_whitespace().next().map(str::to_string)
+        });
+        assert_eq!(parsed.as_deref(), Some("12.4"));
+    }
+
+    #[test]
     fn host_profile_has_portable_os_and_cpu_fields() {
         let profile = detect_host();
         assert!(!profile.os.is_empty());
@@ -534,10 +595,11 @@ mod tests {
     #[test]
     fn nvidia_csv_parser_includes_driver_pcie_and_live_telemetry() {
         let sample =
-            "NVIDIA GeForce RTX 3090, 24576, 12000, 12576, 550.90.07, 1, 1, 4, 16, 37, 52, 280.5\n";
+            "NVIDIA GeForce RTX 3090, 24576, 12000, 12576, 550.90.07, 1, 1, 4, 16, 37, 52, 280.5, 8.6\n";
         let parsed = parse_nvidia_csv(sample);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].vram_used_mib, Some(12000));
+        assert_eq!(parsed[0].compute_capability.as_deref(), Some("8.6"));
         assert_eq!(parsed[0].vram_free_mib, Some(12576));
         assert_eq!(parsed[0].driver_version.as_deref(), Some("550.90.07"));
         assert_eq!(parsed[0].pcie_link_gen, Some(1));
