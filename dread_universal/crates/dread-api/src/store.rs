@@ -78,3 +78,35 @@ mod tests {
   let _=std::fs::remove_file(path.with_extension("sqlite-shm"));
  }
 }
+
+#[cfg(test)]
+mod tests {
+ use super::*;
+ fn test_store()->(Store,String){
+  let path=std::env::temp_dir().join(format!("dread-store-{}.sqlite3",uuid::Uuid::new_v4()));
+  let s=Store::open(path.to_str().unwrap()).unwrap();
+  (s,path.to_string_lossy().into_owned())
+ }
+ #[test]
+ fn exchange_is_persisted_and_retrievable(){
+  let (s,path)=test_store();
+  s.save_exchange("c1","test-model","hello","world",(3,2,5)).unwrap();
+  let history=s.conversation_messages("c1",20).unwrap();
+  assert_eq!(history["messages"].as_array().unwrap().len(),2);
+  assert_eq!(history["messages"][0]["role"],"user");
+  assert_eq!(history["messages"][1]["content"],"world");
+  let usage=s.usage_totals().unwrap();
+  assert_eq!(usage["total_tokens"],5);
+  drop(s);let _=std::fs::remove_file(path);
+ }
+ #[test]
+ fn queued_job_can_be_cancelled_only_once(){
+  let (s,path)=test_store();
+  let id=s.create_job("review_only","{}").unwrap();
+  assert!(s.cancel_job(id).unwrap());
+  assert!(!s.cancel_job(id).unwrap());
+  let jobs=s.list_jobs().unwrap();
+  assert_eq!(jobs[0].status,"cancelled");
+  drop(s);let _=std::fs::remove_file(path);
+ }
+}
