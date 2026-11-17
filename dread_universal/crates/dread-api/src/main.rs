@@ -1706,7 +1706,7 @@ mod tests {
     }
 
     async fn mock_health() -> Json<Value> {
-        Json(json!({"status": "ok", "gpu": "on-demand"}))
+        Json(json!({"status": "ok", "gpu": "on-demand", "supervisor_configured": true}))
     }
 
     async fn mock_models() -> Json<Value> {
