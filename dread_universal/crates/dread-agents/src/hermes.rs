@@ -315,8 +315,7 @@ impl AgentAdapter for HermesApiAdapter {
                         ));
                     }
                     if field == "previous_response_id"
-                        && (!value.is_string()
-                            || value.as_str().unwrap_or_default().len() > 160)
+                        && (!value.is_string() || value.as_str().unwrap_or_default().len() > 160)
                     {
                         return Err(adapter_error(
                             "invalid_input",
