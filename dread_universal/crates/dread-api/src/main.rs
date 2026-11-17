@@ -929,10 +929,11 @@ async fn run_task(
         .lock()
         .map_err(|_| ApiError::internal("Task cancellation registry is unavailable"))?
         .insert(id.clone(), cancel_sender);
+    let runner_type = task.task_type.clone();
     tokio::spawn(execute_approved_task(
         state.clone(),
         id,
-        task.task_type,
+        runner_type,
         cancel_receiver,
     ));
 
@@ -1017,7 +1018,7 @@ async fn execute_approved_task(
                 | ExecutionError::RunnerFailed { attempts, .. } => *attempts,
                 _ => 0,
             };
-            let status = if matches!(error, ExecutionError::Cancelled { .. }) {
+            let status = if matches!(&error, ExecutionError::Cancelled { .. }) {
                 "cancelled"
             } else {
                 "failed"
@@ -1661,6 +1662,190 @@ mod tests {
         let cancelled: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(cancelled["item"]["status"], "cancelled");
         assert_eq!(cancelled["execution_started"], false);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn approved_service_discovery_task_runs_and_persists_result() {
+        let (router, server) = test_app().await;
+        let created = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "title": "Discover configured local services",
+                            "task_type": "service_discovery",
+                            "payload": {}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
+        let created: Value = serde_json::from_slice(&body).unwrap();
+        let id = created["item"]["id"].as_str().unwrap().to_string();
+
+        let approved = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/tasks/{id}/approve"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"approved_by":"operator", "reason":"Read-only service discovery"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(approved.status(), StatusCode::OK);
+
+        let queued = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/tasks/{id}/run"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(queued.status(), StatusCode::ACCEPTED);
+        let body = to_bytes(queued.into_body(), usize::MAX).await.unwrap();
+        let queued: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(queued["item"]["status"], "queued");
+        assert_eq!(queued["execution_started"], true);
+
+        let mut result = None;
+        for _ in 0..100 {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/tasks/{id}/result"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if response.status() == StatusCode::OK {
+                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                result = Some(serde_json::from_slice::<Value>(&body).unwrap());
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let result = result.expect("service-discovery task should persist a result");
+        assert_eq!(result["error"], Value::Null);
+        assert!(result["result"]["items"].is_array());
+
+        let task = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/tasks/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(task.into_body(), usize::MAX).await.unwrap();
+        let task: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(task["item"]["status"], "completed");
+
+        let events = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/tasks/{id}/events"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(events.into_body(), usize::MAX).await.unwrap();
+        let events: Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            events["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| event["event_type"] == "task_succeeded")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn unsupported_task_types_cannot_be_dispatched() {
+        let (router, server) = test_app().await;
+        let created = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"title":"Unreviewed task", "task_type":"security_audit", "payload":{}})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
+        let created: Value = serde_json::from_slice(&body).unwrap();
+        let id = created["item"]["id"].as_str().unwrap();
+
+        let approved = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/tasks/{id}/approve"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"approved_by":"operator", "reason":"Reviewed"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(approved.status(), StatusCode::OK);
+
+        let dispatch = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/tasks/{id}/run"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(dispatch.status(), StatusCode::CONFLICT);
+        let task = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/tasks/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(task.into_body(), usize::MAX).await.unwrap();
+        let task: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(task["item"]["status"], "approved");
         server.abort();
     }
 
