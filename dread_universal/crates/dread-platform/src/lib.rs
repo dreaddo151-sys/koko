@@ -468,7 +468,10 @@ mod tests {
         assert_eq!(memory_info_mib(meminfo, "MemAvailable"), Some(16_000));
         let release = "ID=ubuntu\nVERSION_ID=\"24.04\"\nPRETTY_NAME=\"Ubuntu 24.04 LTS\"\n";
         let cpu = "processor : 0\nmodel name : AMD Ryzen 9 5950X 16-Core Processor\n";
-        assert_eq!(cpu_model(cpu).as_deref(), Some("AMD Ryzen 9 5950X 16-Core Processor"));
+        assert_eq!(
+            cpu_model(cpu).as_deref(),
+            Some("AMD Ryzen 9 5950X 16-Core Processor")
+        );
         assert_eq!(cpu_model("processor : 0\n"), None);
         assert_eq!(os_release_value(release, "ID").as_deref(), Some("ubuntu"));
         assert_eq!(
