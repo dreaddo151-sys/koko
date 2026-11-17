@@ -40,9 +40,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          cp .github/workflows/dread-canonical-source.yml "$RUNNER_TEMP/dread-canonical-source.yml"
           if git ls-remote --exit-code --heads origin "$TARGET_BRANCH" >/dev/null 2>&1; then
-            echo "Refusing to overwrite existing $TARGET_BRANCH"
-            exit 1
+            git fetch origin "$TARGET_BRANCH"
+            git checkout -B "$TARGET_BRANCH" FETCH_HEAD
+            mkdir -p .github/workflows
+            cp "$RUNNER_TEMP/dread-canonical-source.yml" .github/workflows/dread-canonical-source.yml
+            git add .github/workflows/dread-canonical-source.yml
+            if ! git diff --cached --quiet; then
+              git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "Fix canonical source verification workflow"
+              git push origin "HEAD:refs/heads/$TARGET_BRANCH"
+            fi
+            exit 0
           fi
 
           curl --fail --location --retry 3 \
@@ -136,7 +145,7 @@ jobs:
           assert marker["manifest_version"] == "0.15.43"
           assert marker["commit_sha"] == "2f87c854fe3e2fcda44ca86b46ede35aad3c46b7"
           assert marker["tree_sha"] == "71d8e1d1d718e2149dc43b2535618064f29cba6b"
-          assert len(marker["files"]) == 60
+          assert len(marker["files_sha256"]) == 60
           print("Pstack pin, tree, inventory provenance: PASS")
           PY
 
