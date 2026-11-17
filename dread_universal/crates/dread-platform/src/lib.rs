@@ -36,6 +36,7 @@ pub struct HostProfile {
     pub distribution: Option<String>,
     pub distribution_version: Option<String>,
     pub kernel_release: Option<String>,
+    pub cpu_model: Option<String>,
     pub cpu_threads: usize,
     pub memory_total_mib: Option<u64>,
     pub memory_available_mib: Option<u64>,
@@ -285,6 +286,18 @@ fn os_release_value(contents: &str, key: &str) -> Option<String> {
     })
 }
 
+fn cpu_model(contents: &str) -> Option<String> {
+    contents.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        if matches!(key.trim(), "model name" | "Hardware" | "Processor") {
+            let value = value.trim();
+            (!value.is_empty()).then(|| value.to_string())
+        } else {
+            None
+        }
+    })
+}
+
 fn memory_info_mib(contents: &str, key: &str) -> Option<u64> {
     let line = contents
         .lines()
@@ -368,6 +381,7 @@ pub fn detect_host() -> HostProfile {
 
     let os_release = fs::read_to_string("/etc/os-release").unwrap_or_default();
     let meminfo = fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
     let (root_disk_total_mib, root_disk_available_mib) = root_disk_capacity_mib();
 
     HostProfile {
@@ -379,6 +393,7 @@ pub fn detect_host() -> HostProfile {
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
+        cpu_model: cpu_model(&cpuinfo),
         cpu_threads: std::thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1),
@@ -452,6 +467,9 @@ mod tests {
         assert_eq!(memory_info_mib(meminfo, "MemTotal"), Some(32_000));
         assert_eq!(memory_info_mib(meminfo, "MemAvailable"), Some(16_000));
         let release = "ID=ubuntu\nVERSION_ID=\"24.04\"\nPRETTY_NAME=\"Ubuntu 24.04 LTS\"\n";
+        let cpu = "processor : 0\nmodel name : AMD Ryzen 9 5950X 16-Core Processor\n";
+        assert_eq!(cpu_model(cpu).as_deref(), Some("AMD Ryzen 9 5950X 16-Core Processor"));
+        assert_eq!(cpu_model("processor : 0\n"), None);
         assert_eq!(os_release_value(release, "ID").as_deref(), Some("ubuntu"));
         assert_eq!(
             os_release_value(release, "VERSION_ID").as_deref(),
