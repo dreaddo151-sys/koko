@@ -1,6 +1,19 @@
 # Verification and Release Gates
 
-## Automated Rust gates — current candidate passed
+## Automated Rust gates — canonical source branch passed
+
+Canonical-source workflow run `44019266094` validated the tracked workspace on `integration/dread-canonical-source-run81` without downloading or reapplying the baseline archive patches:
+
+1. Pstack provenance pin/tree and all 60 `files_sha256` entries — PASS
+2. Pstack importer unit tests — PASS, 9 tests
+3. Pstack importer dry-run — PASS, 58 skills and 2 agents, all disabled
+4. `cargo fmt --all -- --check` — PASS
+5. `cargo clippy --workspace --all-targets --locked -- -D warnings` — PASS
+6. `cargo test --workspace --locked` — PASS
+7. `cargo build --workspace --release --locked` — PASS
+
+The canonical branch contains the source at `dread_universal/`; the CI job checked out that branch and ran the gates directly in that directory. Draft PR #3 is open against the feature branch and has not been merged.
+
 
 GitHub Actions run #77, `44016613531`, commit `d4df1a8e85ab44264b4f86d00a624af962422689`, passed the complete workflow after applying the WebSocket and bounded-orchestrator patches to the exact uploaded baseline:
 
@@ -12,7 +25,7 @@ GitHub Actions run #77, `44016613531`, commit `d4df1a8e85ab44264b4f86d00a624af96
 6. Pinned Pstack upstream commit/tree verification and metadata dry-run — PASS, 58 skills and 2 agents, all disabled by default
 7. Source packaging, ZIP integrity check and artifact upload — PASS
 
-The workflow applies candidate patches to the exact uploaded baseline archive before running checks. The CI result is not a substitute for workstation integration tests.
+The historical run #77 workflow applied candidate patches to the exact uploaded baseline archive. The newer canonical-source run validates the committed workspace directly. Neither CI run substitutes for workstation integration tests.
 
 ## Security and behavior gates
 
@@ -33,7 +46,7 @@ The workflow applies candidate patches to the exact uploaded baseline archive be
 
 ## Pstack importer (CI verified; live API apply pending)
 
-Run #77 passed all nine standard-library importer unit tests, fetched the exact catalog-pinned upstream commit/tree and completed the 58-skill/2-agent dry-run. The pinned catalog is Pstack `0.15.43`, commit `2f87c854fe3e2fcda44ca86b46ede35aad3c46b7`, subtree `71d8e1d1d718e2149dc43b2535618064f29cba6b`, MIT. The bundled `0.15.42` snapshot is not represented as the pinned `0.15.43` source. The live Rust API `--apply` operation, persisted registration and post-import reconciliation remain unverified.
+Run #77 passed all nine standard-library importer unit tests, fetched the exact catalog-pinned upstream commit/tree and completed the 58-skill/2-agent dry-run. The pinned catalog is Pstack `0.15.43`, commit `2f87c854fe3e2fcda44ca86b46ede35aad3c46b7`, subtree `71d8e1d1d718e2149dc43b2535618064f29cba6b`, MIT. The active importer reads `integrations/pstack/upstream/` at `0.15.43`; the separate `integrations/pstack-upstream/` snapshot remains `0.15.42` and is retained as historical/reference content. The live Rust API `--apply` operation, persisted registration and post-import reconciliation remain unverified.
 
 ## Bounded execution kernel (CI verified; integration pending)
 
@@ -63,7 +76,7 @@ The existing Python GPU Supervisor remains the only GPU lease authority. Rust ma
 | Phase | Current evidence | Acceptance still required |
 |---|---|---|
 | 0 Baseline | Historical paths/endpoints and GPU policy documented | Confirm only changed prerequisites; current local Rust toolchain and exact Supervisor adapter contract remain unverified |
-| 1 Rust foundation | Candidate compiles, tests and release-builds in CI | Canonical source committed in repo; local non-conflicting health smoke test |
+| 1 Rust foundation | Canonical source committed in `dread_universal/`; run `44019266094` passes fmt, Clippy, tests and release build directly from branch | Live non-conflicting workstation health smoke test |
 | 2 Service adapters | Generic read-only configured agent health probing | Dedicated Hermes/OpenHands/OpenCode/Ollama/llama.cpp/ComfyUI/DREAD adapters; one read-only request each |
 | 3 Capability registry | Disabled-by-default registry plus pinned Pstack dry-run, 9 tests | Cursor manifest/agent ingestion, compatibility taxonomy, MCP/OpenAPI/CLI inventory and representative provenance checks |
 | 4 Orchestration | Task state/approval audit, event stream, bounded runner crate | Planner, worker adapter delegation, durable queue integration, result aggregation, cancellation and one delegated multi-agent test |
@@ -72,8 +85,6 @@ The existing Python GPU Supervisor remains the only GPU lease authority. Rust ma
 | 7 Repair | No repair executor acceptance evidence | Diagnose/plan/simulate/approve/apply/monitor/rollback with a safe reversible test |
 | 8 Release | CI candidate artifact only | Self-contained source, installer/upgrade/rollback, feature parity, workstation acceptance and explicit user-approved migration |
 
-## CI provenance limitation
+## CI provenance status
 
-The workflow checks out this GitHub feature branch, downloads `DREAD_UNIVERSAL_COMPLETE_TRUE.zip` from the `dread-universal-v0.4.0-test` release, verifies a hard-coded SHA-256, applies the patch series from `audit-tools/`, then runs Rust checks and packages a derived source ZIP. The Rust workspace itself is not present as tracked `dread_universal/` files on this branch. Consequently, successful CI is evidence for that exact patched archive derivative; it is not evidence that a fresh checkout of this branch contains or builds the Rust source. Keep the original archive and patches until a canonical source branch builds directly from committed source.
-
-The next gate is source-of-truth consolidation, not adding more parallel patch layers. Preserve the baseline archive and patch provenance; build an isolated integration branch from the exact verified source candidate; run the same gates from the committed workspace; compare resulting manifests and tests. Do not merge to `main`, migrate services, or alter the local workstation during this consolidation.
+The archive-and-patch limitation applied to historical feature-branch runs #77–#83. It is resolved for ongoing Rust development by `integration/dread-canonical-source-run81`, where the full workspace is tracked under `dread_universal/`. Run `44019266094` checked out that branch and passed the complete Rust quality gates directly from committed source. The archive and patch series remain preserved for provenance and rollback; they are no longer required to reconstruct the canonical workspace. Draft PR #3 remains unmerged.
