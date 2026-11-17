@@ -359,13 +359,20 @@ impl AgentAdapter for HermesApiAdapter {
     ) -> AdapterFuture<'a, Vec<AgentEvent>> {
         Box::pin(async move {
             validate_run_id(task_id)?;
-            let response = self.client
+            let response = self
+                .client
                 .get(self.endpoint(&format!("/v1/runs/{task_id}/events")))
                 .bearer_auth(&self.api_key)
                 .header("Accept", "text/event-stream")
                 .send()
                 .await
-                .map_err(|error| adapter_error("transport_error", error.to_string(), error.is_timeout() || error.is_connect()))?;
+                .map_err(|error| {
+                    adapter_error(
+                        "transport_error",
+                        error.to_string(),
+                        error.is_timeout() || error.is_connect(),
+                    )
+                })?;
             if !response.status().is_success() {
                 return Err(http_error(
                     response.status(),
