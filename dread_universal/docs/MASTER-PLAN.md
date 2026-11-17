@@ -456,3 +456,18 @@ The approval-gated mission scheduler now:
 Run #520 (`44197777681`) passed all three jobs on this candidate: Rust formatting, strict Clippy, workspace tests including priority-root, dependency, auto-advance and late-approval regressions, release build, installer syntax, portable migration/rollback, Python bridge/importer regressions, GPU single-owner guard, React production build, package checksum/content validation, disposable Ubuntu 24.04 package install, API/UI/authentication and host-profile smoke tests.
 
 **Still open in phase 3:** resource-class-aware scheduling, retry/backoff, explicit per-node timeout and provider cancellation propagation, mission-level aggregation policy, and interrupted mission recovery. Release remains blocked by the other outstanding phases and live Ubuntu acceptance.
+
+
+## Latest PR-head CI verification — 2026-11-18
+
+**PR:** #12  
+**PR head:** `5a494c87592d14cd057cc37d2df4642c92d85e7c`  
+**GitHub Actions run:** #527 (`44198019930`) — all three jobs completed successfully.
+
+- Rust / Ubuntu 24.04: formatting, strict Clippy, workspace tests, optimized release build, installer validation, portable migration/rollback, Python bridge/importer regressions and GPU single-owner guard passed.
+- Web console / Ubuntu 24.04: locked dependency validation and production build passed.
+- Ubuntu packages / smoke test: package assembly, checksum/content validation, disposable Ubuntu 24.04 installation, API health, production UI, unauthenticated 401 and authenticated host-profile smoke test passed.
+
+Run #527 validates the current PR HEAD, whose commit updates acceptance documentation after the Run #520 implementation candidate. It does not change the implementation candidate's identity: mission scheduler code was validated by Run #520 on `c41ea4b4424c30f1da536305dc0fef7e8f3f4129`. The newer head CI confirms the complete current PR tree still builds and passes the same three-job workflow.
+
+**Acceptance boundary unchanged:** this is repository CI and disposable-runner package evidence only. It is not a live install or acceptance on the physical Ubuntu workstation. PR #12 remains open and unmerged. Do not stop, replace or reconfigure the legacy Python Hub, ComfyUI, llama.cpp or Python GPU Supervisor as part of this documentation update.
