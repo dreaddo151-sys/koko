@@ -273,7 +273,11 @@ fn service_summary(role: &str, body: &[u8]) -> Option<String> {
                 .filter_map(|model| model.get("name").and_then(Value::as_str))
                 .take(3)
                 .collect::<Vec<_>>();
-            let suffix = if models.len() > names.len() { ", …" } else { "" };
+            let suffix = if models.len() > names.len() {
+                ", …"
+            } else {
+                ""
+            };
             Some(format!(
                 "{} model(s) advertised{}{}",
                 models.len(),
@@ -297,7 +301,11 @@ fn service_summary(role: &str, body: &[u8]) -> Option<String> {
                 .filter_map(|device| device.get("name").and_then(Value::as_str))
                 .take(2)
                 .collect::<Vec<_>>();
-            let suffix = if devices.len() > names.len() { ", …" } else { "" };
+            let suffix = if devices.len() > names.len() {
+                ", …"
+            } else {
+                ""
+            };
             Some(format!(
                 "ComfyUI {version}; {} device(s){}{}",
                 devices.len(),
@@ -341,7 +349,10 @@ async fn check_one(client: Client, service: Service) -> ServiceResult {
             let mut detail = status_detail(code).to_string();
             let mut summary = None;
             if (200..300).contains(&code)
-                && matches!(service.role.as_str(), "local-inference" | "image-video-runtime")
+                && matches!(
+                    service.role.as_str(),
+                    "local-inference" | "image-video-runtime"
+                )
             {
                 match read_adapter_body(response).await {
                     Ok(body) => match service_summary(&service.role, &body) {
@@ -351,7 +362,9 @@ async fn check_one(client: Client, service: Service) -> ServiceResult {
                         }
                         None => {
                             status = "DEGRADED".into();
-                            detail = "HTTP endpoint responded, but its adapter metadata was invalid".into();
+                            detail =
+                                "HTTP endpoint responded, but its adapter metadata was invalid"
+                                    .into();
                         }
                     },
                     Err(error) => {
@@ -454,7 +467,9 @@ mod tests {
         }"#;
         assert_eq!(
             super::service_summary("image-video-runtime", body).as_deref(),
-            Some("ComfyUI 0.43.0; 2 device(s): cuda:0 NVIDIA GeForce RTX 3090, cuda:1 NVIDIA GeForce RTX 3090")
+            Some(
+                "ComfyUI 0.43.0; 2 device(s): cuda:0 NVIDIA GeForce RTX 3090, cuda:1 NVIDIA GeForce RTX 3090"
+            )
         );
     }
 
