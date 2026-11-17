@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { Activity, AlertCircle, Bot, Check, ChevronRight, Cpu, Gauge, KeyRound, Layers3, LockKeyhole, LogOut, MessageSquare, Play, Plus, Radio, RefreshCw, Search, Server, ShieldCheck, TerminalSquare, X, Zap, Workflow } from "lucide-react";
+import { Activity, AlertCircle, Bot, Check, ChevronRight, Cpu, Gauge, KeyRound, Layers3, LockKeyhole, LogOut, MessageSquare, Play, Plus, Radio, RefreshCw, Search, Server, ShieldCheck, TerminalSquare, X, Workflow } from "lucide-react";
 
 type Model = { id: string };
 type Task = { id: string; title: string; task_type: string; status: string; created_at: number };
