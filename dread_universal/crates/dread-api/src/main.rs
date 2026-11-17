@@ -1029,7 +1029,6 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
     })
 }
 
-
 async fn create_mission(
     State(state): State<AppState>,
     Json(graph): Json<MissionGraph>,
@@ -3766,7 +3765,6 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-
     #[tokio::test]
     async fn mission_plan_is_validated_persisted_and_never_auto_executed() {
         let (router, server) = test_app().await;
@@ -3778,41 +3776,58 @@ mod tests {
                 {"id":"inspect","depends_on":[],"priority":20,"task_type":"inspect"}
             ]
         });
-        let created = router.clone().oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/missions")
-                .header("content-type", "application/json")
-                .body(Body::from(graph.to_string()))
-                .unwrap()
-        ).await.unwrap();
+        let created = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/missions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(graph.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(created.status(), StatusCode::CREATED);
         let body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["item"]["status"], "planned");
         assert_eq!(value["item"]["execution_started"], false);
-        assert_eq!(value["item"]["execution_order"], json!(["inspect", "build", "report"]));
+        assert_eq!(
+            value["item"]["execution_order"],
+            json!(["inspect", "build", "report"])
+        );
 
-        let fetched = router.clone().oneshot(
-            Request::builder()
-                .uri("/api/missions/acceptance-mission-1")
-                .body(Body::empty())
-                .unwrap()
-        ).await.unwrap();
+        let fetched = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/missions/acceptance-mission-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(fetched.status(), StatusCode::OK);
         let body = to_bytes(fetched.into_body(), usize::MAX).await.unwrap();
         let stored: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(stored["item"]["graph"]["mission_id"], "acceptance-mission-1");
+        assert_eq!(
+            stored["item"]["graph"]["mission_id"],
+            "acceptance-mission-1"
+        );
         assert_eq!(stored["item"]["execution_started"], false);
 
-        let duplicate = router.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/missions")
-                .header("content-type", "application/json")
-                .body(Body::from(graph.to_string()))
-                .unwrap()
-        ).await.unwrap();
+        let duplicate = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/missions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(graph.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(duplicate.status(), StatusCode::CONFLICT);
         server.abort();
     }
@@ -3827,14 +3842,18 @@ mod tests {
                 {"id":"b","depends_on":["a"],"priority":0,"task_type":"test"}
             ]
         });
-        let response = router.clone().oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/missions")
-                .header("content-type", "application/json")
-                .body(Body::from(cyclic.to_string()))
-                .unwrap()
-        ).await.unwrap();
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/missions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(cyclic.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
         let oversized = json!({
@@ -3846,14 +3865,17 @@ mod tests {
                 "task_type":"inspect"
             })).collect::<Vec<_>>()
         });
-        let response = router.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/missions")
-                .header("content-type", "application/json")
-                .body(Body::from(oversized.to_string()))
-                .unwrap()
-        ).await.unwrap();
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/missions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(oversized.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         server.abort();
     }
