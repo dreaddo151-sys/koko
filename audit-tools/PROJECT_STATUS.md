@@ -6,15 +6,15 @@
 
 ## Verified source and CI results
 
-The baseline hardened source passed formatting, Clippy with warnings denied, workspace tests, and an optimized release build in GitHub Actions run `44002596952`.
+The baseline hardened source passed formatting, Clippy with warnings denied, workspace tests and an optimized release build in GitHub Actions run `44002596952`.
 
-The task-lifecycle and read-only agent-discovery candidate passed the same four gates in GitHub Actions run `44009858035`:
+The task-lifecycle, read-only agent-discovery and WebSocket event-stream candidate passed the same four gates in GitHub Actions run `44012192907`:
 - `cargo fmt --all -- --check`: PASS
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: PASS
-- `cargo test --workspace --locked`: PASS — 27 tests
+- `cargo test --workspace --locked`: PASS — 28 tests
 - `cargo build --workspace --release --locked`: PASS
 
-The candidate archive was downloaded and independently checked: ZIP integrity PASS and SHA-256 matched the generated checksum. These CI results validate the Rust workspace build and tests; they do not constitute end-to-end testing against the user's live workstation services.
+The release archive is produced from the exact uploaded baseline after applying the reviewed source patches. The archive must also pass ZIP integrity and SHA-256 verification. These CI results validate the Rust workspace build and unit tests; they do not constitute end-to-end testing against the user's live workstation services or a browser WebSocket client.
 
 ## Implemented
 
@@ -39,6 +39,12 @@ The candidate archive was downloaded and independently checked: ZIP integrity PA
   - Agent probe status: 2xx ONLINE, 3xx REDIRECTED, 4xx REACHABLE, 5xx DEGRADED, connection failure OFFLINE, timeout UNKNOWN.
   - Disabled entries generate no network request.
   - It does not scan arbitrary ports, inspect processes, start agents, dispatch tasks or execute plugins.
+- Task-event WebSocket endpoint `GET /api/tasks/{id}/stream?after_sequence=N`:
+  - Streams task events only after their SQLite transaction commits.
+  - Subscribes before loading persisted history to avoid a replay/live-event gap.
+  - Replays events after the supplied sequence cursor in bounded 1,000-event pages.
+  - Uses a bounded broadcast channel and recovers missed events from SQLite if a subscriber falls behind.
+  - CI verifies formatting, Clippy, compilation and a unit test that confirms committed task events reach subscribers. A full browser/client WebSocket handshake and reconnect test remains outstanding.
 
 ## Runtime safety boundaries
 
@@ -57,7 +63,7 @@ The candidate archive was downloaded and independently checked: ZIP integrity PA
 2. [x] Provider-neutral agent/capability contracts and disabled-by-default capability registry.
 3. [x] Durable SQLite task lifecycle and approval/cancellation audit history.
 4. [x] Read-only, loopback-only configured agent health discovery.
-5. [ ] WebSocket task-event streaming, reconnect/replay semantics and bounded orchestration.
+5. [x] WebSocket task-event fanout, durable replay cursor and bounded lag recovery (unit/CI verified; client handshake test pending).
 6. [ ] Authentication/authorization before any network exposure or trusted approval identity.
 7. [ ] Provider-specific adapters, enabled only after each local endpoint contract is verified.
 8. [ ] Pstack/Cursor/MCP/OpenAPI/CLI importer, provenance/license/dependency review and disabled-by-default activation.
