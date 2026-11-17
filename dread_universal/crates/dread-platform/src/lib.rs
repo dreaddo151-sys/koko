@@ -59,6 +59,12 @@ pub struct PhysicalStorageDevice {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CudaToolkit {
+    pub version: String,
+    pub compiler_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct HostProfile {
     pub os: String,
     pub architecture: String,
@@ -69,8 +75,10 @@ pub struct HostProfile {
     pub cpu_physical_cores: Option<usize>,
     /// CUDA compatibility level advertised by the installed NVIDIA driver.
     pub cuda_version: Option<String>,
-    /// CUDA Toolkit compiler version discovered from nvcc, when installed.
+    /// Preferred CUDA Toolkit compiler version (PATH-first), when installed.
     pub cuda_toolkit_version: Option<String>,
+    /// All distinct CUDA Toolkit compilers discovered on this host.
+    pub cuda_toolkits: Vec<CudaToolkit>,
     pub cpu_threads: usize,
     pub memory_total_mib: Option<u64>,
     pub memory_available_mib: Option<u64>,
@@ -396,22 +404,33 @@ fn nvidia_cuda_version(binary: &Path) -> Option<String> {
     parse_nvidia_cuda_version(&run_probe(binary, &[])?)
 }
 
-fn find_cuda_nvcc() -> Option<PathBuf> {
+fn find_cuda_nvcc_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
     if let Some(binary) = find_binary(&["nvcc"]) {
-        return Some(binary);
+        candidates.push(binary);
     }
+    candidates.push(PathBuf::from("/usr/local/cuda/bin/nvcc"));
 
-    let mut candidates = vec![PathBuf::from("/usr/local/cuda/bin/nvcc")];
+    let mut versioned = Vec::new();
     if let Ok(entries) = fs::read_dir("/usr/local") {
         for entry in entries.flatten() {
-            let path = entry.path();
             if entry.file_name().to_string_lossy().starts_with("cuda-") {
-                candidates.push(path.join("bin/nvcc"));
+                versioned.push(entry.path().join("bin/nvcc"));
             }
         }
     }
-    candidates.sort();
-    candidates.into_iter().find(|path| path.is_file())
+    versioned.sort();
+    candidates.extend(versioned);
+
+    let mut seen = BTreeSet::new();
+    candidates
+        .into_iter()
+        .filter(|path| path.is_file())
+        .filter(|path| {
+            let identity = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            seen.insert(identity)
+        })
+        .collect()
 }
 
 fn parse_nvcc_version(output: &str) -> Option<String> {
@@ -422,9 +441,28 @@ fn parse_nvcc_version(output: &str) -> Option<String> {
     (!version.is_empty()).then(|| version.to_string())
 }
 
-fn cuda_toolkit_version() -> Option<String> {
-    let nvcc = find_cuda_nvcc()?;
-    parse_nvcc_version(&run_probe(&nvcc, &["--version"])?)
+fn parse_cuda_toolkits(
+    candidates: impl IntoIterator<Item = (PathBuf, String)>,
+) -> Vec<CudaToolkit> {
+    candidates
+        .into_iter()
+        .filter_map(|(compiler_path, output)| {
+            Some(CudaToolkit {
+                version: parse_nvcc_version(&output)?,
+                compiler_path: compiler_path.display().to_string(),
+            })
+        })
+        .collect()
+}
+
+fn cuda_toolkits() -> Vec<CudaToolkit> {
+    let candidates = find_cuda_nvcc_candidates()
+        .into_iter()
+        .filter_map(|compiler| {
+            Some((compiler.clone(), run_probe(&compiler, &["--version"])?))
+        })
+        .collect::<Vec<_>>();
+    parse_cuda_toolkits(candidates)
 }
 
 fn memory_info_mib(contents: &str, key: &str) -> Option<u64> {
@@ -651,7 +689,8 @@ pub fn detect_host() -> HostProfile {
     let storage_devices = mounted_storage_devices();
     let cpu_physical_cores = cpu_physical_cores(&cpuinfo);
     let cuda_version = nvidia.as_deref().and_then(nvidia_cuda_version);
-    let cuda_toolkit_version = cuda_toolkit_version();
+    let cuda_toolkits = cuda_toolkits();
+    let cuda_toolkit_version = cuda_toolkits.first().map(|toolkit| toolkit.version.clone());
     let physical_storage_devices = physical_storage_devices();
 
     HostProfile {
@@ -667,6 +706,7 @@ pub fn detect_host() -> HostProfile {
         cpu_physical_cores,
         cuda_version,
         cuda_toolkit_version,
+        cuda_toolkits,
         cpu_threads: std::thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1),
@@ -788,6 +828,31 @@ mod tests {
         assert_eq!(mounts[1].filesystem, "nfs4");
         assert_eq!(mounts[1].mount_point, "/mnt/archive");
         assert_eq!(mounts[1].available_mib, Some(153600));
+    }
+
+    #[test]
+    fn cuda_toolkit_inventory_preserves_multiple_compilers_and_versions() {
+        let inventory = parse_cuda_toolkits(vec![
+            (
+                PathBuf::from("/usr/local/cuda-12.8/bin/nvcc"),
+                "Cuda compilation tools, release 12.8, V12.8.93".to_string(),
+            ),
+            (
+                PathBuf::from("/usr/local/cuda-13.0/bin/nvcc"),
+                "Cuda compilation tools, release 13.0, V13.0.48".to_string(),
+            ),
+        ]);
+        assert_eq!(inventory.len(), 2);
+        assert_eq!(inventory[0].version, "12.8");
+        assert_eq!(
+            inventory[0].compiler_path,
+            "/usr/local/cuda-12.8/bin/nvcc"
+        );
+        assert_eq!(inventory[1].version, "13.0");
+        assert_eq!(
+            inventory[1].compiler_path,
+            "/usr/local/cuda-13.0/bin/nvcc"
+        );
     }
 
     #[test]
