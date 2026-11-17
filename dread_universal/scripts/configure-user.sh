@@ -34,7 +34,8 @@ fi
 chmod 0600 "$ENV_FILE"
 
 systemctl --user daemon-reload
-systemctl --user enable --now "$SERVICE"
+systemctl --user enable "$SERVICE"
+systemctl --user restart "$SERVICE"
 healthy=false
 for _ in $(seq 1 30); do
   if curl --fail --silent --show-error http://127.0.0.1:8765/health 2>/dev/null | grep -q 'dread-universal'; then
