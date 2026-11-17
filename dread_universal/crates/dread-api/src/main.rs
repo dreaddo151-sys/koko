@@ -2229,38 +2229,42 @@ async fn execute_approved_task(
         {
             return;
         }
-        let mission_id: Option<String> = tx
+        let mission_id: Option<String> = match tx
             .query_row(
                 "SELECT mission_id FROM mission_tasks WHERE task_id = ?1",
                 params![task_id],
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|error| ApiError::internal(error.to_string()))?;
+        {
+            Ok(mission_id) => mission_id,
+            Err(_) => return,
+        };
         if let Some(mission_id) = mission_id {
             if final_status == "completed" {
-                let incomplete: i64 = tx
-                    .query_row(
-                        "SELECT COUNT(*)
-                         FROM mission_tasks mt JOIN tasks t ON t.id = mt.task_id
-                         WHERE mt.mission_id = ?1 AND t.status != 'completed'",
-                        params![mission_id],
-                        |row| row.get(0),
-                    )
-                    .map_err(|error| ApiError::internal(error.to_string()))?;
-                if incomplete == 0 {
-                    tx.execute(
+                let incomplete: i64 = match tx.query_row(
+                    "SELECT COUNT(*)
+                     FROM mission_tasks mt JOIN tasks t ON t.id = mt.task_id
+                     WHERE mt.mission_id = ?1 AND t.status != 'completed'",
+                    params![mission_id],
+                    |row| row.get(0),
+                ) {
+                    Ok(count) => count,
+                    Err(_) => return,
+                };
+                if incomplete == 0
+                    && tx.execute(
                         "UPDATE missions SET status = 'completed' WHERE id = ?1",
                         params![mission_id],
-                    )
-                    .map_err(|error| ApiError::internal(error.to_string()))?;
+                    ).is_err()
+                {
+                    return;
                 }
-            } else {
-                tx.execute(
-                    "UPDATE missions SET status = 'blocked' WHERE id = ?1",
-                    params![mission_id],
-                )
-                .map_err(|error| ApiError::internal(error.to_string()))?;
+            } else if tx.execute(
+                "UPDATE missions SET status = 'blocked' WHERE id = ?1",
+                params![mission_id],
+            ).is_err() {
+                return;
             }
         }
         let event_type = match final_status {
