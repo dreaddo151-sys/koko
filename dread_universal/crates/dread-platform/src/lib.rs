@@ -4,6 +4,7 @@
 //! shell, installs software, changes drivers, or starts an inference process.
 
 use serde::Serialize;
+use serde_json::Value;
 use std::{
     collections::BTreeSet,
     env, fs,
@@ -42,6 +43,22 @@ pub struct StorageDevice {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct StoragePartition {
+    pub name: String,
+    pub filesystem: Option<String>,
+    pub mount_points: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PhysicalStorageDevice {
+    pub name: String,
+    pub model: Option<String>,
+    pub transport: Option<String>,
+    pub size_mib: Option<u64>,
+    pub partitions: Vec<StoragePartition>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct HostProfile {
     pub os: String,
     pub architecture: String,
@@ -50,13 +67,13 @@ pub struct HostProfile {
     pub kernel_release: Option<String>,
     pub cpu_model: Option<String>,
     pub cpu_physical_cores: Option<usize>,
-    pub cuda_version: Option<String>,
+    /// CUDA compatibility level advertised by the installed NVIDIA driver.\n    pub cuda_version: Option<String>,\n    /// CUDA Toolkit compiler version discovered from nvcc, when installed.\n    pub cuda_toolkit_version: Option<String>,
     pub cpu_threads: usize,
     pub memory_total_mib: Option<u64>,
     pub memory_available_mib: Option<u64>,
     pub root_disk_total_mib: Option<u64>,
     pub root_disk_available_mib: Option<u64>,
-    pub storage_devices: Vec<StorageDevice>,
+    pub storage_devices: Vec<StorageDevice>,\n    /// Physical whole-disk inventory, including disks without mounted filesystems.\n    pub physical_storage_devices: Vec<PhysicalStorageDevice>,
     pub gpu_devices: Vec<GpuDevice>,
     pub llama_server: Option<String>,
     pub nvidia_smi_available: bool,
@@ -360,7 +377,9 @@ fn cpu_physical_cores(contents: &str) -> Option<usize> {
 
 fn parse_nvidia_cuda_version(output: &str) -> Option<String> {
     output.lines().find_map(|line| {
-        let (_, version) = line.split_once("CUDA Version:")?;
+        let (_, version) = line
+            .split_once("CUDA UMD Version:")
+            .or_else(|| line.split_once("CUDA Version:"))?;
         let version = version.split_whitespace().next()?;
         (!version.is_empty() && version != "N/A").then(|| version.to_string())
     })
@@ -368,6 +387,37 @@ fn parse_nvidia_cuda_version(output: &str) -> Option<String> {
 
 fn nvidia_cuda_version(binary: &Path) -> Option<String> {
     parse_nvidia_cuda_version(&run_probe(binary, &[])?)
+}
+
+fn find_cuda_nvcc() -> Option<PathBuf> {
+    if let Some(binary) = find_binary(&["nvcc"]) {
+        return Some(binary);
+    }
+
+    let mut candidates = vec![PathBuf::from("/usr/local/cuda/bin/nvcc")];
+    if let Ok(entries) = fs::read_dir("/usr/local") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_name().to_string_lossy().starts_with("cuda-") {
+                candidates.push(path.join("bin/nvcc"));
+            }
+        }
+    }
+    candidates.sort();
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn parse_nvcc_version(output: &str) -> Option<String> {
+    let (_, release) = output.split_once("release ")?;
+    let version = release
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .next()?;
+    (!version.is_empty()).then(|| version.to_string())
+}
+
+fn cuda_toolkit_version() -> Option<String> {
+    let nvcc = find_cuda_nvcc()?;
+    parse_nvcc_version(&run_probe(&nvcc, &["--version"])?)
 }
 
 fn memory_info_mib(contents: &str, key: &str) -> Option<u64> {
@@ -464,6 +514,77 @@ fn mounted_storage_devices() -> Vec<StorageDevice> {
     parse_df_storage(&output)
 }
 
+fn parse_lsblk_storage(output: &str) -> Vec<PhysicalStorageDevice> {
+    fn text_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+        value.get(key)?.as_str().filter(|text| !text.is_empty())
+    }
+
+    fn mount_points(value: &Value) -> Vec<String> {
+        value
+            .get("mountpoints")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    let Ok(document) = serde_json::from_str::<Value>(output) else {
+        return Vec::new();
+    };
+    document
+        .get("blockdevices")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|device| text_field(device, "type") == Some("disk"))
+        .map(|device| {
+            let partitions = device
+                .get("children")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|partition| {
+                    let name = text_field(partition, "name")?.to_string();
+                    Some(StoragePartition {
+                        name,
+                        filesystem: text_field(partition, "fstype").map(str::to_string),
+                        mount_points: mount_points(partition),
+                    })
+                })
+                .collect();
+            PhysicalStorageDevice {
+                name: text_field(device, "name").unwrap_or_default().to_string(),
+                model: text_field(device, "model").map(str::to_string),
+                transport: text_field(device, "tran").map(str::to_string),
+                size_mib: device
+                    .get("size")
+                    .and_then(|size| size.as_u64().or_else(|| size.as_str()?.parse().ok()))
+                    .map(|bytes| bytes / 1024 / 1024),
+                partitions,
+            }
+        })
+        .collect()
+}
+
+fn physical_storage_devices() -> Vec<PhysicalStorageDevice> {
+    if !cfg!(target_os = "linux") {
+        return Vec::new();
+    }
+    let Some(binary) = find_binary(&["lsblk"]) else {
+        return Vec::new();
+    };
+    let Some(output) = run_probe(
+        &binary,
+        &["--json", "--bytes", "--output", "NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS,MODEL,TRAN"],
+    ) else {
+        return Vec::new();
+    };
+    parse_lsblk_storage(&output)
+}
+
 fn llama_server_path() -> Option<String> {
     if let Ok(configured) = env::var("DREAD_LLM_SERVER") {
         let path = PathBuf::from(configured);
@@ -517,7 +638,7 @@ pub fn detect_host() -> HostProfile {
     let (root_disk_total_mib, root_disk_available_mib) = root_disk_capacity_mib();
     let storage_devices = mounted_storage_devices();
     let cpu_physical_cores = cpu_physical_cores(&cpuinfo);
-    let cuda_version = nvidia.as_deref().and_then(nvidia_cuda_version);
+    let cuda_version = nvidia.as_deref().and_then(nvidia_cuda_version);\n    let cuda_toolkit_version = cuda_toolkit_version();\n    let physical_storage_devices = physical_storage_devices();
 
     HostProfile {
         os: env::consts::OS.into(),
@@ -530,7 +651,7 @@ pub fn detect_host() -> HostProfile {
             .filter(|value| !value.is_empty()),
         cpu_model: cpu_model(&cpuinfo),
         cpu_physical_cores,
-        cuda_version,
+        cuda_version,\n        cuda_toolkit_version,
         cpu_threads: std::thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1),
@@ -538,7 +659,7 @@ pub fn detect_host() -> HostProfile {
         memory_available_mib: memory_info_mib(&meminfo, "MemAvailable"),
         root_disk_total_mib,
         root_disk_available_mib,
-        storage_devices,
+        storage_devices,\n        physical_storage_devices,
         gpu_devices,
         llama_server: llama_server_path(),
         nvidia_smi_available: nvidia.is_some(),
@@ -584,6 +705,40 @@ mod tests {
         let banner = "NVIDIA-SMI 550.90.07 Driver Version: 550.90.07 CUDA Version: 12.4\n";
         assert_eq!(parse_nvidia_cuda_version(banner).as_deref(), Some("12.4"));
         assert_eq!(parse_nvidia_cuda_version("CUDA Version: N/A"), None);
+    }
+
+    #[test]
+    fn nvidia_cuda_umd_banner_is_parsed_as_driver_cuda_compatibility() {
+        let banner = "NVIDIA-SMI 615.78.08 KMD Version: 615.78.08 CUDA UMD Version: 13.4\\n";
+        assert_eq!(parse_nvidia_cuda_version(banner).as_deref(), Some("13.4"));
+    }
+
+    #[test]
+    fn nvcc_release_is_parsed_independently_from_driver_cuda_version() {
+        let output = "Cuda compilation tools, release 13.0, V13.0.48\\n";
+        assert_eq!(parse_nvcc_version(output).as_deref(), Some("13.0"));
+        assert_eq!(parse_nvcc_version("no compiler version"), None);
+    }
+
+    #[test]
+    fn lsblk_parser_includes_unmounted_physical_disks_and_partition_mounts() {
+        let sample = r#"{
+          "blockdevices": [
+            {"name":"loop0","type":"loop","size":4096},
+            {"name":"nvme1n1","type":"disk","size":1024209543168,"model":"Sabrent","tran":"nvme",
+             "children":[{"name":"nvme1n1p1","type":"part","size":64193879040,"fstype":"ext4","mountpoints":[null]}]},
+            {"name":"nvme0n1","type":"disk","size":1000204886016,"model":"Samsung SSD 970 EVO 1TB","tran":"nvme",
+             "children":[{"name":"nvme0n1p2","type":"part","size":999074824192,"fstype":"ext4","mountpoints":["/"]}]}
+          ]
+        }"#;
+        let disks = parse_lsblk_storage(sample);
+        assert_eq!(disks.len(), 2);
+        assert_eq!(disks[0].name, "nvme1n1");
+        assert_eq!(disks[0].model.as_deref(), Some("Sabrent"));
+        assert_eq!(disks[0].transport.as_deref(), Some("nvme"));
+        assert!(disks[0].partitions[0].mount_points.is_empty());
+        assert_eq!(disks[1].partitions[0].mount_points, vec!["/"]);
+        assert!(parse_lsblk_storage("not json").is_empty());
     }
 
     #[test]
