@@ -104,6 +104,22 @@ fn default_compatibility() -> String {
     "review_required".to_string()
 }
 
+/// Local Pstack content is not proof of an upstream checkout. Preserve only
+/// operator-supplied version/revision claims and never invent an official URL.
+fn pstack_local_provenance(
+    source_version: Option<String>,
+    source_revision: Option<String>,
+    imported_at: u64,
+) -> CapabilityProvenance {
+    CapabilityProvenance {
+        source_name: "Pstack local filesystem copy".into(),
+        source_uri: None,
+        source_version,
+        source_revision,
+        imported_at,
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct TaskRecord {
     id: String,
@@ -691,9 +707,12 @@ async fn import_discovered_skills(
     let agents =
         discover_agent_profiles(&root).map_err(|e| ApiError::bad_request(e.to_string()))?;
     let now = now_epoch();
-    let source_revision =
-        env::var("DREAD_PSTACK_REVISION").unwrap_or_else(|_| "unverified-local-copy".to_string());
-    let source_version = env::var("DREAD_PSTACK_VERSION").unwrap_or_else(|_| "0.15.43".to_string());
+    let source_revision = env::var("DREAD_PSTACK_REVISION")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let source_version = env::var("DREAD_PSTACK_VERSION")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
 
     let mut discovered = Vec::new();
     for item in skills {
@@ -730,15 +749,13 @@ async fn import_discovered_skills(
             name: name.clone(),
             kind: *kind,
             description: description.clone(),
-            version: Some(source_version.clone()),
-            license: Some("MIT".into()),
-            provenance: CapabilityProvenance {
-                source_name: "Pstack".into(),
-                source_uri: Some("https://github.com/cursor/plugins/tree/main/pstack".into()),
-                source_version: Some(source_version.clone()),
-                source_revision: Some(source_revision.clone()),
-                imported_at: now,
-            },
+            version: source_version.clone(),
+            license: None,
+            provenance: pstack_local_provenance(
+                source_version.clone(),
+                source_revision.clone(),
+                now,
+            ),
             compatibility: "review_required".into(),
             dependencies: Vec::new(),
             adapter: Some("local.markdown_context".into()),
@@ -748,6 +765,8 @@ async fn import_discovered_skills(
                 "fingerprint": fingerprint,
                 "fingerprint_algorithm": "sha256",
                 "trust": "untrusted_context",
+                "source_verification": "unverified_local_copy",
+                "revision_claim": if source_revision.is_some() { "operator_supplied_unverified" } else { "not_supplied" },
                 "execution": "never",
                 "approval": null
             }),
@@ -2954,6 +2973,25 @@ mod tests {
         assert_eq!(event.event_type, "task_created");
         assert_eq!(event.sequence, 1);
         server.abort();
+    }
+
+    #[test]
+    fn pstack_local_import_does_not_claim_verified_upstream_provenance() {
+        let provenance = pstack_local_provenance(None, None, 123);
+        assert_eq!(provenance.source_name, "Pstack local filesystem copy");
+        assert!(provenance.source_uri.is_none());
+        assert!(provenance.source_version.is_none());
+        assert!(provenance.source_revision.is_none());
+        assert_eq!(provenance.imported_at, 123);
+
+        let claimed = pstack_local_provenance(
+            Some("operator-version".into()),
+            Some("operator-revision".into()),
+            456,
+        );
+        assert_eq!(claimed.source_version.as_deref(), Some("operator-version"));
+        assert_eq!(claimed.source_revision.as_deref(), Some("operator-revision"));
+        assert!(claimed.source_uri.is_none());
     }
 
     #[tokio::test]
