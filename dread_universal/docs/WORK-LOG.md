@@ -60,7 +60,7 @@ Earlier WebSocket network test `44025427057`: authenticated handshake, replay, l
 - Version 0.15.43; commit `2f87c854fe3e2fcda44ca86b46ede35aad3c46b7`; subtree `71d8e1d1d718e2149dc43b2535618064f29cba6b`; MIT.
 - Inventory: 58 skills and 2 Markdown agent prompt profiles.
 - Markdown profiles are context profiles, not live agents. Current PR loader attaches approved profiles as bounded untrusted context; it does not execute scripts or launch agents.
-- PR #12 uses FNV-1a as local change detector, not cryptographic signature. Replace with SHA-256 for production provenance/update integrity.
+- The initial PR #12 implementation used FNV-1a. This has now been replaced in the current branch with SHA-256 fingerprints using `ring` 0.17. SHA-256 detects content changes; it is not a publisher signature or proof of trusted provenance. Signed catalog provenance remains future work.
 
 ## 7. Legacy Hub regression findings (2026-11-08 audit)
 - 44-route API inventory.
@@ -76,7 +76,7 @@ These are historical findings; retest to establish current state.
 - Host profile has OS, architecture, CPU threads, GPU metadata and llama-server executable discovery; RAM/disk/driver inventory incomplete.
 - Agent discovery is read-only health probes, not task dispatch.
 - Pstack prompt profiles are not live AgentAdapters.
-- FNV fingerprint is not cryptographic.
+- SHA-256 fingerprints are now implemented for Pstack skill and agent-profile content. They are integrity fingerprints only; trusted publisher signatures and signed catalog verification remain incomplete.
 - UI bundle is not embedded/served by Rust API; production must not require Vite dev server.
 - Transactional installer/updater/rollback incomplete.
 - Hermes/OpenHands/DeerFlow task adapters not all implemented/verified.
@@ -136,3 +136,12 @@ Do not describe the platform as complete until Master Plan acceptance gates pass
 - Recovery marks interrupted running tasks failed without replay. It only considers approved queued `service_discovery` tasks eligible for recovery; other queued tasks are rejected for operator review. Verify the continuation/requeue behavior in the remaining startup code before claiming recovery execution.
 - No concrete Hermes/OpenHands/DeerFlow adapter is present yet. Agent discovery remains health-only. OpenHands remains gated on constrained workspace execution, tool policy and Supervisor-routed LLM configuration.
 - Immediate next engineering gate: implement a reviewed, testable provider-neutral agent execution adapter and API task lifecycle integration behind explicit opt-in, while preserving the fail-closed default. Start with a mock HTTP contract test; do not enable host-mutating tools or point an agent at an unrestricted local workspace.
+
+
+### SHA-256 provenance fingerprint implementation — 2026-11-17
+
+- Replaced the FNV-1a fingerprint in `dread-skills` with SHA-256 via the already locked `ring 0.17.14` crate. Added a known-answer unit test for SHA-256(`abc`) and updated the discovery assertion to require a 64-hex-character digest.
+- Added `ring` as a workspace dependency and locked dependency for `dread-skills`; no new crate version was introduced into `Cargo.lock` because `ring 0.17.14` was already present transitively.
+- Commits: `ddb79ea` (workspace dependency), `6858aec` (crate dependency), `0913242` (implementation and regression test), `b214ed4` (lockfile).
+- CI run #143 (`44146062714`) was triggered for SHA `b214ed450b62406561bf1d050e835c8c68b091bb` and was pending at the time of this log update. Do not call the SHA-256 change validated until this run completes.
+- This is a content fingerprint, not a digital signature. Extension installation still needs signed/pinned catalog verification, staged activation, rollback and audit logging.
