@@ -1,4 +1,5 @@
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -10,52 +11,22 @@ import import_pstack_capabilities as importer
 
 class PstackCapabilityImportTests(unittest.TestCase):
     def make_fixture(self, root: Path) -> Path:
-        integration = root / "integrations" / "pstack"
-        upstream = integration / "upstream"
-        (upstream / "skills" / "example-skill").mkdir(parents=True)
-        (upstream / "agents").mkdir(parents=True)
-        (upstream / "plugin.json").write_text(json.dumps({"name": "pstack", "version": "1.0.0", "license": "MIT"}))
-        (upstream / "LICENSE").write_text("MIT")
-        (upstream / "skills" / "example-skill" / "SKILL.md").write_text("# Example Skill\nSafe metadata only")
-        (upstream / "agents" / "reviewer.md").write_text("# Reviewer Agent\nPrompt text")
-        import hashlib
-        file_hashes = {
-            "skills/example-skill/SKILL.md": hashlib.sha256((upstream / "skills/example-skill/SKILL.md").read_bytes()).hexdigest(),
-            "agents/reviewer.md": hashlib.sha256((upstream / "agents/reviewer.md").read_bytes()).hexdigest(),
-        }
-        (upstream / ".dread-import.json").write_text(json.dumps({
-            "schema_version": 1,
-            "repository": "https://github.com/cursor/plugins",
-            "commit_sha": "a" * 40,
-            "tree_sha": "b" * 40,
-            "manifest_version": "1.0.0",
-            "license": "MIT",
-            "verified_by": "scripts/import-pstack.sh",
-            "files_sha256": file_hashes,
-        }))
-        catalog = {
-            "schema_version": 1,
-            "name": "pstack",
-            "repository": "https://github.com/cursor/plugins",
-            "upstream_manifest_version": "1.0.0",
-            "upstream_commit_sha": "a" * 40,
-            "upstream_tree_sha": "b" * 40,
-            "license": "MIT",
-            "inventory_count": 1,
-            "skills": [{"id": "example-skill", "path": "skills/example-skill/SKILL.md", "initial_compatibility": "requires_review"}],
-            "agents": [{"id": "reviewer", "path": "agents/reviewer.md", "initial_compatibility": "adapter_needed"}],
-        }
-        (integration / "catalog.json").write_text(json.dumps(catalog))
+        project_root = Path(__file__).resolve().parents[1]
+        source = project_root / "integrations" / "pstack"
+        destination = root / "integrations" / "pstack"
+        shutil.copytree(source, destination)
         return root
 
     def test_builds_disabled_metadata_records_for_skills_and_agents(self):
         with tempfile.TemporaryDirectory() as tmp:
             records = importer.load_import_records(self.make_fixture(Path(tmp)))
-        self.assertEqual(len(records), 2)
+        self.assertEqual(len(records), 60)
+        self.assertEqual(sum(item["kind"] == "skill" for item in records), 58)
+        self.assertEqual(sum(item["kind"] == "agent" for item in records), 2)
         self.assertEqual({item["kind"] for item in records}, {"skill", "agent"})
         self.assertTrue(all("status" not in item for item in records))
         self.assertTrue(all(item["manifest"]["execution_performed"] is False for item in records))
-        self.assertEqual(records[0]["provenance"]["source_revision"], "a" * 40)
+        self.assertEqual(records[0]["provenance"]["source_revision"], importer.PINNED_COMMIT)
 
     def test_refuses_unverified_source_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -73,6 +44,27 @@ class PstackCapabilityImportTests(unittest.TestCase):
             marker.write_text(json.dumps(data))
             with self.assertRaises(importer.ImportErrorSafe):
                 importer.load_import_records(root)
+
+    def test_rejects_tampered_catalog_even_when_revision_fields_are_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.make_fixture(Path(tmp))
+            catalog_path = root / "integrations/pstack/catalog.json"
+            data = json.loads(catalog_path.read_text())
+            data["skills"][0]["path"] = "skills/../../outside/SKILL.md"
+            catalog_path.write_text(json.dumps(data))
+            with self.assertRaisesRegex(importer.ImportErrorSafe, "catalog hash"):
+                importer.load_import_records(root)
+
+    def test_safe_source_file_rejects_symlink_escape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_root = root / "upstream"
+            source_root.mkdir()
+            outside = root / "outside.md"
+            outside.write_text("# outside")
+            (source_root / "escape.md").symlink_to(outside)
+            with self.assertRaises(importer.ImportErrorSafe):
+                importer._safe_source_file(source_root, "escape.md")
 
     def test_rejects_path_traversal(self):
         with tempfile.TemporaryDirectory() as tmp:
