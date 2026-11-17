@@ -102,7 +102,7 @@ jobs:
           PY
           grep -q 'api/agents' crates/dread-api/src/main.rs
           test -f config/agents.toml
-          grep -q "Read-only local agent discovery" "$WORKSPACE/docs/PROJECT_STATUS.md"
+          grep -q "Read-only local agent health discovery" "$WORKSPACE/docs/PROJECT_STATUS.md"
           grep -q "REDIRECTED" "$WORKSPACE/docs/VERIFICATION.md"
 
       - name: Install stable Rust, rustfmt and Clippy
