@@ -1861,7 +1861,6 @@ mod tests {
         }))
     }
 
-
     async fn mock_models() -> Json<Value> {
         Json(json!({
             "object": "list",
