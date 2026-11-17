@@ -1137,15 +1137,17 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
              VALUES (?1, NULL, ?2, 0, 0, ?3)",
             params![task_id, reason, now],
         )?;
-        emitted.push(append_task_event(
-            &tx,
-            &task_id,
-            "task_interrupted",
-            &json!({"status": "failed", "reason": reason}),
-            "recovery",
-            now,
-        )
-        .map_err(|error| anyhow::anyhow!(error.message))?);
+        emitted.push(
+            append_task_event(
+                &tx,
+                &task_id,
+                "task_interrupted",
+                &json!({"status": "failed", "reason": reason}),
+                "recovery",
+                now,
+            )
+            .map_err(|error| anyhow::anyhow!(error.message))?,
+        );
     }
 
     let queued: Vec<(String, String, Option<String>, bool, Option<String>)> = {
@@ -1186,15 +1188,17 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
              VALUES (?1, NULL, ?2, 0, 0, ?3)",
             params![task_id, reason, now],
         )?;
-        emitted.push(append_task_event(
-            &tx,
-            &task_id,
-            "task_recovery_rejected",
-            &json!({"status": "failed", "reason": reason}),
-            "recovery",
-            now,
-        )
-        .map_err(|error| anyhow::anyhow!(error.message))?);
+        emitted.push(
+            append_task_event(
+                &tx,
+                &task_id,
+                "task_recovery_rejected",
+                &json!({"status": "failed", "reason": reason}),
+                "recovery",
+                now,
+            )
+            .map_err(|error| anyhow::anyhow!(error.message))?,
+        );
     }
 
     tx.commit()?;
