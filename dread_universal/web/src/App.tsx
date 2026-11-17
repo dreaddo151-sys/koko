@@ -8,6 +8,7 @@ type Agent = { id: string; name: string; status: string; adapter?: string };
 type Event = { sequence: number; event_type: string; actor: string; created_at: number };
 type Result = { result?: unknown; error?: string | null; attempts?: number; elapsed_ms?: number };
 type Capability = { id: string; name: string; kind: string; description: string; version?: string | null; license?: string | null; compatibility: string; dependencies: string[]; adapter?: string | null; status: string; provenance: { source_name: string; source_version?: string | null } };
+type SkillPreview = { id: string; name: string; description: string; content: string; trust: string; execution: string };
 type Service = { id: string; name: string; role: string; status: string; http_status?: number | null; latency_ms?: number; summary?: string | null; detail?: string };
 type Page = "overview" | "tasks" | "agents" | "capabilities" | "models" | "gpu";
 
@@ -38,6 +39,7 @@ function App() {
   const [connected,setConnected]=useState(false); const [supervisorOnline,setSupervisorConfigured]=useState(false); const [error,setError]=useState(""); const [busy,setBusy]=useState(false);
   const [models,setModels]=useState<Model[]>([]); const [model,setModel]=useState("");
   const [tasks,setTasks]=useState<Task[]>([]); const [agents,setAgents]=useState<Agent[]>([]); const [capabilities,setCapabilities]=useState<Capability[]>([]); const [services,setServices]=useState<Service[]>([]);
+  const [skillPreview,setSkillPreview]=useState<SkillPreview|null>(null); const [notice,setNotice]=useState("");
   const [prompt,setPrompt]=useState(""); const [active,setActive]=useState("");
   const [events,setEvents]=useState<Event[]>([]); const [result,setResult]=useState<Result|null>(null);
   const [page,setPage]=useState<Page>("overview"); const [lastRefresh,setLastRefresh]=useState<number|null>(null);
@@ -82,6 +84,37 @@ function App() {
     try{await api(`/api/tasks/${task.id}/${verb}`,token,{method:"POST",body:verb==="approve"?JSON.stringify({reason:"Approved in DREAD Universal Console"}):undefined});await refresh();setActive(task.id);}
     catch(e){setError(e instanceof Error?e.message:`Task ${verb} failed`);}finally{setBusy(false);}
   };
+  const discoverSkills=async()=>{
+    setBusy(true);setError("");setNotice("");
+    try{
+      const found=await api<{count:number}>("/api/capabilities/discover",token);
+      const imported=await api<{discovered:number;imported:number;already_present:number}>("/api/capabilities/import",token,{method:"POST"});
+      await refresh();
+      setNotice(`Pstack scan: ${found.count} found · ${imported.imported} imported · ${imported.already_present} already present. All imports remain disabled.`);
+    }catch(e){setError(e instanceof Error?e.message:"Pstack discovery failed");}
+    finally{setBusy(false);}
+  };
+  const previewSkill=async(item:Capability)=>{
+    setBusy(true);setError("");
+    try{const preview=await api<SkillPreview>(`/api/capabilities/${encodeURIComponent(item.id)}/preview`,token);setSkillPreview(preview);}
+    catch(e){setError(e instanceof Error?e.message:"Skill preview failed");}
+    finally{setBusy(false);}
+  };
+  const enableSkill=async()=>{
+    if(!skillPreview)return;setBusy(true);setError("");
+    try{
+      await api(`/api/capabilities/${encodeURIComponent(skillPreview.id)}/enable`,token,{method:"POST",body:JSON.stringify({reason:"Reviewed the displayed Markdown source in DREAD Universal Console; enable as untrusted model context only."})});
+      setNotice(`Enabled ${skillPreview.name} as untrusted model context. No code execution is permitted.`);
+      setSkillPreview(null);await refresh();
+    }catch(e){setError(e instanceof Error?e.message:"Skill approval failed");}
+    finally{setBusy(false);}
+  };
+  const disableSkill=async(item:Capability)=>{
+    setBusy(true);setError("");
+    try{await api(`/api/capabilities/${encodeURIComponent(item.id)}/disable`,token,{method:"POST"});setNotice(`Disabled ${item.name}.`);setSkillPreview(null);await refresh();}
+    catch(e){setError(e instanceof Error?e.message:"Skill disable failed");}
+    finally{setBusy(false);}
+  };
   const disconnect=()=>{setToken("");setDraft("");setPage("overview");setActive("");setEvents([]);setResult(null);setTasks([]);setAgents([]);setCapabilities([]);setModels([]);setServices([]);setModel("");setConnected(false);setSupervisorConfigured(false);};
   const activeTask=tasks.find(x=>x.id===active);
   const nav:[Page,string,ReactNode,string][]=[
@@ -124,7 +157,7 @@ function App() {
         {page==="models"&&<section className="panel"><PanelTitle icon={<Layers3/>} title="LOCAL MODEL ARSENAL" meta={`${models.length} DISCOVERED`}/>{models.length?models.map(x=><div className="row" key={x.id}><div><b>{x.id}</b><small>Discovered from local GPU gateway</small></div><Pill value="AVAILABLE"/></div>):<Empty text="No models returned by the local GPU gateway. Confirm gateway and upstream model service status."/>}</section>}
         {page==="tasks"&&<div className="task-layout"><section className="panel"><PanelTitle icon={<Workflow/>} title="ALL MISSIONS" meta={`${tasks.length} RECORDED`}/><TaskList tasks={tasks} active={active} select={setActive} action={action} busy={busy}/><button className="secondary full" disabled={!token||busy} onClick={()=>void create("service_discovery")}><Plus size={14}/>CREATE SERVICE DISCOVERY</button></section><section className="panel"><PanelTitle icon={<TerminalSquare/>} title="MISSION TRACE" meta={active?active.slice(0,8).toUpperCase():"SELECT MISSION"}/>{activeTask?<><div className="detail"><b>{activeTask.title}</b><small>{activeTask.task_type} · {activeTask.id}</small><Pill value={activeTask.status}/></div><div className="events">{events.map(x=><div className="event" key={x.sequence}><code>#{x.sequence}</code><span>{x.event_type.replaceAll("_"," ")}</span><small>{clock(x.created_at)}</small></div>)}{!events.length&&<Empty text="No mission events yet."/>}</div>{result&&<div className="result"><b>EXECUTION RESULT</b><pre>{JSON.stringify(result.result??result.error??result,null,2)}</pre></div>}</>:<Empty text="Select a mission to inspect its audit events and result."/>}</section></div>}
         {page==="agents"&&<section className="panel"><PanelTitle icon={<Bot/>} title="AGENT NETWORK" meta="READ-ONLY HEALTH PROBES"/>{agents.length?agents.map(x=><div className="row" key={x.id}><div><b>{x.name}</b><small>{x.adapter??"generic"} · {x.id}</small></div><Pill value={x.status}/></div>):<Empty text="Agent inventory is empty. Add reviewed loopback health endpoints to config/agents.toml. Discovery never scans ports or launches agents."/>}</section>}
-        {page==="capabilities"&&<section className="panel"><PanelTitle icon={<ShieldCheck/>} title="PSTACK CAPABILITY INVENTORY" meta="METADATA ONLY / DISABLED BY DEFAULT"/><p className="muted">Review provenance, compatibility and dependencies. Importing a capability never executes its code; activation is deliberately unavailable in this console.</p>{capabilities.length?capabilities.map(item=><div className="row capability-row" key={item.id}><div className="capability-main"><b>{item.name}</b><small>{item.kind.replaceAll("_"," ")} · {item.id}</small><small>{item.description||"No description supplied."}</small><small>Source: {item.provenance.source_name}{item.provenance.source_version?` · ${item.provenance.source_version}`:""}{item.version?` · Capability ${item.version}`:""}</small><small>Compatibility: {item.compatibility.replaceAll("_"," ")} · Dependencies: {item.dependencies?.length?item.dependencies.join(", "):"none listed"}{item.adapter?` · Adapter: ${item.adapter}`:""}</small></div><div className="capability-state"><Pill value={item.status}/>{item.license&&<small>{item.license}</small>}</div></div>):<Empty text="No capabilities imported. The pinned Pstack inventory can be imported separately; imported records remain disabled until reviewed."/>}</section>}
+        {page==="capabilities"&&<section className="panel"><div className="panel-toolbar"><PanelTitle icon={<ShieldCheck/>} title="PSTACK CAPABILITY INVENTORY" meta="DISCOVER / PREVIEW / APPROVE"/><button className="primary" disabled={!token||busy} onClick={()=>void discoverSkills()}><Plus size={14}/>DISCOVER & IMPORT SKILLS</button></div><p className="muted">One-click discovery imports local Markdown skills as disabled capabilities. Preview source before enabling; enabled skills are passed only as untrusted model context and never execute.</p>{notice&&<div className="approval">{notice}</div>}{skillPreview&&<div className="skill-preview"><div className="row"><div><b>REVIEW SOURCE · {skillPreview.name}</b><small>{skillPreview.id} · {skillPreview.trust} · execution: {skillPreview.execution}</small></div><button className="icon" onClick={()=>setSkillPreview(null)}><X size={14}/></button></div><p className="muted">{skillPreview.description}</p><pre className="result">{skillPreview.content}</pre><div className="compose-foot"><small>Read the full source before approving this skill.</small><button className="primary" disabled={busy} onClick={()=>void enableSkill()}><ShieldCheck size={14}/>APPROVE AS MODEL CONTEXT</button></div></div>}{capabilities.length?capabilities.map(item=><div className="row capability-row" key={item.id}><div className="capability-main"><b>{item.name}</b><small>{item.kind.replaceAll("_"," ")} · {item.id}</small><small>{item.description||"No description supplied."}</small><small>Source: {item.provenance.source_name}{item.provenance.source_version?` · ${item.provenance.source_version}`:""}{item.version?` · Capability ${item.version}`:""}</small><small>Compatibility: {item.compatibility.replaceAll("_"," ")} · Dependencies: {item.dependencies?.length?item.dependencies.join(", "):"none listed"}{item.adapter?` · Adapter: ${item.adapter}`:""}</small></div><div className="capability-state"><Pill value={item.status}/>{item.license&&<small>{item.license}</small>}{item.kind==="skill"&&<div className="capability-actions"><button className="link" disabled={busy} onClick={()=>void previewSkill(item)}>PREVIEW</button>{item.status==="enabled"?<button className="link" disabled={busy} onClick={()=>void disableSkill(item)}>DISABLE</button>:<small>Approval required</small>}</div>}</div></div>):<Empty text="No capabilities imported. Use Discover & Import Skills to scan the configured Pstack catalog."/>}</section>}
         <footer>PROJECT DREAD / UNIVERSAL OPERATIONS <span>LOOPBACK ONLY · OPERATOR APPROVAL · PYTHON GPU OWNERSHIP</span></footer>
       </div>
     </main>
