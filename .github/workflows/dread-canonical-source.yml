@@ -12,6 +12,9 @@ on:
       - dread_universal/crates/**
       - dread_universal/config/**
       - dread_universal/scripts/**
+      - dread_universal/web/**
+      - dread_universal/README.md
+      - dread_universal/docs/**
       - legacy-reference/**
       - SOURCE_PROVENANCE_RUN81.md
   workflow_dispatch:
@@ -178,6 +181,17 @@ jobs:
       - name: Optimized release build
         run: cargo build --workspace --release --locked
         working-directory: dread_universal
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build React operator console
+        run: |
+          npm install --no-audit --no-fund --package-lock=false
+          npm run build
+        working-directory: dread_universal/web
 
       - name: Exercise authenticated Pstack API apply and idempotent re-import
         shell: bash

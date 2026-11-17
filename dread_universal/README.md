@@ -93,6 +93,18 @@ Canonical-source CI run `44025427057` verified the committed Pstack pin/tree and
 
 The Python GPU Supervisor remains the only GPU ownership, VRAM lease and process-lifecycle authority. Rust may call only the local gateway at `127.0.0.1:11500`; it must not call the upstream model server directly or acquire a second GPU lock. Keep the Python Hub and ComfyUI running while Rust development continues.
 
+## Run the operator console
+
+The React/TypeScript console is a separate loopback-only Vite app. Start the Rust API first, then run:
+
+```bash
+cd dread_universal/web
+npm install
+npm run dev
+```
+
+Open `http://127.0.0.1:5173` and enter `DREAD_API_TOKEN`. The token is held only in page memory, not browser storage. The UI polls authenticated HTTP endpoints for task, agent and model state; it does not place the bearer token in a WebSocket URL. Run `npm run build` for a production bundle or `npm run preview` to serve that bundle on loopback. The frontend is not yet embedded in the Rust API server.
+
 ## Scope
 
 This is a tested Rust foundation with a canonical tracked source branch, not the complete Universal Hub. WebSocket task-event streaming, read-only agent discovery, disabled-by-default capability metadata, authenticated live Pstack import and idempotency, and approval-gated local GPU chat through the gateway have CI evidence. The bounded orchestration kernel is connected to the durable task API for two reviewed built-in runners. Startup recovery and the authenticated WebSocket handshake/reconnect path are CI verified. Remaining milestones include dedicated provider/agent adapters, React operator UI, legacy Hub parity, Supervisor/resource integration, installer/upgrade/rollback and live dual-RTX-3090 acceptance.
@@ -101,4 +113,4 @@ See [project status](docs/PROJECT_STATUS.md) and [verification gates](docs/VERIF
 
 ## Bounded orchestration kernel
 
-The `dread-orchestrator` crate supplies a bounded execution gate for a caller-selected runner: max concurrent operations, max admitted work, retry count, per-attempt timeout and watch-channel cancellation. It is connected to the durable task API for one reviewed, read-only service-discovery runner. Startup recovery resumes only queued, approved, capability-free service-discovery tasks; interrupted running tasks are marked failed and not replayed. It has no priority scheduling, provider/agent adapters, process launching or GPU lease ownership. The Python GPU Supervisor remains the only GPU owner. Approval does not execute a task; the separate run endpoint is required and rejects unsupported task types.
+The `dread-orchestrator` crate supplies a bounded execution gate for a caller-selected runner: max concurrent operations, max admitted work, retry count, per-attempt timeout and watch-channel cancellation. It is connected to the durable task API for reviewed service-discovery and GPU-chat runners. Startup recovery resumes only queued, approved, capability-free service-discovery tasks; queued GPU inference is failed closed to avoid duplicate compute after restart, and interrupted running tasks are marked failed rather than replayed. It has no priority scheduling, provider/agent adapters, process launching or GPU lease ownership. The Python GPU Supervisor remains the only GPU owner. Approval does not execute a task; the separate run endpoint is required and rejects unsupported task types.
