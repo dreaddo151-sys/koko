@@ -40,6 +40,11 @@ jobs:
         run: cargo test --workspace --locked
       - name: Release build
         run: cargo build --workspace --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dread-universal-api-ubuntu
+          path: dread_universal/target/release/dread-universal
+          if-no-files-found: error
       - name: Validate Ubuntu installer scripts
         run: bash -n scripts/install-user.sh scripts/configure-user.sh scripts/package-ubuntu.sh
       - name: Python bridge and importer regression tests
@@ -62,3 +67,45 @@ jobs:
         run: npm install --ignore-scripts --no-audit --no-fund
       - name: Build console
         run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dread-universal-web-ubuntu
+          path: dread_universal/web/dist/
+          if-no-files-found: error
+
+  package:
+    name: Ubuntu packages / smoke test
+    runs-on: ubuntu-24.04
+    needs: [rust, web]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dread-universal-api-ubuntu
+          path: dread_universal/target/release
+      - uses: actions/download-artifact@v4
+        with:
+          name: dread-universal-web-ubuntu
+          path: dread_universal/web/dist
+      - name: Validate installer scripts
+        working-directory: dread_universal
+        run: bash -n scripts/install-user.sh scripts/configure-user.sh scripts/package-ubuntu.sh
+      - name: Assemble Ubuntu deb and portable bundle
+        working-directory: dread_universal
+        run: scripts/package-ubuntu.sh
+      - name: Verify package checksums and contents
+        working-directory: dread_universal
+        run: |
+          set -euo pipefail
+          (cd dist/release && sha256sum --check SHA256SUMS)
+          dpkg-deb --info dist/release/dread-universal_*.deb
+          tar -tzf dist/release/dread-universal-ubuntu-*.tar.gz | grep -q 'bundle/bin/dread-universal'
+          tar -tzf dist/release/dread-universal-ubuntu-*.tar.gz | grep -q 'bundle/web/dist/index.html'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dread-universal-ubuntu-packages
+          path: |
+            dread_universal/dist/release/*.deb
+            dread_universal/dist/release/*.tar.gz
+            dread_universal/dist/release/SHA256SUMS
+          if-no-files-found: error
