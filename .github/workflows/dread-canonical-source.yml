@@ -235,7 +235,7 @@ jobs:
           PY
 
           second_apply="$(python3 scripts/import_pstack_capabilities.py --root "$PWD" --api-base "$api_base" --apply)"
-          printf '%s\\n' "$second_apply"
+          printf '%s\n' "$second_apply"
           grep -q 'created=0, already_present=60' <<<"$second_apply"
           echo "Pstack importer idempotency and provenance reconciliation: PASS"
 
