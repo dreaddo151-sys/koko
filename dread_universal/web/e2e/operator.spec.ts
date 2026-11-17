@@ -12,8 +12,7 @@ test("operator connects, approves and runs authenticated GPU chat", async ({ pag
   await expect(
     page.locator(".metric").filter({ hasText: "GPU supervisor" }),
   ).toContainText("Ready");
-  await expect(page.locator("select").nth(0)).toHaveValue("gpu_chat");
-  await expect(page.locator("select").nth(1)).toHaveValue("qwen3.8:27b");
+  await expect(page.locator("select")).toHaveValue("qwen3.8:27b");
 
   await page.locator("textarea").fill("Return the E2E mock response.");
   await page.getByRole("button", { name: "Create task" }).click();
