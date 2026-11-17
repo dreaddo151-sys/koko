@@ -1,10 +1,11 @@
 use axum::{
     Json, Router,
+    body::Body,
     extract::{
         DefaultBodyLimit, Path, Query, Request, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
-    http::{StatusCode, header::AUTHORIZATION},
+    http::{StatusCode, Uri, header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE}},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
@@ -261,6 +262,73 @@ fn db_lock(state: &AppState) -> Result<std::sync::MutexGuard<'_, Connection>, Ap
         .db
         .lock()
         .map_err(|_| ApiError::internal("Database lock is unavailable"))
+}
+
+fn read_static_asset(root: &FsPath, uri_path: &str) -> Result<(String, Vec<u8>), StatusCode> {
+    if uri_path.starts_with("/api/") {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let relative = if uri_path == "/" {
+        FsPath::new("index.html")
+    } else {
+        FsPath::new(uri_path.trim_start_matches('/'))
+    };
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let canonical_root = root.canonicalize().map_err(|_| StatusCode::NOT_FOUND)?;
+    let candidate = canonical_root.join(relative);
+    let metadata = fs::symlink_metadata(&candidate).map_err(|_| StatusCode::NOT_FOUND)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 16 * 1024 * 1024 {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let canonical_file = candidate.canonicalize().map_err(|_| StatusCode::NOT_FOUND)?;
+    if !canonical_file.starts_with(&canonical_root) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let extension = canonical_file
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let content_type = match extension.as_str() {
+        "html" => "text/html; charset=utf-8",
+        "js" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "json" | "map" => "application/json",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "wasm" => "application/wasm",
+        _ => "application/octet-stream",
+    };
+    let bytes = fs::read(canonical_file).map_err(|_| StatusCode::NOT_FOUND)?;
+    Ok((content_type.to_string(), bytes))
+}
+
+async fn static_asset(uri: Uri) -> Response {
+    let root = env::var_os("DREAD_WEB_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("web/dist"));
+    match read_static_asset(&root, uri.path()) {
+        Ok((content_type, bytes)) => Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, content_type)
+            .header(CACHE_CONTROL, "no-store")
+            .body(Body::from(bytes))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        Err(status) => status.into_response(),
+    }
 }
 
 async fn system_profile() -> Json<dread_platform::HostProfile> {
@@ -2189,6 +2257,7 @@ fn app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .merge(protected)
+        .fallback(static_asset)
         .with_state(state)
 }
 
