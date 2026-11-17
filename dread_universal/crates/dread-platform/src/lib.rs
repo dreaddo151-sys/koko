@@ -225,6 +225,13 @@ pub fn detect_host() -> HostProfile {
     }
 }
 
+/// Return a process-cached host profile so diagnostic utilities are not spawned
+/// on every API poll.
+pub fn cached_host_profile() -> HostProfile {
+    static PROFILE: std::sync::OnceLock<HostProfile> = std::sync::OnceLock::new();
+    PROFILE.get_or_init(detect_host).clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
