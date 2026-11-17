@@ -254,47 +254,33 @@ def _request(
         return exc.code, parsed
 
 
-def _require_disabled_existing(body: dict | None, record: dict[str, Any]) -> None:
-    capability_id = record["id"]
-    item = body.get("item") if isinstance(body, dict) else None
-    if not isinstance(item, dict) or item.get("status") != "disabled":
-        raise ImportErrorSafe(f"Existing capability {capability_id} is not confirmed disabled; refusing to overwrite or skip it")
-    existing_provenance = item.get("provenance")
-    expected_provenance = record["provenance"]
-    if not isinstance(existing_provenance, dict) or any(
-        existing_provenance.get(key) != expected_provenance.get(key)
-        for key in ("source_name", "source_revision")
-    ):
-        raise ImportErrorSafe(f"Existing capability {capability_id} has different provenance; refusing to overwrite or skip it")
-
-
 def apply_records(records: list[dict[str, Any]], api_base: str, token: str) -> tuple[int, int]:
     base = validate_loopback_api_url(api_base)
     api_headers(token)
+    if not records or len(records) > 128:
+        raise ImportErrorSafe("Capability batch must contain between 1 and 128 records")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-    created = skipped = 0
-    for record in records:
-        item_url = f"{base}/api/capabilities/{urllib.parse.quote(record['id'], safe='.-_')}"
-        status, body = _request(opener, item_url, "GET", token)
-        if status == 200:
-            _require_disabled_existing(body, record)
-            skipped += 1
-            continue
-        if status != 404:
-            raise ImportErrorSafe(f"Capability lookup failed for {record['id']}: HTTP {status}")
-        status, body = _request(opener, f"{base}/api/capabilities", "POST", token, record)
-        if status == 201:
-            created += 1
-        elif status == 409:
-            existing_status, existing_body = _request(opener, item_url, "GET", token)
-            if existing_status != 200:
-                raise ImportErrorSafe(f"Capability conflict could not be safely verified for {record['id']}")
-            _require_disabled_existing(existing_body, record)
-            skipped += 1
-        else:
-            raise ImportErrorSafe(f"Capability import failed for {record['id']}: HTTP {status} {body}")
+    status, body = _request(
+        opener,
+        f"{base}/api/capabilities/import-batch",
+        "POST",
+        token,
+        {"records": records},
+    )
+    if status != 201 or not isinstance(body, dict):
+        raise ImportErrorSafe(f"Atomic capability import failed: HTTP {status} {body}")
+    created = body.get("created")
+    skipped = body.get("already_present")
+    if (
+        type(created) is not int
+        or type(skipped) is not int
+        or created < 0
+        or skipped < 0
+        or created + skipped != len(records)
+        or body.get("execution_started") is not False
+    ):
+        raise ImportErrorSafe("Capability import API returned an invalid or incomplete batch result")
     return created, skipped
-
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
