@@ -41,6 +41,7 @@ jobs:
           patch --batch --forward -p0 < "$GITHUB_WORKSPACE/audit-tools/discovery-hardening.patch"
           patch --batch --forward -p0 < "$GITHUB_WORKSPACE/audit-tools/gpu-api-hardening.patch"
           patch --batch --forward -p0 < "$GITHUB_WORKSPACE/audit-tools/docs.patch"
+          patch --batch --forward -p0 < "$GITHUB_WORKSPACE/audit-tools/pstack-pin-correction.patch"
           cp "$GITHUB_WORKSPACE/audit-tools/PROJECT_STATUS.md" "$WORKSPACE/docs/PROJECT_STATUS.md"
           bash -n "$WORKSPACE/scripts/import-pstack.sh"
           python3 -m json.tool "$WORKSPACE/integrations/pstack/catalog.json" > /dev/null
