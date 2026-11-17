@@ -1,6 +1,6 @@
 --- a/crates/dread-discovery/src/lib.rs
 +++ b/crates/dread-discovery/src/lib.rs
-@@ -72,6 +72,114 @@
+@@ -72,6 +72,134 @@
      Ok(())
  }
  
@@ -83,10 +83,10 @@
 +                adapter: agent.adapter,
 +                health_url: agent.health_url,
 +                enabled: true,
-+                status: classify_http_status(code).into(),
++                status: classify_agent_http_status(code).into(),
 +                http_status: Some(code),
 +                latency_ms: Some(started.elapsed().as_millis()),
-+                detail: status_detail(code).into(),
++                detail: agent_status_detail(code).into(),
 +            }
 +        }
 +        Err(error) => AgentProbeResult {
@@ -112,10 +112,30 @@
 +    join_all(agents.into_iter().map(|agent| probe_agent(client.clone(), agent))).await
 +}
 +
- pub fn classify_http_status(code: u16) -> &'static str {
+ fn classify_agent_http_status(code: u16) -> &'static str {
++    match code {
++        200..=299 => "ONLINE",
++        300..=399 => "REDIRECTED",
++        400..=499 => "REACHABLE",
++        500..=599 => "DEGRADED",
++        _ => "UNKNOWN",
++    }
++}
++
++fn agent_status_detail(code: u16) -> &'static str {
++    match code {
++        200..=299 => "Agent health endpoint responded successfully",
++        300..=399 => "Agent endpoint redirected; redirects are not followed",
++        400..=499 => "Agent host is reachable, but the health path or request was not accepted",
++        500..=599 => "Agent host is reachable, but the service returned a server error",
++        _ => "HTTP response received; agent health classification is unknown",
++    }
++}
++
++pub fn classify_http_status(code: u16) -> &'static str {
      match code {
          200..=399 => "ONLINE",
-@@ -179,4 +287,11 @@
+@@ -179,4 +307,19 @@
          assert_eq!(classify_http_status(500), "DEGRADED");
          assert_eq!(classify_http_status(503), "DEGRADED");
      }
@@ -125,6 +145,14 @@
 +        assert!(validate_local_service_url("http://127.0.0.1:8642/health").is_ok());
 +        assert!(validate_local_service_url("http://agent.example:8642/health").is_err());
 +        assert!(validate_local_service_url("http://127.0.0.1:8642/health?token=x").is_err());
++    }
++
++    #[test]
++    fn agent_redirects_are_not_reported_as_online() {
++        assert_eq!(classify_agent_http_status(200), "ONLINE");
++        assert_eq!(classify_agent_http_status(302), "REDIRECTED");
++        assert_eq!(classify_agent_http_status(401), "REACHABLE");
++        assert_eq!(classify_agent_http_status(503), "DEGRADED");
 +    }
  }
 --- a/crates/dread-api/src/main.rs
@@ -138,7 +166,7 @@
  use dread_gpu::GpuGatewayClient;
  use futures::StreamExt;
  use rusqlite::{Connection, OptionalExtension, Transaction, params};
-@@ -242,6 +242,22 @@
+@@ -242,7 +262,23 @@
      })
  }
  
@@ -163,7 +191,7 @@
      let mut stmt = conn
 --- /dev/null
 +++ b/config/agents.toml
-@@ -0,0 +1,12 @@
+@@ -0,1 +1,13 @@
 +# Explicit local agent health probes only. Empty by default until endpoints are verified.
 +# Every enabled health_url must be an explicit-port loopback HTTP URL.
 +# Discovery performs GET requests only, follows no redirects, and never starts tasks.
