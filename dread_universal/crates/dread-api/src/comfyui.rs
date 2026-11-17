@@ -14,7 +14,14 @@ fn comfyui_base_url() -> Result<String, String> {
                 .parse::<std::net::IpAddr>()
                 .is_ok_and(|ip| ip.is_loopback())
     });
-    if url.scheme() != "http" || !loopback || url.port_or_known_default().is_none() {
+    if url.scheme() != "http"
+        || !loopback
+        || url.username() != ""
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.path(), "" | "/")
+    {
         return Err("ComfyUI monitor accepts only an explicit loopback HTTP endpoint".into());
     }
     Ok(raw.trim_end_matches('/').to_string())
@@ -80,19 +87,23 @@ pub async fn monitor() -> Result<Json<Value>, (StatusCode, Json<Value>)> {
             ),
         ));
     }
-    let bytes = response.bytes().await.map_err(|_| {
+    let mut response = response;
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| {
         (
             StatusCode::BAD_GATEWAY,
             Json(json!({"error":"ComfyUI queue response could not be read"})),
         )
-    })?;
-    if bytes.len() > MAX_QUEUE_BYTES {
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(json!({"error":"ComfyUI queue response exceeded the 2 MiB safety limit"})),
-        ));
+    })? {
+        if body.len() + chunk.len() > MAX_QUEUE_BYTES {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(json!({"error":"ComfyUI queue response exceeded the 2 MiB safety limit"})),
+            ));
+        }
+        body.extend_from_slice(&chunk);
     }
-    let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
+    let value: Value = serde_json::from_slice(&body).map_err(|_| {
         (
             StatusCode::BAD_GATEWAY,
             Json(json!({"error":"ComfyUI queue returned invalid JSON"})),
