@@ -309,10 +309,8 @@
 +        (upstream / "agents").mkdir(parents=True)
 +        (upstream / "plugin.json").write_text(json.dumps({"name": "pstack", "version": "1.0.0", "license": "MIT"}))
 +        (upstream / "LICENSE").write_text("MIT")
-+        (upstream / "skills" / "example-skill" / "SKILL.md").write_text("# Example Skill
-Safe metadata only")
-+        (upstream / "agents" / "reviewer.md").write_text("# Reviewer Agent
-Prompt text")
++        (upstream / "skills" / "example-skill" / "SKILL.md").write_text("# Example Skill\\nSafe metadata only")
++        (upstream / "agents" / "reviewer.md").write_text("# Reviewer Agent\\nPrompt text")
 +        import hashlib
 +        file_hashes = {
 +            "skills/example-skill/SKILL.md": hashlib.sha256((upstream / "skills/example-skill/SKILL.md").read_bytes()).hexdigest(),
