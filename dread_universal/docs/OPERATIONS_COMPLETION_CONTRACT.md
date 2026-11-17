@@ -35,12 +35,14 @@ This is the release contract for the local-first DREAD platform. A dashboard pan
 - Existing mission lifecycle persists approvals, cancellation, events, results and startup recovery.
 - This increment adds authenticated, read-only `GET /api/comfyui/monitor`, which polls ComfyUI `/queue` at the loopback default `127.0.0.1:8188` (override with `DREAD_COMFYUI_URL`). It reports real running/pending prompt IDs and queue positions, with a 3-second timeout and 2 MiB response cap. It does not claim percentage progress or execution-node telemetry.
 - The dashboard polls the render queue every five seconds without blocking the other service refreshes.
+- The authenticated Python Supervisor bridge exposes read-only `/v1/telemetry` using `nvidia-smi` (utilization, VRAM, temperature, power and PCIe link generation/width). Rust proxies this through `GET /api/gpu/telemetry`; the UI shows only returned samples and leaves unsupported fields blank.
+- A separate user-systemd watchdog template probes only the Rust API health endpoint. It is dry-run by default; the installed oneshot uses an explicit `--apply` flag and can restart only `dread-universal.service`, with a three-restarts-per-15-minute ceiling and 60-second cooldown. It never targets ComfyUI, the GPU gateway, Supervisor or legacy Hub. Templates are not installed or enabled by this PR.
 
 ## Remaining work — not yet complete
 
 1. ComfyUI WebSocket execution events, history, output artifacts and error details.
-2. Real dual-GPU telemetry exposed through the existing Python Supervisor, then authenticated Rust API consumption.
-3. Independent systemd watchdog for DREAD-owned control-plane services, with bounded restarts and cooldown.
+2. Live validation of the new read-only dual-GPU telemetry on both RTX 3090s, including PCIe field support.
+3. Install and fault-inject the bounded user-systemd watchdog; verify restart ceiling and cooldown.
 4. Diagnostics and a repair-plan engine with backup, allowlisted actions, verification, rollback and operator approval for mutations.
 5. Provider adapters, planner/delegation, result aggregation and resource-aware scheduling.
 6. Installer, service units, migrations, upgrade/rollback and live dual-3090 acceptance.
