@@ -72,7 +72,7 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: dread_universal/web
-        run: npm ci --no-audit --no-fund
+        run: npm install --no-audit --no-fund
 
       - name: Build operator console
         working-directory: dread_universal/web
