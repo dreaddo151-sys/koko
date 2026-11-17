@@ -299,7 +299,8 @@ impl MissionGraph {
         if ordered.len() != self.nodes.len() {
             let mut cycle_nodes = indegree
                 .into_iter()
-                .filter_map(|(id, degree)| (degree > 0).then(|| id.to_string()))
+                .filter(|(_, degree)| **degree > 0)
+                .map(|(id, _)| id.to_string())
                 .collect::<Vec<_>>();
             cycle_nodes.sort();
             return Err(MissionGraphError::DependencyCycle(cycle_nodes));
