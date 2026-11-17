@@ -18,7 +18,7 @@ use dread_discovery::{
     discover, discover_agents, known_agent_endpoints, load_agents, load_services,
 };
 use dread_gpu::{GpuGatewayClient, GpuSupervisorClient};
-use dread_orchestrator::{ExecutionConfig, ExecutionError, ExecutionGate};
+use dread_orchestrator::{ExecutionConfig, ExecutionError, ExecutionGate, MissionGraph};
 use dread_platform::cached_host_profile;
 use dread_skills::{
     discover_agent_profiles, discover_skills, load_agent_profile_context, load_skill_context,
@@ -255,6 +255,13 @@ fn open_database(path: &str) -> anyhow::Result<Connection> {
              attempts INTEGER NOT NULL DEFAULT 0,
              elapsed_ms INTEGER NOT NULL DEFAULT 0,
              completed_at INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS missions (
+             id TEXT PRIMARY KEY NOT NULL,
+             graph_json TEXT NOT NULL,
+             execution_order_json TEXT NOT NULL,
+             status TEXT NOT NULL DEFAULT 'planned',
+             created_at INTEGER NOT NULL
          );",
     )?;
     Ok(conn)
@@ -1020,6 +1027,110 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
     })
+}
+
+
+async fn create_mission(
+    State(state): State<AppState>,
+    Json(graph): Json<MissionGraph>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    // Planning is deliberately separate from task execution. A valid graph is
+    // persisted as "planned"; no task is dispatched and no provider is invoked.
+    if graph.mission_id.trim().is_empty() || graph.mission_id.len() > 160 {
+        return Err(ApiError::bad_request(
+            "mission_id must contain 1 to 160 characters",
+        ));
+    }
+    if graph.nodes.is_empty() || graph.nodes.len() > 128 {
+        return Err(ApiError::bad_request(
+            "mission must contain between 1 and 128 nodes",
+        ));
+    }
+    for node in &graph.nodes {
+        if node.id.trim().is_empty()
+            || node.id.len() > 160
+            || node.task_type.trim().is_empty()
+            || node.task_type.len() > 100
+            || node.depends_on.len() > 128
+        {
+            return Err(ApiError::bad_request(
+                "mission node identifiers, task types, or dependencies exceed their limits",
+            ));
+        }
+    }
+    let execution_order = graph
+        .execution_order()
+        .map_err(|error| ApiError::bad_request(format!("Invalid mission graph: {error:?}")))?;
+    let graph_json = serde_json::to_string(&graph)
+        .map_err(|error| ApiError::bad_request(format!("Invalid mission graph: {error}")))?;
+    let order_json = serde_json::to_string(&execution_order)
+        .map_err(|error| ApiError::internal(format!("Could not encode mission order: {error}")))?;
+    let created_at = now_epoch();
+    let conn = db_lock(&state)?;
+    conn.execute(
+        "INSERT INTO missions (id, graph_json, execution_order_json, status, created_at)
+         VALUES (?1, ?2, ?3, 'planned', ?4)",
+        params![graph.mission_id, graph_json, order_json, created_at],
+    )
+    .map_err(|error| {
+        if error.to_string().contains("UNIQUE constraint failed") {
+            ApiError::conflict("Mission id already exists")
+        } else {
+            ApiError::internal(error.to_string())
+        }
+    })?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "item": {
+                "mission_id": graph.mission_id,
+                "graph": graph,
+                "execution_order": execution_order,
+                "status": "planned",
+                "created_at": created_at,
+                "execution_started": false
+            }
+        })),
+    ))
+}
+
+async fn get_mission(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let stored = conn
+        .query_row(
+            "SELECT graph_json, execution_order_json, status, created_at
+             FROM missions WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, u64>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Mission not found"))?;
+    let graph: MissionGraph = serde_json::from_str(&stored.0)
+        .map_err(|error| ApiError::internal(format!("Stored mission graph is invalid: {error}")))?;
+    let execution_order: Vec<String> = serde_json::from_str(&stored.1)
+        .map_err(|error| ApiError::internal(format!("Stored mission order is invalid: {error}")))?;
+    Ok(Json(json!({
+        "item": {
+            "mission_id": graph.mission_id,
+            "graph": graph,
+            "execution_order": execution_order,
+            "status": stored.2,
+            "created_at": stored.3,
+            "execution_started": false
+        }
+    })))
 }
 
 async fn create_task(
@@ -2219,6 +2330,8 @@ fn app(state: AppState) -> Router {
         .route("/api/system/profile", get(system_profile))
         .route("/api/gpu/health", get(gpu_health))
         .route("/api/gpu/models", get(gpu_models))
+        .route("/api/missions", axum::routing::post(create_mission))
+        .route("/api/missions/{id}", get(get_mission))
         .route("/api/tasks", get(list_tasks).post(create_task))
         .route("/api/tasks/{id}", get(get_task))
         .route("/api/tasks/{id}/events", get(task_events))
@@ -3651,6 +3764,98 @@ mod tests {
         }
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+
+    #[tokio::test]
+    async fn mission_plan_is_validated_persisted_and_never_auto_executed() {
+        let (router, server) = test_app().await;
+        let graph = json!({
+            "mission_id": "acceptance-mission-1",
+            "nodes": [
+                {"id":"report","depends_on":["build"],"priority":200,"task_type":"report"},
+                {"id":"build","depends_on":[],"priority":10,"task_type":"build"},
+                {"id":"inspect","depends_on":[],"priority":20,"task_type":"inspect"}
+            ]
+        });
+        let created = router.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/missions")
+                .header("content-type", "application/json")
+                .body(Body::from(graph.to_string()))
+                .unwrap()
+        ).await.unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["item"]["status"], "planned");
+        assert_eq!(value["item"]["execution_started"], false);
+        assert_eq!(value["item"]["execution_order"], json!(["inspect", "build", "report"]));
+
+        let fetched = router.clone().oneshot(
+            Request::builder()
+                .uri("/api/missions/acceptance-mission-1")
+                .body(Body::empty())
+                .unwrap()
+        ).await.unwrap();
+        assert_eq!(fetched.status(), StatusCode::OK);
+        let body = to_bytes(fetched.into_body(), usize::MAX).await.unwrap();
+        let stored: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(stored["item"]["graph"]["mission_id"], "acceptance-mission-1");
+        assert_eq!(stored["item"]["execution_started"], false);
+
+        let duplicate = router.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/missions")
+                .header("content-type", "application/json")
+                .body(Body::from(graph.to_string()))
+                .unwrap()
+        ).await.unwrap();
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn mission_plan_rejects_cycles_and_oversized_graphs() {
+        let (router, server) = test_app().await;
+        let cyclic = json!({
+            "mission_id":"cyclic-mission",
+            "nodes":[
+                {"id":"a","depends_on":["b"],"priority":0,"task_type":"build"},
+                {"id":"b","depends_on":["a"],"priority":0,"task_type":"test"}
+            ]
+        });
+        let response = router.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/missions")
+                .header("content-type", "application/json")
+                .body(Body::from(cyclic.to_string()))
+                .unwrap()
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let oversized = json!({
+            "mission_id":"oversized-mission",
+            "nodes":(0..129).map(|n| json!({
+                "id":format!("node-{n}"),
+                "depends_on":[],
+                "priority":0,
+                "task_type":"inspect"
+            })).collect::<Vec<_>>()
+        });
+        let response = router.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/missions")
+                .header("content-type", "application/json")
+                .body(Body::from(oversized.to_string()))
+                .unwrap()
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        server.abort();
     }
 
     #[test]
