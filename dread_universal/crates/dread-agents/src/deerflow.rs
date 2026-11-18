@@ -130,6 +130,7 @@ impl DeerFlowApiAdapter {
         mut self,
         provider_class: &str,
         isolated_workspace_per_task: bool,
+        provisioner_url: Option<&str>,
     ) -> Result<Self, AgentAdapterError> {
         let supported = ["AioSandboxProvider", "BoxliteProvider"];
         if !supported
@@ -146,6 +147,13 @@ impl DeerFlowApiAdapter {
             return Err(adapter_error(
                 "workspace_isolation_required",
                 "DeerFlow must provide an isolated thread workspace for each DREAD task".into(),
+                false,
+            ));
+        }
+        if provisioner_url.is_some_and(|url| !url.trim().is_empty()) {
+            return Err(adapter_error(
+                "remote_provisioner_not_supported",
+                "DeerFlow remote/Kubernetes provisioners are not accepted by this local sandbox attestation".into(),
                 false,
             ));
         }
@@ -763,17 +771,27 @@ mod tests {
         assert!(
             adapter
                 .clone()
-                .attest_container_sandbox("LocalSandboxProvider", true)
+                .attest_container_sandbox("LocalSandboxProvider", true, None)
                 .is_err()
         );
         assert!(
             adapter
                 .clone()
-                .attest_container_sandbox("AioSandboxProvider", false)
+                .attest_container_sandbox("AioSandboxProvider", false, None)
+                .is_err()
+        );
+        assert!(
+            adapter
+                .clone()
+                .attest_container_sandbox(
+                    "deerflow.community.aio_sandbox:AioSandboxProvider",
+                    true,
+                    Some("http://provisioner:8002"),
+                )
                 .is_err()
         );
         let enabled = adapter
-            .attest_container_sandbox("deerflow.sandbox.aio:AioSandboxProvider", true)
+            .attest_container_sandbox("deerflow.sandbox.aio:AioSandboxProvider", true, None)
             .unwrap();
         assert!(enabled.descriptor().enabled);
     }
