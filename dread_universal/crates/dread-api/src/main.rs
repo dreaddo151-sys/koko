@@ -1325,33 +1325,77 @@ async fn enable_capability(
 async fn disable_capability(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Json(input): Json<ApproveCapability>,
 ) -> Result<Json<Value>, ApiError> {
-    let conn = db_lock(&state)?;
-    let encoded = conn
+    let reason = input.reason.trim();
+    let actor = state.operator_id.trim();
+    if reason.is_empty() || reason.len() > 2000 || actor.is_empty() || actor.len() > 160 {
+        return Err(ApiError::bad_request(
+            "A valid operator and disable reason of 1 to 2000 characters are required",
+        ));
+    }
+
+    let now = now_epoch();
+    let mut conn = db_lock(&state)?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let encoded = tx
         .query_row(
             "SELECT record_json FROM capabilities WHERE id = ?1",
             params![id],
             |row| row.get::<_, String>(0),
         )
         .optional()
-        .map_err(|e| ApiError::internal(e.to_string()))?
+        .map_err(|error| ApiError::internal(error.to_string()))?
         .ok_or_else(|| ApiError::not_found("Capability not found"))?;
     let mut record: CapabilityRecord = serde_json::from_str(&encoded)
-        .map_err(|e| ApiError::internal(format!("Stored capability is invalid: {e}")))?;
+        .map_err(|error| ApiError::internal(format!("Stored capability is invalid: {error}")))?;
+    if record.status != CapabilityStatus::Enabled {
+        return Err(ApiError::conflict(
+            "Only enabled capabilities can be disabled through this action",
+        ));
+    }
 
     record.status = CapabilityStatus::Disabled;
     if let Some(manifest) = record.manifest.as_object_mut() {
         manifest.remove("approval");
     }
+    record
+        .validate()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
 
-    let updated = serde_json::to_string(&record).map_err(|e| ApiError::internal(e.to_string()))?;
-    conn.execute(
-        "UPDATE capabilities SET record_json = ?2 WHERE id = ?1",
-        params![id, updated],
+    let updated = serde_json::to_string(&record)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let changed = tx
+        .execute(
+            "UPDATE capabilities SET record_json = ?2 WHERE id = ?1",
+            params![id, updated],
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if changed != 1 {
+        return Err(ApiError::conflict(
+            "Capability changed while the disable operation was being committed",
+        ));
+    }
+
+    tx.execute(
+        "INSERT INTO capability_events
+            (capability_id, event_type, record_json, reason, actor, created_at)
+         VALUES (?1, 'disabled', ?2, ?3, ?4, ?5)",
+        params![id, encoded, reason, actor, now],
     )
-    .map_err(|e| ApiError::internal(e.to_string()))?;
+    .map_err(|error| ApiError::internal(error.to_string()))?;
+    let audit_event_id = tx.last_insert_rowid();
+    tx.commit()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
 
-    Ok(Json(json!({"item": record, "execution": "never"})))
+    Ok(Json(json!({
+        "item": record,
+        "audit_recorded": true,
+        "audit_event_id": audit_event_id,
+        "execution": "never"
+    })))
 }
 
 async fn remove_capability(
