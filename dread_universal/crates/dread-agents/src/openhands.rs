@@ -885,7 +885,7 @@ mod tests {
             "session-secret",
             "local/model",
             "local-gateway-key",
-            Some("http://host.docker.internal:11500/v1".into()),
+            Some("https://gateway.example.test/v1".into()),
             "workspace/dread-tasks",
             "OpenHands test",
         )
