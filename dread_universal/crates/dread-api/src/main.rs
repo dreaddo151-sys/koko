@@ -5101,7 +5101,9 @@ mod tests {
                     .method("DELETE")
                     .uri(format!("/api/capabilities/{referenced_id}"))
                     .header("content-type", "application/json")
-                    .body(Body::from(json!({"reason": "Remove unused source"}).to_string()))
+                    .body(Body::from(
+                        json!({"reason": "Remove unused source"}).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -5119,7 +5121,8 @@ mod tests {
                     .uri(format!("/api/capabilities/{removable_id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        json!({"reason": "Operator reviewed and removed this capability"}).to_string(),
+                        json!({"reason": "Operator reviewed and removed this capability"})
+                            .to_string(),
                     ))
                     .unwrap(),
             )
