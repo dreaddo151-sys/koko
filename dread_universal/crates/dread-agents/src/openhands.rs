@@ -228,7 +228,16 @@ impl OpenHandsAgentServerAdapter {
             None,
             &[],
         ).await {
-            Ok(value) => Ok(Some(value)),
+            Ok(value) => {
+                if value.get("id").and_then(Value::as_str) != Some(conversation_id) {
+                    return Err(adapter_error(
+                        "provider_id_mismatch",
+                        "OpenHands returned a conversation ID different from the DREAD task ID".into(),
+                        false,
+                    ));
+                }
+                Ok(Some(value))
+            }
             Err(error) if error.code == "not_found" => Ok(None),
             Err(error) => Err(error),
         }
@@ -474,7 +483,7 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
             let _ = self.json_request(
                 Method::POST,
                 &format!("/api/conversations/{provider_task_id}/pause"),
-                Some(json!({})),
+                None,
                 &[],
             ).await?;
             Ok(AgentTask {
