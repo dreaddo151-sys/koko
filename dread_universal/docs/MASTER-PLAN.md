@@ -486,3 +486,8 @@ Candidate `13e400c96ebd0434f9c48b1da5532a8b20a79de9` adds a complete distinct `n
 ## Latest execution-safety evidence — 2026-11-18
 
 Candidate `9e9a7502c5a149214749599483bf17b28ee412cd` adds explicit retryable/permanent error classification. Ordinary runner string errors and timeouts are not automatically replayed; only explicitly retryable provider failures can enter capped, cancellable backoff. CI run #578 (`44204756118`) passed all three Ubuntu 24.04 jobs. Mission-specific retry policy, provider idempotency wiring and recovery remain incomplete. See WORK-LOG.md.
+
+
+## Latest CPU discovery and legacy Hub gate evidence — 2026-11-18
+
+Candidate `f3fa453044b37ab304478fb15145eb3a3d233be8` adds logical CPU count, sockets, cores/socket, threads/core and NUMA discovery while keeping process-available parallelism distinct. The baseline capture now records CPU topology. CI run #583 (`44205536123`) passed all three Ubuntu 24.04 jobs. A separate `LEGACY-HUB-COMPATIBILITY.md` audit records the reference Python Hub route families and migration requirements. Gate 1 remains open pending a hash of the actual installed Hub, route-by-route parity and safe side-by-side acceptance. See WORK-LOG.md.
