@@ -338,6 +338,7 @@ struct ApproveTask {
 struct AgentConfirmationResponse {
     accept: bool,
     reason: String,
+    expected_action_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2057,16 +2058,25 @@ async fn respond_to_agent_confirmation(
 ) -> Result<Json<Value>, ApiError> {
     let approved_by = state.operator_id.trim();
     let reason = input.reason.trim();
-    if approved_by.is_empty() || reason.is_empty() {
-        return Err(ApiError::bad_request("approved_by and reason are required"));
-    }
-    if approved_by.len() > 160 || reason.len() > 2000 {
+    let expected_action_id = input.expected_action_id.trim();
+    if approved_by.is_empty() || reason.is_empty() || expected_action_id.is_empty() {
         return Err(ApiError::bad_request(
-            "confirmation fields exceed their maximum length",
+            "approved_by, reason, and expected_action_id are required",
+        ));
+    }
+    if approved_by.len() > 160
+        || reason.len() > 2000
+        || expected_action_id.len() > 128
+        || !expected_action_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(ApiError::bad_request(
+            "confirmation fields exceed their maximum length or contain an invalid action ID",
         ));
     }
 
-    let (status, provider, provider_task_id, latest_wait, latest_response) = {
+    let (status, provider, provider_task_id, latest_wait, latest_response, latest_action_id) = {
         let conn = db_lock(&state)?;
         let task = conn
             .query_row(
@@ -2093,7 +2103,27 @@ async fn respond_to_agent_confirmation(
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(|error| ApiError::internal(error.to_string()))?;
-        (task.0, task.1, task.2, waiting, responded)
+        let latest_action_payload: Option<String> = conn
+            .query_row(
+                "SELECT payload_json FROM task_events
+                 WHERE task_id = ?1 AND event_type = 'ActionEvent'
+                 ORDER BY sequence DESC LIMIT 1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        let latest_action_id = latest_action_payload
+            .and_then(|payload| serde_json::from_str::<Value>(&payload).ok())
+            .and_then(|event| event.get("id").and_then(Value::as_str).map(str::to_owned));
+        (
+            task.0,
+            task.1,
+            task.2,
+            waiting,
+            responded,
+            latest_action_id,
+        )
     };
 
     if status != "running" || provider.as_deref() != Some("openhands") {
@@ -2104,6 +2134,11 @@ async fn respond_to_agent_confirmation(
     if latest_wait.is_none() || latest_wait <= latest_response {
         return Err(ApiError::conflict(
             "The task has no outstanding OpenHands action awaiting confirmation",
+        ));
+    }
+    if latest_action_id.as_deref() != Some(expected_action_id) {
+        return Err(ApiError::conflict(
+            "The pending OpenHands action changed; refresh the mission trace before deciding",
         ));
     }
     let provider_task_id = provider_task_id
