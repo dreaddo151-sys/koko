@@ -3715,15 +3715,15 @@ mod tests {
         http::Request,
         routing::post,
     };
+    use dread_agents::{
+        AdapterFuture, AgentCapability, AgentDescriptor, AgentEvent, AgentHealth, AgentHealthState,
+        AgentTask,
+    };
     #[cfg(test)]
     use futures::StreamExt;
     use serde_json::json;
     use tokio::net::TcpListener;
     use tower::ServiceExt;
-    use dread_agents::{
-        AdapterFuture, AgentCapability, AgentDescriptor, AgentEvent, AgentHealth,
-        AgentHealthState, AgentTask,
-    };
 
     struct MockAgentAdapter {
         descriptor: AgentDescriptor,
@@ -3920,7 +3920,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(serde_json::from_str::<Value>(&result_json).unwrap(), json!({"answer": "completed"}));
+        assert_eq!(
+            serde_json::from_str::<Value>(&result_json).unwrap(),
+            json!({"answer": "completed"})
+        );
 
         let progress_events: i64 = conn
             .query_row(
