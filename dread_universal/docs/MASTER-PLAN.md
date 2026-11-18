@@ -579,3 +579,9 @@ A saved terminal capture, `Pasted text(20261117-233320).txt`, was recovered from
 This is **actual prior Ubuntu workstation execution**, not GitHub CI. It should be credited and not repeated merely as a generic Rust regression. It predates the final PR #12 head and does not prove that the final provider-adapter changes were installed or that live provider endpoints were contacted. The Hermes HTTP lifecycle in this run is a test; it is not a live Hermes task. This capture does not establish live OpenHands/DeerFlow sandbox isolation, tool allowlists, current service status, dual-GPU concurrency or media artifact acceptance.
 
 Separate previously recorded live evidence remains valid at its own timestamps: 2026-11-16 Rust API health/service discovery and the 2026-11-17 Supervisor-bridged llama.cpp inference returning `DREAD GPU INFERENCE OK`. These are historical live proofs, not a fresh current-candidate integration test. Preserve the Python Master Hub, ComfyUI and Python GPU Supervisor; do not repeat broad checks without a specific candidate-integration reason.
+
+## Phase 5 status clarification — 2026-11-18
+
+The current candidate now supports a limited, audited registry-removal operation: only disabled/rejected metadata can be removed; records referenced by durable tasks are protected; the prior record and operator reason are retained in a separate SQLite audit table; an authenticated history endpoint and console control expose that record lifecycle. This was verified by the new API regression test and GitHub Actions Ubuntu 24.04 workflow run #755 (44301310766).
+
+This is not completion of Phase 5. Signed catalog/publisher verification, controlled remote source acquisition, transactional installation/update, atomic activation/rollback, executable tool/MCP manifests and their permission-review lifecycle remain unimplemented or unaccepted. Pstack source content was not deleted or changed. See WORK-LOG.md for the dated evidence and limits.
