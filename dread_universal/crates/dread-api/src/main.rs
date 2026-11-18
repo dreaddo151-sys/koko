@@ -4181,10 +4181,21 @@ mod tests {
                 isolated_workspace_per_task: true,
                 provisioner_url: None,
             }),
-            openhands: None,
+            openhands: Some(OpenHandsAdapterConfig {
+                endpoint: "http://127.0.0.1:8000".into(),
+                session_api_key: "oh-session-test".into(),
+                llm_model: "llama.cpp/qwen-test".into(),
+                llm_api_key: "llm-test".into(),
+                llm_base_url: Some("http://127.0.0.1:11500/v1".into()),
+                workspace_root: "workspace/dread-tasks".into(),
+                container_id: "dread-openhands-test".into(),
+                isolated_workspace_per_task: true,
+                secret_store_configured: true,
+            }),
         };
         let adapters = build_agent_adapters(config).unwrap();
-        assert_eq!(adapters.len(), 2);
+        assert_eq!(adapters.len(), 3);
+        assert!(adapters.contains_key("openhands"));
         assert!(
             adapters
                 .values()
