@@ -2087,14 +2087,17 @@ fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), 
             message: "Task must have a recorded approval before it can be queued".into(),
         });
     }
-    if task.capability_id.is_some() {
-        return Err(ApiError {
-            status: StatusCode::CONFLICT,
-            message:
-                "Capability-backed tasks remain disabled until a reviewed adapter is registered"
-                    .into(),
-        });
-    }
+    let agent_provider = if let Some(capability_id) = task.capability_id.as_deref() {
+        let encoded: Option<String> = tx.query_row("SELECT record_json FROM capabilities WHERE id = ?1", params![capability_id], |row| row.get(0)).optional().map_err(|error| ApiError::internal(error.to_string()))?;
+        let encoded = encoded.ok_or_else(|| ApiError::not_found("Task capability was not found"))?;
+        let capability: CapabilityRecord = serde_json::from_str(&encoded).map_err(|error| ApiError::internal(format!("Stored capability is invalid: {error}")))?;
+        if capability.status != CapabilityStatus::Enabled { return Err(ApiError::conflict("Capability must be explicitly enabled before dispatch")); }
+        let provider = capability.adapter.as_deref().ok_or_else(|| ApiError::conflict("Enabled capability has no provider adapter"))?;
+        let adapter = state.agent_adapters.get(provider).ok_or_else(|| ApiError::conflict("Capability provider adapter is not configured"))?;
+        if !adapter.descriptor().enabled { return Err(ApiError::conflict("Capability provider adapter is disabled")); }
+        if !matches!(provider, "hermes" | "deerflow") { return Err(ApiError::conflict("No reviewed executor exists for this provider adapter")); }
+        Some(provider.to_string())
+    } else { None };
     if let Some((mission_id, dependencies_json)) = tx
         .query_row(
             "SELECT mission_id, depends_on_json FROM mission_tasks WHERE task_id = ?1",
@@ -2142,7 +2145,7 @@ fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), 
         .map_err(|error| ApiError::internal(error.to_string()))?;
     }
 
-    let runner_name = match task.task_type.as_str() {
+    let runner_name = if let Some(provider) = agent_provider.as_deref() { provider } else { match task.task_type.as_str() {
         "service_discovery" => "builtin.service_discovery",
         "gpu_chat" => {
             validate_gpu_chat_payload(&task.payload).map_err(ApiError::bad_request)?;
@@ -2163,12 +2166,12 @@ fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), 
                 ),
             });
         }
-    };
+    }};
 
     let changed = tx
         .execute(
-            "UPDATE tasks SET status = 'queued', updated_at = ?2 WHERE id = ?1 AND status = 'approved'",
-            params![id, now],
+            "UPDATE tasks SET status = 'queued', agent_provider = ?2, updated_at = ?3 WHERE id = ?1 AND status = 'approved'",
+            params![id, agent_provider, now],
         )
         .map_err(|e| ApiError::internal(e.to_string()))?;
     if changed != 1 {
@@ -2202,15 +2205,14 @@ fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), 
         .lock()
         .map_err(|_| ApiError::internal("Task cancellation registry is unavailable"))?
         .insert(id.clone(), cancel_sender);
-    let runner_type = task.task_type.clone();
-    let runner_payload = task.payload.clone();
-    tokio::spawn(execute_approved_task(
-        state.clone(),
-        id,
-        runner_type,
-        runner_payload,
-        cancel_receiver,
-    ));
+    if let Some(provider) = agent_provider {
+        let adapter = state.agent_adapters.get(&provider).cloned().ok_or_else(|| ApiError::conflict("Provider adapter disappeared before dispatch"))?;
+        tokio::spawn(execute_agent_task(state.clone(), id, provider, adapter, task.capability_id.clone().unwrap_or_default(), task.payload.clone(), cancel_receiver));
+    } else {
+        let runner_type = task.task_type.clone();
+        let runner_payload = task.payload.clone();
+        tokio::spawn(execute_approved_task(state.clone(), id, runner_type, runner_payload, cancel_receiver));
+    }
 
     Ok((
         StatusCode::ACCEPTED,
