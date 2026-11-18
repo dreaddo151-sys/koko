@@ -16,6 +16,8 @@ use std::{
 use serde_json::Value;
 use tokio::sync::{Semaphore, watch};
 
+const CANCELLATION_CLEANUP_GRACE: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Clone, Copy)]
 pub struct ExecutionConfig {
     pub max_concurrency: usize,
@@ -261,10 +263,22 @@ impl ExecutionGate {
             let attempt_result = loop {
                 tokio::select! {
                     result = tokio::time::timeout(self.config.attempt_timeout, &mut operation_future) => {
+                        let cancellation_requested = *cancellation.borrow()
+                            || matches!(cancellation.has_changed(), Ok(true) | Err(_));
+                        if cancellation_requested {
+                            return Err(ExecutionError::Cancelled { attempts });
+                        }
                         break result.ok();
                     }
                     changed = cancellation.changed() => {
                         if changed.is_err() || *cancellation.borrow() {
+                            // Give cooperative runners a bounded window to cancel
+                            // provider-side work and release their resources.
+                            let _ = tokio::time::timeout(
+                                CANCELLATION_CLEANUP_GRACE,
+                                &mut operation_future,
+                            )
+                            .await;
                             return Err(ExecutionError::Cancelled { attempts });
                         }
                     }
