@@ -4088,6 +4088,12 @@ mod tests {
                 )
                 .unwrap();
             }
+            conn.execute(
+                "INSERT INTO tasks (id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, approval_reason, created_at, updated_at, agent_provider, provider_task_id, provider_event_cursor)
+                 VALUES ('running-agent-unavailable', 'running-agent-unavailable', 'service_discovery', 'hermes.capability', '{}', 'running', 1, 'test-operator', 'approved in test', ?1, ?1, 'hermes', 'provider-run-123', 3)",
+                params![now],
+            )
+            .unwrap();
         }
         let (events, _) = broadcast::channel(256);
         let state = AppState {
@@ -4134,6 +4140,7 @@ mod tests {
 
         for id in [
             "running-interrupted",
+            "running-agent-unavailable",
             "queued-unsupported",
             "queued-gpu-chat",
             "queued-capability",
