@@ -6,6 +6,7 @@
 
 pub mod deerflow;
 pub mod hermes;
+pub mod openhands;
 
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
