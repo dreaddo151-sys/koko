@@ -25,6 +25,7 @@ pub struct HermesApiAdapter {
     client: Client,
     base_url: Url,
     api_key: String,
+    sandbox_attested: bool,
 }
 
 impl HermesApiAdapter {
@@ -93,12 +94,57 @@ impl HermesApiAdapter {
                 adapter: "hermes.api_server".into(),
                 version: None,
                 endpoint: Some(endpoint),
-                enabled: true,
+                enabled: false,
             },
             client,
             base_url: url,
             api_key,
+            sandbox_attested: false,
         })
+    }
+
+    /// Enable execution only after the operator verifies a per-task sandbox.
+    ///
+    /// Supported backends are isolated execution environments. For Docker,
+    /// verify container_persistent is false, no host workspace mount, and no
+    /// extra arguments that weaken the provider's container security.
+    pub fn attest_sandbox(
+        mut self,
+        terminal_backend: &str,
+        isolated_workspace_per_task: bool,
+    ) -> Result<Self, AgentAdapterError> {
+        if !matches!(
+            terminal_backend,
+            "docker" | "modal" | "daytona" | "vercel_sandbox" | "singularity"
+        ) {
+            return Err(adapter_error(
+                "unsafe_sandbox_backend",
+                "Hermes requires a container or isolated VM terminal backend; local and SSH backends are not accepted".into(),
+                false,
+            ));
+        }
+        if !isolated_workspace_per_task {
+            return Err(adapter_error(
+                "workspace_isolation_required",
+                "Hermes must provide an isolated workspace for each DREAD task".into(),
+                false,
+            ));
+        }
+        self.sandbox_attested = true;
+        self.descriptor.enabled = true;
+        Ok(self)
+    }
+
+    fn require_attested(&self) -> Result<(), AgentAdapterError> {
+        if self.sandbox_attested && self.descriptor.enabled {
+            Ok(())
+        } else {
+            Err(adapter_error(
+                "sandbox_not_attested",
+                "Hermes task execution is disabled until a per-task sandbox is verified and attested".into(),
+                false,
+            ))
+        }
     }
 
     fn endpoint(&self, path: &str) -> String {
@@ -232,7 +278,7 @@ impl AgentAdapter for HermesApiAdapter {
                         .and_then(Value::as_bool)
                         .unwrap_or(false)
                 });
-            if !supports_runs {
+            if !self.sandbox_attested || !self.descriptor.enabled || !supports_runs {
                 return Ok(Vec::new());
             }
             Ok(vec![AgentCapability {
@@ -243,8 +289,8 @@ impl AgentAdapter for HermesApiAdapter {
                     "type":"object",
                     "properties":{
                         "input":{"type":"string","maxLength":1048576},
-                        "session_id":{"type":"string","maxLength":160},
-                        "instructions":{"type":"string","maxLength":65536}
+                        "instructions":{"type":"string","maxLength":65536},
+                        "conversation_history":{"type":"array"}
                     },
                     "required":["input"],
                     "additionalProperties":false
@@ -256,10 +302,17 @@ impl AgentAdapter for HermesApiAdapter {
 
     fn start_task<'a>(&'a self, request: StartTaskRequest) -> AdapterFuture<'a, AgentTask> {
         Box::pin(async move {
-            if request.task_id.trim().is_empty() || request.task_id.len() > 160 {
+            self.require_attested()?;
+            if request.task_id.trim().is_empty()
+                || request.task_id.len() > 160
+                || !request
+                    .task_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+            {
                 return Err(adapter_error(
                     "invalid_task_id",
-                    "DREAD task id must contain 1-160 characters".into(),
+                    "DREAD task id must contain 1-160 ASCII letters, digits, '.', '_' or '-'".into(),
                     false,
                 ));
             }
@@ -272,10 +325,8 @@ impl AgentAdapter for HermesApiAdapter {
             }
             let input_fields = [
                 "input",
-                "session_id",
                 "instructions",
                 "conversation_history",
-                "previous_response_id",
             ];
             if request.input.as_object().is_none_or(|object| {
                 object
@@ -306,38 +357,16 @@ impl AgentAdapter for HermesApiAdapter {
                     false,
                 ));
             }
-            let mut body = json!({"input": input});
-            for field in [
-                "session_id",
-                "instructions",
-                "conversation_history",
-                "previous_response_id",
-            ] {
+            let task_session_id = request.task_id.clone();
+            let mut body = json!({"input": input, "session_id": task_session_id});
+            for field in ["instructions", "conversation_history"] {
                 if let Some(value) = request.input.get(field) {
-                    if field == "session_id"
-                        && (!value.is_string() || value.as_str().unwrap_or_default().len() > 160)
-                    {
-                        return Err(adapter_error(
-                            "invalid_input",
-                            "Hermes session_id must be a string of at most 160 characters".into(),
-                            false,
-                        ));
-                    }
                     if field == "instructions"
                         && (!value.is_string() || value.as_str().unwrap_or_default().len() > 65536)
                     {
                         return Err(adapter_error(
                             "invalid_input",
                             "Hermes instructions must be text of at most 65536 bytes".into(),
-                            false,
-                        ));
-                    }
-                    if field == "previous_response_id"
-                        && (!value.is_string() || value.as_str().unwrap_or_default().len() > 160)
-                    {
-                        return Err(adapter_error(
-                            "invalid_input",
-                            "Hermes previous_response_id must be text of at most 160 bytes".into(),
                             false,
                         ));
                     }
@@ -669,9 +698,52 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_run_input_fields_before_network_access() {
+    fn requires_an_isolated_sandbox_backend_before_enabling_hermes() {
         let adapter =
             HermesApiAdapter::new("http://127.0.0.1:8642", "test-api-key", "Hermes").unwrap();
+        assert!(adapter.clone().attest_sandbox("local", true).is_err());
+        assert!(adapter.clone().attest_sandbox("ssh", true).is_err());
+        assert!(adapter.clone().attest_sandbox("docker", false).is_err());
+        assert!(
+            adapter
+                .attest_sandbox("docker", true)
+                .unwrap()
+                .descriptor()
+                .enabled
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_caller_selected_hermes_sessions_before_network_access() {
+        let adapter = HermesApiAdapter::new(
+            "http://127.0.0.1:8642",
+            "test-api-key",
+            "Hermes",
+        )
+        .unwrap()
+        .attest_sandbox("docker", true)
+        .unwrap();
+        let result = adapter
+            .start_task(StartTaskRequest {
+                task_id: "dread-task-2".into(),
+                capability_id: "hermes.run".into(),
+                input: json!({"input":"inspect workspace","session_id":"shared-session"}),
+                idempotency_key: "dread-task-2".into(),
+            })
+            .await;
+        assert_eq!(result.unwrap_err().code, "invalid_input");
+    }
+
+    #[test]
+    fn rejects_unsupported_run_input_fields_before_network_access() {
+        let adapter = HermesApiAdapter::new(
+            "http://127.0.0.1:8642",
+            "test-api-key",
+            "Hermes",
+        )
+        .unwrap()
+        .attest_sandbox("docker", true)
+        .unwrap();
         let request = StartTaskRequest {
             task_id: "dread-task-1".into(),
             capability_id: "hermes.run".into(),
@@ -804,6 +876,8 @@ mod tests {
             "test-api-key-that-is-long-enough",
             "Hermes test",
         )
+        .unwrap()
+        .attest_sandbox("docker", true)
         .unwrap();
         let capabilities = adapter.capabilities().await.unwrap();
         assert_eq!(capabilities.len(), 1);
@@ -861,6 +935,7 @@ mod tests {
         );
         assert_eq!(create["idempotency_key"], "dread-task-42");
         assert_eq!(create["body"]["input"], "inspect the approved workspace");
+        assert_eq!(create["body"]["session_id"], "dread-task-42");
         assert!(
             recorded
                 .iter()
