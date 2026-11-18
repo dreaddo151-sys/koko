@@ -154,7 +154,8 @@ impl OpenHandsAgentServerAdapter {
         if !docker_runtime_enabled {
             return Err(adapter_error(
                 "docker_runtime_required",
-                "OpenHands requires Docker conversation runtime selection on the Agent Server".into(),
+                "OpenHands requires Docker conversation runtime selection on the Agent Server"
+                    .into(),
                 false,
             ));
         }
@@ -692,8 +693,7 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
                     false,
                 )
             })?;
-            if self.to_task(task_id, &conversation).state
-                != AgentTaskState::WaitingForConfirmation
+            if self.to_task(task_id, &conversation).state != AgentTaskState::WaitingForConfirmation
             {
                 return Err(adapter_error(
                     "confirmation_not_pending",
@@ -703,9 +703,7 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
             }
             self.json_request(
                 Method::POST,
-                &format!(
-                    "/api/conversations/{provider_task_id}/events/respond_to_confirmation"
-                ),
+                &format!("/api/conversations/{provider_task_id}/events/respond_to_confirmation"),
                 Some(json!({"accept": accept, "reason": reason})),
                 &[],
             )
