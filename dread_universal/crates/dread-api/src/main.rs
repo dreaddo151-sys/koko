@@ -1230,33 +1230,13 @@ async fn preview_capability(
     })))
 }
 
-async fn enable_capability(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(input): Json<ApproveCapability>,
-) -> Result<Json<Value>, ApiError> {
-    let reason = input.reason.trim();
-    let approved_by = state.operator_id.trim();
-    if reason.is_empty() || reason.len() > 2000 {
-        return Err(ApiError::bad_request(
-            "A review reason of 1 to 2000 characters is required",
-        ));
-    }
-
-    let now = now_epoch();
-    let conn = db_lock(&state)?;
-    let encoded = conn
-        .query_row(
-            "SELECT record_json FROM capabilities WHERE id = ?1",
-            params![id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|e| ApiError::internal(e.to_string()))?
-        .ok_or_else(|| ApiError::not_found("Capability not found"))?;
-    let mut record: CapabilityRecord = serde_json::from_str(&encoded)
-        .map_err(|e| ApiError::internal(format!("Stored capability is invalid: {e}")))?;
-
+fn approve_capability_record(
+    record: &mut CapabilityRecord,
+    approved_by: &str,
+    reason: &str,
+    now: u64,
+    current_fingerprint: &str,
+) -> Result<(), ApiError> {
     if !matches!(record.kind, CapabilityKind::Skill | CapabilityKind::Agent) {
         return Err(ApiError::conflict(
             "Only Markdown skills and agent prompt profiles can be enabled as model context",
@@ -1268,28 +1248,12 @@ async fn enable_capability(
         ));
     }
 
-    let root = pstack_skills_root()?;
-    let fingerprint = match record.kind {
-        CapabilityKind::Skill => {
-            load_skill_context(&root, &record.id)
-                .map_err(|e| ApiError::conflict(format!("Skill source is no longer valid: {e}")))?
-                .descriptor
-                .fingerprint
-        }
-        CapabilityKind::Agent => {
-            load_agent_profile_context(&root, &record.id)
-                .map_err(|e| ApiError::conflict(format!("Agent profile is no longer valid: {e}")))?
-                .descriptor
-                .fingerprint
-        }
-        _ => unreachable!(),
-    };
     let expected = record
         .manifest
         .get("fingerprint")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if expected != fingerprint {
+    if expected != current_fingerprint {
         return Err(ApiError::conflict(
             "Capability content changed since import; re-import and review it before enabling",
         ));
@@ -1310,16 +1274,97 @@ async fn enable_capability(
     record.status = CapabilityStatus::Enabled;
     record
         .validate()
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    Ok(())
+}
 
-    let updated = serde_json::to_string(&record).map_err(|e| ApiError::internal(e.to_string()))?;
-    conn.execute(
-        "UPDATE capabilities SET record_json = ?2 WHERE id = ?1",
-        params![id, updated],
+async fn enable_capability(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<ApproveCapability>,
+) -> Result<Json<Value>, ApiError> {
+    let reason = input.reason.trim();
+    let approved_by = state.operator_id.trim();
+    if reason.is_empty()
+        || reason.len() > 2000
+        || approved_by.is_empty()
+        || approved_by.len() > 160
+    {
+        return Err(ApiError::bad_request(
+            "A valid operator and review reason of 1 to 2000 characters are required",
+        ));
+    }
+
+    let now = now_epoch();
+    let mut conn = db_lock(&state)?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let encoded = tx
+        .query_row(
+            "SELECT record_json FROM capabilities WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Capability not found"))?;
+    let mut record: CapabilityRecord = serde_json::from_str(&encoded)
+        .map_err(|error| ApiError::internal(format!("Stored capability is invalid: {error}")))?;
+
+    let root = pstack_skills_root()?;
+    let fingerprint = match record.kind {
+        CapabilityKind::Skill => {
+            load_skill_context(&root, &record.id)
+                .map_err(|error| ApiError::conflict(format!("Skill source is no longer valid: {error}")))?
+                .descriptor
+                .fingerprint
+        }
+        CapabilityKind::Agent => {
+            load_agent_profile_context(&root, &record.id)
+                .map_err(|error| ApiError::conflict(format!("Agent profile is no longer valid: {error}")))?
+                .descriptor
+                .fingerprint
+        }
+        _ => {
+            return Err(ApiError::conflict(
+                "Only Markdown skills and agent prompt profiles can be enabled as model context",
+            ));
+        }
+    };
+    approve_capability_record(&mut record, approved_by, reason, now, &fingerprint)?;
+
+    let updated = serde_json::to_string(&record)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let changed = tx
+        .execute(
+            "UPDATE capabilities SET record_json = ?2 WHERE id = ?1",
+            params![id, updated],
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if changed != 1 {
+        return Err(ApiError::conflict(
+            "Capability changed while the approval was being committed",
+        ));
+    }
+
+    tx.execute(
+        "INSERT INTO capability_events
+            (capability_id, event_type, record_json, reason, actor, created_at)
+         VALUES (?1, 'enabled', ?2, ?3, ?4, ?5)",
+        params![id, encoded, reason, approved_by, now],
     )
-    .map_err(|e| ApiError::internal(e.to_string()))?;
+    .map_err(|error| ApiError::internal(error.to_string()))?;
+    let audit_event_id = tx.last_insert_rowid();
+    tx.commit()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
 
-    Ok(Json(json!({"item": record, "execution": "never"})))
+    Ok(Json(json!({
+        "item": record,
+        "audit_recorded": true,
+        "audit_event_id": audit_event_id,
+        "execution": "never"
+    })))
 }
 
 async fn disable_capability(
