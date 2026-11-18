@@ -83,6 +83,7 @@ Never commit API or Supervisor tokens. Store them outside the repository with re
 | GET | `/api/system/profile` | Read-only host discovery |
 | GET | `/api/services` | Configured local service health |
 | GET | `/api/agents` | Read-only configured/known endpoint probes |
+| GET | `/api/agent-adapters` | Authenticated inventory of explicitly configured provider adapters |
 | GET | `/api/capabilities/discover` | Discover local Pstack skills/profiles |
 | POST | `/api/capabilities/import` | Register discovered profiles disabled from the configured local tree |
 | POST | `/api/capabilities/import-batch` | Atomically import up to 128 disabled capability records; exact matches are idempotent, conflicts roll back the entire batch |
@@ -99,13 +100,29 @@ Never commit API or Supervisor tokens. Store them outside the repository with re
 
 ## Agent and extension boundaries
 
-Current OpenHands and LangGraph probes are read-only health checks. A healthy endpoint is not a live task adapter. Hermes, OpenHands and DeerFlow task execution require separately tested AgentAdapter implementations. Pstack `agents/*.md` files are prompt profiles, not running agents.
+The `/api/agents` endpoint remains a read-only probe of explicitly configured health URLs. It does not execute agents. The separate authenticated `/api/agent-adapters` endpoint reports the provider adapters actually constructed from private environment configuration. Adapter registration is opt-in and fail-closed. Leaving a provider's variables unset keeps it disabled; setting only part of a provider's required variables fails API startup rather than creating a partially configured adapter.
+
+### Registered provider task adapters
+
+The API now registers three concrete `AgentAdapter` implementations when their complete configuration and isolation attestations are supplied.
+
+- **Hermes.** The Runs API adapter supports authenticated idempotent run creation, status/result retrieval, SSE event replay and cooperative stop. Its session/run identity is derived from the DREAD task ID. A supported isolated terminal backend and one workspace per task must be explicitly attested.
+- **DeerFlow.** The thread-scoped Gateway adapter supports PAT-authenticated creation, status, event replay, cancellation and results. The provider class must be AIO or BoxLite with one isolated thread/workspace per DREAD task. LocalSandboxProvider and non-empty remote provisioner URLs are rejected.
+- **OpenHands.** The Agent Server adapter uses the session API key, task-scoped conversation ID, a distinct workspace directory per task, status/event pagination, pause and result extraction. It requires a container ID, per-task workspace isolation and an explicit attestation that the Agent Server has a securely configured, stable `OH_SECRET_KEY`.
+
+All adapters validate explicit-port loopback HTTP endpoints and task-scoped identity/idempotency. These are registered task adapters, not arbitrary automatic discovery. The DREAD API does not start a provider just because its health endpoint responds.
+
+### Task execution and recovery
+
+A task remains pending until an authenticated operator approves it and calls `POST /api/tasks/{id}/run`. The worker dispatches only to the selected, enabled capability and configured provider adapter. It persists provider identity, provider events, the event cursor, final result and error in SQLite. Task event publication follows the corresponding database commit.
+
+On API restart, recovery resumes only tasks that still have recorded approval, an enabled capability mapped to the same provider and an enabled adapter. Provider task identities are deterministic/idempotent so a worker can reattach instead of creating duplicate work. Event polling resumes from the persisted cursor. Tasks that no longer meet those checks are failed and their mission is blocked rather than replayed blindly. This is bounded queue recovery, not resource-aware scheduling or a general retry policy.
+
+### Provider configuration and safety
+
+See `.env.example` for the optional `DREAD_HERMES_*`, `DREAD_DEERFLOW_*` and `DREAD_OPENHANDS_*` groups. Do not add tokens to Git. The isolation and secret-store flags are operator attestations, not runtime proofs that a container, workspace or secret store is secure. Verify the provider's real sandbox and per-task storage boundary before setting them to `true`. For OpenHands, configure `OH_SECRET_KEY` on the Agent Server itself and keep it stable; `DREAD_OPENHANDS_SECRET_STORE_CONFIGURED=true` only records the operator's attestation. The OpenHands adapter currently requests the documented conversation pause operation when DREAD cancels a task; pause is resumable on the provider side and must not be mistaken for permanent conversation deletion.
 
 The repository's reviewed Pstack snapshot is 0.15.43 at commit `2f87c854fe3e2fcda44ca86b46ede35aad3c46b7`, subtree `71d8e1d1d718e2149dc43b2535618064f29cba6b`, MIT; 58 skills and 2 prompt profiles. The runtime importer independently hard-pins SHA-256 for the catalog, import marker, upstream manifest and LICENSE, in addition to the repository/commit/tree/version/license fields. It checks each source file hash and rejects path traversal and symlink escapes. The batch API is transactional and accepts only disabled metadata; an exact match is skipped, but any differing existing record rolls back the whole batch. This is stronger than trusting a mutable marker and catalog together, but it is not a publisher signature. Runtime local discovery/import remains explicitly labelled `unverified_local_copy`, omits an upstream URL and invented version/revision, and treats Markdown only as untrusted context. Signed publisher provenance and transactional extension update/remove are still required for production extension integrity.
-
-## Hermes API adapter (library-only; not yet registered)
-
-The `dread-agents` crate includes an explicit `HermesApiAdapter` for the documented Hermes Runs API: authenticated run submission, status/result retrieval, SSE event replay and cooperative stop. Construction requires a numeric loopback HTTP endpoint, an API server bearer key, and an explicit caller-supplied display name. Requests and event streams have size limits; run IDs and idempotency keys are validated. The adapter preserves separate local DREAD task and remote provider run identities across status, SSE events, stop and result calls; it rejects undeclared input fields and has a loopback HTTP lifecycle regression test. It is not auto-discovered or registered in the Rust API, and it does not itself authorize a task. The Hermes API server can expose powerful configured tools, including terminal execution. Do not submit work until DREAD approval, a verified isolated workspace/container and the provider's own tool policy are enforced by the calling integration.
 
 The read-only host profile also enumerates persistent and network-mounted filesystems using GNU `df` with bounded execution. It reports source, filesystem type, mount point, total, used and available MiB, while excluding common pseudo-filesystems (for example `tmpfs`, `proc`, `sysfs` and `overlay`). The overview console renders the discovered mounts. This is mount-level capacity discovery, not physical-disk topology, SMART health or RAID status.
 
