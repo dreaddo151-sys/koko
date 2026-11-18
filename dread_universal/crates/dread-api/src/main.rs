@@ -4795,6 +4795,65 @@ mod tests {
             starts[0].idempotency_key,
             format!("project-dread:{task_id}")
         );
+        drop(starts);
+
+        // An agent capability must never override a built-in task's runner.
+        let mismatched = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks")
+                    .header(AUTHORIZATION, "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "title": "Mismatched agent capability",
+                            "task_type": "gpu_chat",
+                            "capability_id": "hermes.run",
+                            "payload": {"objective": "must not be dispatched"}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mismatched.status(), StatusCode::CREATED);
+        let body = to_bytes(mismatched.into_body(), usize::MAX).await.unwrap();
+        let mismatched: Value = serde_json::from_slice(&body).unwrap();
+        let mismatched_id = mismatched["item"]["id"].as_str().unwrap();
+
+        let approved = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/tasks/{mismatched_id}/approve"))
+                    .header(AUTHORIZATION, "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"reason": "reject cross-runner capability mismatch"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(approved.status(), StatusCode::OK);
+
+        let denied = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/tasks/{mismatched_id}/run"))
+                    .header(AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::CONFLICT);
+        assert_eq!(adapter.starts.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
