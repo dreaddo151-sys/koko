@@ -743,6 +743,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancellation_gives_active_runner_a_bounded_cleanup_window() {
+        let gate = Arc::new(ExecutionGate::new(config(1, 1)).unwrap());
+        let (cancel, receiver) = watch::channel(false);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let cleanup = Arc::new(AtomicUsize::new(0));
+        let cleanup_for_runner = Arc::clone(&cleanup);
+        let task = tokio::spawn(async move {
+            gate.run("cancel-cleanup", receiver, move |_, mut cancellation| {
+                let cleanup = Arc::clone(&cleanup_for_runner);
+                async move {
+                    let _ = started_tx.send(());
+                    let _ = cancellation.changed().await;
+                    cleanup.fetch_add(1, Ordering::SeqCst);
+                    Err("provider cancellation completed".to_string())
+                }
+            })
+            .await
+        });
+        started_rx.await.unwrap();
+        cancel.send(true).unwrap();
+
+        assert_eq!(
+            task.await.unwrap(),
+            Err(ExecutionError::Cancelled { attempts: 1 })
+        );
+        assert_eq!(cleanup.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn times_out_an_attempt_without_exceeding_retry_limit() {
         let mut timeout_config = config(1, 1);
         timeout_config.max_attempts = 3;
