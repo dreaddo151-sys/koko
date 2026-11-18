@@ -54,7 +54,11 @@ impl OpenHandsAgentServerAdapter {
         display_name: impl Into<String>,
     ) -> Result<Self, AgentAdapterError> {
         let mut url = Url::parse(base_url).map_err(|error| {
-            adapter_error("invalid_endpoint", format!("Invalid OpenHands URL: {error}"), false)
+            adapter_error(
+                "invalid_endpoint",
+                format!("Invalid OpenHands URL: {error}"),
+                false,
+            )
         })?;
         if url.scheme() != "http"
             || url.port().is_none()
@@ -72,7 +76,12 @@ impl OpenHandsAgentServerAdapter {
         }
         let loopback = url
             .host_str()
-            .and_then(|host| host.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>().ok())
+            .and_then(|host| {
+                host.trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<IpAddr>()
+                    .ok()
+            })
             .is_some_and(|ip| ip.is_loopback());
         if !loopback {
             return Err(adapter_error(
@@ -87,13 +96,25 @@ impl OpenHandsAgentServerAdapter {
         let llm_api_key = llm_api_key.into();
         let workspace_root = workspace_root.into();
         if session_api_key.trim().is_empty() || session_api_key.len() > 4096 {
-            return Err(adapter_error("missing_session_key", "A non-empty OpenHands session API key is required".into(), false));
+            return Err(adapter_error(
+                "missing_session_key",
+                "A non-empty OpenHands session API key is required".into(),
+                false,
+            ));
         }
         if llm_model.trim().is_empty() || llm_model.len() > 256 {
-            return Err(adapter_error("invalid_model", "OpenHands LLM model must contain 1-256 characters".into(), false));
+            return Err(adapter_error(
+                "invalid_model",
+                "OpenHands LLM model must contain 1-256 characters".into(),
+                false,
+            ));
         }
         if llm_api_key.trim().is_empty() || llm_api_key.len() > 4096 {
-            return Err(adapter_error("missing_llm_key", "A non-empty OpenHands LLM API key is required".into(), false));
+            return Err(adapter_error(
+                "missing_llm_key",
+                "A non-empty OpenHands LLM API key is required".into(),
+                false,
+            ));
         }
         validate_workspace_root(&workspace_root)?;
         if let Some(base) = llm_base_url.as_deref() {
@@ -138,15 +159,30 @@ impl OpenHandsAgentServerAdapter {
     ) -> Result<Self, AgentAdapterError> {
         if container_id.trim().is_empty()
             || container_id.len() > 128
-            || !container_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+            || !container_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
         {
-            return Err(adapter_error("invalid_container_attestation", "A valid container identifier is required".into(), false));
+            return Err(adapter_error(
+                "invalid_container_attestation",
+                "A valid container identifier is required".into(),
+                false,
+            ));
         }
         if !isolated_workspace_per_task {
-            return Err(adapter_error("workspace_isolation_required", "OpenHands must use a distinct container workspace directory for every DREAD task".into(), false));
+            return Err(adapter_error(
+                "workspace_isolation_required",
+                "OpenHands must use a distinct container workspace directory for every DREAD task"
+                    .into(),
+                false,
+            ));
         }
         if !secret_store_configured {
-            return Err(adapter_error("secret_store_required", "OpenHands OH_SECRET_KEY must be configured and stable across restarts".into(), false));
+            return Err(adapter_error(
+                "secret_store_required",
+                "OpenHands OH_SECRET_KEY must be configured and stable across restarts".into(),
+                false,
+            ));
         }
         self.sandbox_attested = true;
         self.secret_store_attested = true;
@@ -196,43 +232,71 @@ impl OpenHandsAgentServerAdapter {
             )
         })?;
         let status = response.status();
-        let bytes = response.bytes().await.map_err(|error| {
-            adapter_error("response_error", error.to_string(), true)
-        })?;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| adapter_error("response_error", error.to_string(), true))?;
         if bytes.len() > MAX_RESPONSE_BYTES {
-            return Err(adapter_error("response_too_large", "OpenHands response exceeded the 2 MiB limit".into(), false));
+            return Err(adapter_error(
+                "response_too_large",
+                "OpenHands response exceeded the 2 MiB limit".into(),
+                false,
+            ));
         }
         if status == StatusCode::NOT_FOUND {
-            return Err(adapter_error("not_found", "OpenHands resource was not found".into(), false));
+            return Err(adapter_error(
+                "not_found",
+                "OpenHands resource was not found".into(),
+                false,
+            ));
         }
         if status == StatusCode::CONFLICT {
-            return Err(adapter_error("conflict", "OpenHands conversation already exists or is running".into(), false));
+            return Err(adapter_error(
+                "conflict",
+                "OpenHands conversation already exists or is running".into(),
+                false,
+            ));
         }
         if !status.is_success() {
             return Err(adapter_error(
                 "http_error",
-                format!("OpenHands returned HTTP {}: {}", status.as_u16(), String::from_utf8_lossy(&bytes)),
+                format!(
+                    "OpenHands returned HTTP {}: {}",
+                    status.as_u16(),
+                    String::from_utf8_lossy(&bytes)
+                ),
                 status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS,
             ));
         }
         serde_json::from_slice(&bytes).map_err(|error| {
-            adapter_error("invalid_response", format!("OpenHands returned invalid JSON: {error}"), false)
+            adapter_error(
+                "invalid_response",
+                format!("OpenHands returned invalid JSON: {error}"),
+                false,
+            )
         })
     }
 
-    async fn conversation(&self, conversation_id: &str) -> Result<Option<Value>, AgentAdapterError> {
+    async fn conversation(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<Value>, AgentAdapterError> {
         validate_task_id(conversation_id)?;
-        match self.json_request(
-            Method::GET,
-            &format!("/api/conversations/{conversation_id}"),
-            None,
-            &[],
-        ).await {
+        match self
+            .json_request(
+                Method::GET,
+                &format!("/api/conversations/{conversation_id}"),
+                None,
+                &[],
+            )
+            .await
+        {
             Ok(value) => {
                 if value.get("id").and_then(Value::as_str) != Some(conversation_id) {
                     return Err(adapter_error(
                         "provider_id_mismatch",
-                        "OpenHands returned a conversation ID different from the DREAD task ID".into(),
+                        "OpenHands returned a conversation ID different from the DREAD task ID"
+                            .into(),
                         false,
                     ));
                 }
@@ -261,37 +325,87 @@ impl OpenHandsAgentServerAdapter {
             state,
             provider_task_id: Some(task_id.to_string()),
             result: None,
-            error: conversation.get("error").and_then(Value::as_str).map(str::to_string),
+            error: conversation
+                .get("error")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             updated_at: now_epoch(),
         }
     }
 
     fn start_payload(&self, request: &StartTaskRequest) -> Result<Value, AgentAdapterError> {
         if request.capability_id != "openhands.run" {
-            return Err(adapter_error("unsupported_capability", "OpenHands adapter supports only openhands.run".into(), false));
+            return Err(adapter_error(
+                "unsupported_capability",
+                "OpenHands adapter supports only openhands.run".into(),
+                false,
+            ));
         }
         if request.idempotency_key != format!("project-dread:{}", request.task_id) {
-            return Err(adapter_error("invalid_idempotency_key", "OpenHands idempotency key must be derived from the DREAD task ID".into(), false));
+            return Err(adapter_error(
+                "invalid_idempotency_key",
+                "OpenHands idempotency key must be derived from the DREAD task ID".into(),
+                false,
+            ));
         }
         let object = request.input.as_object().ok_or_else(|| {
-            adapter_error("invalid_input", "OpenHands input must be a JSON object".into(), false)
+            adapter_error(
+                "invalid_input",
+                "OpenHands input must be a JSON object".into(),
+                false,
+            )
         })?;
-        if object.keys().any(|key| !["objective", "instructions", "max_iterations"].contains(&key.as_str())) {
-            return Err(adapter_error("invalid_input", "OpenHands input contains unsupported fields".into(), false));
+        if object
+            .keys()
+            .any(|key| !["objective", "instructions", "max_iterations"].contains(&key.as_str()))
+        {
+            return Err(adapter_error(
+                "invalid_input",
+                "OpenHands input contains unsupported fields".into(),
+                false,
+            ));
         }
-        let objective = request.input.get("objective").and_then(Value::as_str).ok_or_else(|| {
-            adapter_error("invalid_input", "OpenHands input requires a text objective".into(), false)
-        })?;
+        let objective = request
+            .input
+            .get("objective")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                adapter_error(
+                    "invalid_input",
+                    "OpenHands input requires a text objective".into(),
+                    false,
+                )
+            })?;
         if objective.trim().is_empty() || objective.len() > MAX_OBJECTIVE_BYTES {
-            return Err(adapter_error("invalid_input", "OpenHands objective must contain 1-20000 bytes".into(), false));
+            return Err(adapter_error(
+                "invalid_input",
+                "OpenHands objective must contain 1-20000 bytes".into(),
+                false,
+            ));
         }
-        let instructions = request.input.get("instructions").and_then(Value::as_str).unwrap_or("");
+        let instructions = request
+            .input
+            .get("instructions")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if instructions.len() > MAX_INSTRUCTIONS_BYTES {
-            return Err(adapter_error("invalid_input", "OpenHands instructions exceed 20000 bytes".into(), false));
+            return Err(adapter_error(
+                "invalid_input",
+                "OpenHands instructions exceed 20000 bytes".into(),
+                false,
+            ));
         }
-        let max_iterations = request.input.get("max_iterations").and_then(Value::as_u64).unwrap_or(100);
+        let max_iterations = request
+            .input
+            .get("max_iterations")
+            .and_then(Value::as_u64)
+            .unwrap_or(100);
         if !(1..=200).contains(&max_iterations) {
-            return Err(adapter_error("invalid_input", "OpenHands max_iterations must be between 1 and 200".into(), false));
+            return Err(adapter_error(
+                "invalid_input",
+                "OpenHands max_iterations must be between 1 and 200".into(),
+                false,
+            ));
         }
         let message = if instructions.trim().is_empty() {
             objective.to_string()
@@ -306,7 +420,11 @@ impl OpenHandsAgentServerAdapter {
         if let Some(base_url) = self.llm_base_url.as_deref() {
             llm["base_url"] = Value::String(base_url.to_string());
         }
-        let working_dir = format!("{}/{}", self.workspace_root.trim_end_matches('/'), request.task_id);
+        let working_dir = format!(
+            "{}/{}",
+            self.workspace_root.trim_end_matches('/'),
+            request.task_id
+        );
         Ok(json!({
             "conversation_id": request.task_id,
             "agent": {
@@ -341,20 +459,34 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
 
     fn health<'a>(&'a self) -> AdapterFuture<'a, AgentHealth> {
         Box::pin(async move {
-            let response = self.client
+            let response = self
+                .client
                 .get(self.endpoint("/ready"))
                 .header("X-Session-API-Key", &self.session_api_key)
                 .timeout(Duration::from_secs(10))
                 .send()
                 .await
-                .map_err(|error| adapter_error("transport_error", error.to_string(), error.is_timeout() || error.is_connect()))?;
+                .map_err(|error| {
+                    adapter_error(
+                        "transport_error",
+                        error.to_string(),
+                        error.is_timeout() || error.is_connect(),
+                    )
+                })?;
             let status = response.status();
             Ok(AgentHealth {
-                state: if status.is_success() { AgentHealthState::Online }
-                    else if status.is_server_error() || status == StatusCode::SERVICE_UNAVAILABLE { AgentHealthState::Degraded }
-                    else { AgentHealthState::Unknown },
+                state: if status.is_success() {
+                    AgentHealthState::Online
+                } else if status.is_server_error() || status == StatusCode::SERVICE_UNAVAILABLE {
+                    AgentHealthState::Degraded
+                } else {
+                    AgentHealthState::Unknown
+                },
                 checked_at: now_epoch(),
-                detail: Some(format!("OpenHands /ready returned HTTP {}", status.as_u16())),
+                detail: Some(format!(
+                    "OpenHands /ready returned HTTP {}",
+                    status.as_u16()
+                )),
             })
         })
     }
@@ -391,7 +523,10 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
                 return Ok(self.to_task(&request.task_id, &existing));
             }
             let body = self.start_payload(&request)?;
-            match self.json_request(Method::POST, "/api/conversations", Some(body), &[]).await {
+            match self
+                .json_request(Method::POST, "/api/conversations", Some(body), &[])
+                .await
+            {
                 Ok(value) => Ok(self.to_task(&request.task_id, &value)),
                 Err(error) if error.code == "conflict" || error.retryable => {
                     if let Some(existing) = self.conversation(&request.task_id).await? {
@@ -405,25 +540,47 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
         })
     }
 
-    fn task_status<'a>(&'a self, task_id: &'a str, provider_task_id: &'a str) -> AdapterFuture<'a, AgentTask> {
+    fn task_status<'a>(
+        &'a self,
+        task_id: &'a str,
+        provider_task_id: &'a str,
+    ) -> AdapterFuture<'a, AgentTask> {
         Box::pin(async move {
             self.require_attested()?;
             validate_task_id(task_id)?;
             if provider_task_id != task_id {
-                return Err(adapter_error("provider_id_mismatch", "OpenHands conversation ID must match the DREAD task ID".into(), false));
+                return Err(adapter_error(
+                    "provider_id_mismatch",
+                    "OpenHands conversation ID must match the DREAD task ID".into(),
+                    false,
+                ));
             }
-            let conversation = self.conversation(provider_task_id).await?
-                .ok_or_else(|| adapter_error("not_found", "OpenHands conversation does not exist".into(), false))?;
+            let conversation = self.conversation(provider_task_id).await?.ok_or_else(|| {
+                adapter_error(
+                    "not_found",
+                    "OpenHands conversation does not exist".into(),
+                    false,
+                )
+            })?;
             Ok(self.to_task(task_id, &conversation))
         })
     }
 
-    fn events<'a>(&'a self, task_id: &'a str, provider_task_id: &'a str, after_sequence: u64) -> AdapterFuture<'a, Vec<AgentEvent>> {
+    fn events<'a>(
+        &'a self,
+        task_id: &'a str,
+        provider_task_id: &'a str,
+        after_sequence: u64,
+    ) -> AdapterFuture<'a, Vec<AgentEvent>> {
         Box::pin(async move {
             self.require_attested()?;
             validate_task_id(task_id)?;
             if provider_task_id != task_id {
-                return Err(adapter_error("provider_id_mismatch", "OpenHands conversation ID must match the DREAD task ID".into(), false));
+                return Err(adapter_error(
+                    "provider_id_mismatch",
+                    "OpenHands conversation ID must match the DREAD task ID".into(),
+                    false,
+                ));
             }
             let mut page_id: Option<String> = None;
             let mut seen_pages = HashSet::new();
@@ -437,14 +594,20 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
                 if let Some(page) = page_id.as_ref() {
                     query.push(("page_id", page.clone()));
                 }
-                let page = self.json_request(
-                    Method::GET,
-                    &format!("/api/conversations/{provider_task_id}/events/search"),
-                    None,
-                    &query,
-                ).await?;
+                let page = self
+                    .json_request(
+                        Method::GET,
+                        &format!("/api/conversations/{provider_task_id}/events/search"),
+                        None,
+                        &query,
+                    )
+                    .await?;
                 let items = page.get("items").and_then(Value::as_array).ok_or_else(|| {
-                    adapter_error("invalid_response", "OpenHands event search response has no items array".into(), false)
+                    adapter_error(
+                        "invalid_response",
+                        "OpenHands event search response has no items array".into(),
+                        false,
+                    )
                 })?;
                 for item in items {
                     sequence = sequence.saturating_add(1);
@@ -452,7 +615,11 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
                         output.push(AgentEvent {
                             task_id: task_id.to_string(),
                             sequence,
-                            event_type: item.get("kind").and_then(Value::as_str).unwrap_or("unknown").to_string(),
+                            event_type: item
+                                .get("kind")
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown")
+                                .to_string(),
                             payload: item.clone(),
                             occurred_at: now_epoch(),
                         });
@@ -462,30 +629,49 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
                 match next {
                     Some(next) if !next.is_empty() => {
                         if next.len() > 512 || !seen_pages.insert(next.to_string()) {
-                            return Err(adapter_error("invalid_pagination", "OpenHands returned an invalid or repeated event page cursor".into(), false));
+                            return Err(adapter_error(
+                                "invalid_pagination",
+                                "OpenHands returned an invalid or repeated event page cursor"
+                                    .into(),
+                                false,
+                            ));
                         }
                         page_id = Some(next.to_string());
                     }
                     _ => return Ok(output),
                 }
             }
-            Err(adapter_error("event_history_limit", "OpenHands event history exceeded the 100-page safety limit".into(), false))
+            Err(adapter_error(
+                "event_history_limit",
+                "OpenHands event history exceeded the 100-page safety limit".into(),
+                false,
+            ))
         })
     }
 
-    fn cancel_task<'a>(&'a self, task_id: &'a str, provider_task_id: &'a str) -> AdapterFuture<'a, AgentTask> {
+    fn cancel_task<'a>(
+        &'a self,
+        task_id: &'a str,
+        provider_task_id: &'a str,
+    ) -> AdapterFuture<'a, AgentTask> {
         Box::pin(async move {
             self.require_attested()?;
             validate_task_id(task_id)?;
             if provider_task_id != task_id {
-                return Err(adapter_error("provider_id_mismatch", "OpenHands conversation ID must match the DREAD task ID".into(), false));
+                return Err(adapter_error(
+                    "provider_id_mismatch",
+                    "OpenHands conversation ID must match the DREAD task ID".into(),
+                    false,
+                ));
             }
-            let _ = self.json_request(
-                Method::POST,
-                &format!("/api/conversations/{provider_task_id}/pause"),
-                None,
-                &[],
-            ).await?;
+            let _ = self
+                .json_request(
+                    Method::POST,
+                    &format!("/api/conversations/{provider_task_id}/pause"),
+                    None,
+                    &[],
+                )
+                .await?;
             Ok(AgentTask {
                 task_id: task_id.to_string(),
                 state: AgentTaskState::Cancelled,
@@ -497,7 +683,11 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
         })
     }
 
-    fn task_result<'a>(&'a self, task_id: &'a str, provider_task_id: &'a str) -> AdapterFuture<'a, AgentTask> {
+    fn task_result<'a>(
+        &'a self,
+        task_id: &'a str,
+        provider_task_id: &'a str,
+    ) -> AdapterFuture<'a, AgentTask> {
         Box::pin(async move {
             let mut task = self.task_status(task_id, provider_task_id).await?;
             if task.state != AgentTaskState::Succeeded {
@@ -513,7 +703,11 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
                 }
                 let content = event.payload.pointer("/llm_message/content");
                 let text = match content {
-                    Some(Value::Array(items)) => items.iter().filter_map(|item| item.get("text").and_then(Value::as_str)).collect::<Vec<_>>().join("\n"),
+                    Some(Value::Array(items)) => items
+                        .iter()
+                        .filter_map(|item| item.get("text").and_then(Value::as_str))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                     Some(Value::String(value)) => value.clone(),
                     _ => String::new(),
                 };
@@ -532,11 +726,16 @@ fn validate_task_id(task_id: &str) -> Result<(), AgentAdapterError> {
     let bytes = task_id.as_bytes();
     if bytes.len() != 36
         || ![8, 13, 18, 23].iter().all(|index| bytes[*index] == b'-')
-        || !bytes.iter().enumerate().all(|(index, byte)| {
-            [8, 13, 18, 23].contains(&index) || byte.is_ascii_hexdigit()
-        })
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| [8, 13, 18, 23].contains(&index) || byte.is_ascii_hexdigit())
     {
-        return Err(adapter_error("invalid_task_id", "OpenHands requires a canonical UUID DREAD task ID".into(), false));
+        return Err(adapter_error(
+            "invalid_task_id",
+            "OpenHands requires a canonical UUID DREAD task ID".into(),
+            false,
+        ));
     }
     Ok(())
 }
@@ -546,22 +745,36 @@ fn validate_workspace_root(root: &str) -> Result<(), AgentAdapterError> {
         || root.len() > 512
         || root.starts_with('/')
         || root.contains('\\')
-        || !root.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-/".contains(&byte))
-        || root.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+        || !root
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-/".contains(&byte))
+        || root
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
     {
-        return Err(adapter_error("unsafe_workspace_root", "OpenHands workspace root must be a safe relative path without traversal components".into(), false));
+        return Err(adapter_error(
+            "unsafe_workspace_root",
+            "OpenHands workspace root must be a safe relative path without traversal components"
+                .into(),
+            false,
+        ));
     }
     Ok(())
 }
 
 fn validate_llm_base_url(value: &str) -> Result<(), AgentAdapterError> {
-    let url = Url::parse(value).map_err(|error| adapter_error("invalid_llm_base_url", error.to_string(), false))?;
+    let url = Url::parse(value)
+        .map_err(|error| adapter_error("invalid_llm_base_url", error.to_string(), false))?;
     if !matches!(url.scheme(), "https" | "http")
         || !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
-        || (url.scheme() == "http" && !url.host_str().and_then(|host| host.parse::<IpAddr>().ok()).is_some_and(|ip| ip.is_loopback()))
+        || (url.scheme() == "http"
+            && !url
+                .host_str()
+                .and_then(|host| host.parse::<IpAddr>().ok())
+                .is_some_and(|ip| ip.is_loopback()))
     {
         return Err(adapter_error("unsafe_llm_base_url", "OpenHands LLM base URL must use HTTPS or loopback HTTP without embedded credentials, query or fragment".into(), false));
     }
@@ -569,11 +782,18 @@ fn validate_llm_base_url(value: &str) -> Result<(), AgentAdapterError> {
 }
 
 fn adapter_error(code: &str, message: String, retryable: bool) -> AgentAdapterError {
-    AgentAdapterError { code: code.into(), message, retryable }
+    AgentAdapterError {
+        code: code.into(),
+        message,
+        retryable,
+    }
 }
 
 fn now_epoch() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[cfg(test)]
@@ -592,14 +812,27 @@ mod tests {
         "ready"
     }
 
-    async fn create_conversation(
-        headers: HeaderMap,
-        Json(body): Json<Value>,
-    ) -> Json<Value> {
-        assert_eq!(headers.get("x-session-api-key").and_then(|v| v.to_str().ok()), Some("session-secret"));
-        let id = body.get("conversation_id").and_then(Value::as_str).unwrap().to_string();
-        assert_eq!(body.pointer("/workspace/kind").and_then(Value::as_str), Some("LocalWorkspace"));
-        assert!(body.pointer("/initial_message/run").and_then(Value::as_bool).unwrap_or(false));
+    async fn create_conversation(headers: HeaderMap, Json(body): Json<Value>) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("x-session-api-key")
+                .and_then(|v| v.to_str().ok()),
+            Some("session-secret")
+        );
+        let id = body
+            .get("conversation_id")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            body.pointer("/workspace/kind").and_then(Value::as_str),
+            Some("LocalWorkspace")
+        );
+        assert!(
+            body.pointer("/initial_message/run")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        );
         Json(json!({"id": id, "execution_status": "running"}))
     }
 
@@ -608,17 +841,25 @@ mod tests {
         state: axum::extract::State<Arc<AtomicBool>>,
         headers: HeaderMap,
     ) -> Result<Json<Value>, StatusCode> {
-        assert_eq!(headers.get("x-session-api-key").and_then(|v| v.to_str().ok()), Some("session-secret"));
+        assert_eq!(
+            headers
+                .get("x-session-api-key")
+                .and_then(|v| v.to_str().ok()),
+            Some("session-secret")
+        );
         if !state.load(Ordering::SeqCst) {
             return Err(StatusCode::NOT_FOUND);
         }
         Ok(Json(json!({"id": id, "execution_status": "finished"})))
     }
 
-    async fn events_search(
-        headers: HeaderMap,
-    ) -> Json<Value> {
-        assert_eq!(headers.get("x-session-api-key").and_then(|v| v.to_str().ok()), Some("session-secret"));
+    async fn events_search(headers: HeaderMap) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("x-session-api-key")
+                .and_then(|v| v.to_str().ok()),
+            Some("session-secret")
+        );
         Json(json!({
             "items": [{
                 "id": "01J00000000000000000000000",
@@ -659,17 +900,22 @@ mod tests {
         )
         .unwrap();
         assert!(adapter.capabilities().await.unwrap().is_empty());
-        let adapter = adapter.attest_container_sandbox("dread-agent-server-test", true, true).unwrap();
+        let adapter = adapter
+            .attest_container_sandbox("dread-agent-server-test", true, true)
+            .unwrap();
         assert!(adapter.descriptor().enabled);
         assert_eq!(adapter.capabilities().await.unwrap()[0].id, "openhands.run");
 
         let task_id = "00000000-0000-4000-8000-000000000001";
-        let started = adapter.start_task(StartTaskRequest {
-            task_id: task_id.into(),
-            capability_id: "openhands.run".into(),
-            input: json!({"objective": "create a file"}),
-            idempotency_key: format!("project-dread:{task_id}"),
-        }).await.unwrap();
+        let started = adapter
+            .start_task(StartTaskRequest {
+                task_id: task_id.into(),
+                capability_id: "openhands.run".into(),
+                input: json!({"objective": "create a file"}),
+                idempotency_key: format!("project-dread:{task_id}"),
+            })
+            .await
+            .unwrap();
         assert_eq!(started.provider_task_id.as_deref(), Some(task_id));
 
         created.store(true, Ordering::SeqCst);
@@ -681,7 +927,14 @@ mod tests {
         assert_eq!(events[0].sequence, 1);
 
         let result = adapter.task_result(task_id, task_id).await.unwrap();
-        assert_eq!(result.result.as_ref().and_then(|value| value.get("final_message")).and_then(Value::as_str), Some("done"));
+        assert_eq!(
+            result
+                .result
+                .as_ref()
+                .and_then(|value| value.get("final_message"))
+                .and_then(Value::as_str),
+            Some("done")
+        );
 
         let cancelled = adapter.cancel_task(task_id, task_id).await.unwrap();
         assert_eq!(cancelled.state, AgentTaskState::Cancelled);
@@ -690,13 +943,29 @@ mod tests {
 
     #[test]
     fn rejects_unsafe_workspace_and_non_loopback_servers() {
-        assert!(OpenHandsAgentServerAdapter::new(
-            "http://example.com:8000", "session", "model", "key", None,
-            "workspace/tasks", "OpenHands"
-        ).is_err());
-        assert!(OpenHandsAgentServerAdapter::new(
-            "http://127.0.0.1:8000", "session", "model", "key", None,
-            "../outside", "OpenHands"
-        ).is_err());
+        assert!(
+            OpenHandsAgentServerAdapter::new(
+                "http://example.com:8000",
+                "session",
+                "model",
+                "key",
+                None,
+                "workspace/tasks",
+                "OpenHands"
+            )
+            .is_err()
+        );
+        assert!(
+            OpenHandsAgentServerAdapter::new(
+                "http://127.0.0.1:8000",
+                "session",
+                "model",
+                "key",
+                None,
+                "../outside",
+                "OpenHands"
+            )
+            .is_err()
+        );
     }
 }
