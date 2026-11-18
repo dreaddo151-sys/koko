@@ -200,11 +200,7 @@ impl ExecutionGate {
     {
         self.run_inner(task_id, cancellation, move |attempt, cancellation| {
             let operation_future = operation(attempt, cancellation);
-            async move {
-                operation_future
-                    .await
-                    .map_err(RunnerError::permanent)
-            }
+            async move { operation_future.await.map_err(RunnerError::permanent) }
         })
         .await
     }
@@ -284,9 +280,7 @@ impl ExecutionGate {
                         elapsed_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
                     });
                 }
-                Some(Err(error))
-                    if error.retryable && attempts < self.config.max_attempts =>
-                {
+                Some(Err(error)) if error.retryable && attempts < self.config.max_attempts => {
                     self.wait_before_retry(attempts, &mut cancellation).await?;
                     continue;
                 }
@@ -710,11 +704,11 @@ mod tests {
         let (_cancel, receiver) = watch::channel(false);
 
         let result = gate
-            .run_with_retryable_errors("permanent-error", receiver, move |_, _| {
+            .run("permanent-error", receiver, move |_, _| {
                 let calls = Arc::clone(&calls_for_runner);
                 async move {
                     calls.fetch_add(1, Ordering::SeqCst);
-                    Err(RunnerError::permanent("invalid task input"))
+                    Err("invalid task input".to_string())
                 }
             })
             .await;
