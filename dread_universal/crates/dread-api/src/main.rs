@@ -14,9 +14,8 @@ use axum::{
     routing::get,
 };
 use dread_agents::{
-    AgentAdapter, AgentEvent, AgentTaskState, CapabilityKind, CapabilityProvenance,
-    CapabilityRecord, CapabilityStatus, StartTaskRequest, deerflow::DeerFlowApiAdapter,
-    hermes::HermesApiAdapter,
+    AgentAdapter, CapabilityKind, CapabilityProvenance, CapabilityRecord, CapabilityStatus,
+    deerflow::DeerFlowApiAdapter, hermes::HermesApiAdapter,
 };
 use dread_discovery::{
     discover, discover_agents, known_agent_endpoints, load_agents, load_services,
