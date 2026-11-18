@@ -1365,8 +1365,8 @@ async fn disable_capability(
         .validate()
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
 
-    let updated = serde_json::to_string(&record)
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let updated =
+        serde_json::to_string(&record).map_err(|error| ApiError::internal(error.to_string()))?;
     let changed = tx
         .execute(
             "UPDATE capabilities SET record_json = ?2 WHERE id = ?1",
