@@ -51,6 +51,28 @@ pub enum ConfigError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerError {
+    pub message: String,
+    pub retryable: bool,
+}
+
+impl RunnerError {
+    pub fn permanent(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: false,
+        }
+    }
+
+    pub fn retryable(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionError {
     InvalidTaskId,
     AdmissionFull { limit: usize },
@@ -169,12 +191,48 @@ impl ExecutionGate {
     pub async fn run<F, Fut>(
         &self,
         task_id: impl Into<String>,
-        mut cancellation: watch::Receiver<bool>,
+        cancellation: watch::Receiver<bool>,
         mut operation: F,
     ) -> Result<ExecutionResult, ExecutionError>
     where
         F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
         Fut: Future<Output = Result<Value, String>> + Send,
+    {
+        self.run_inner(task_id, cancellation, move |attempt, cancellation| {
+            let operation_future = operation(attempt, cancellation);
+            async move {
+                operation_future
+                    .await
+                    .map_err(RunnerError::permanent)
+            }
+        })
+        .await
+    }
+
+    /// Run an operation that explicitly classifies failures as retryable or permanent.
+    /// Unclassified string errors passed to run are always permanent.
+    pub async fn run_with_retryable_errors<F, Fut>(
+        &self,
+        task_id: impl Into<String>,
+        cancellation: watch::Receiver<bool>,
+        operation: F,
+    ) -> Result<ExecutionResult, ExecutionError>
+    where
+        F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
+        Fut: Future<Output = Result<Value, RunnerError>> + Send,
+    {
+        self.run_inner(task_id, cancellation, operation).await
+    }
+
+    async fn run_inner<F, Fut>(
+        &self,
+        task_id: impl Into<String>,
+        mut cancellation: watch::Receiver<bool>,
+        mut operation: F,
+    ) -> Result<ExecutionResult, ExecutionError>
+    where
+        F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
+        Fut: Future<Output = Result<Value, RunnerError>> + Send,
     {
         let task_id = task_id.into();
         if task_id.trim().is_empty() {
@@ -226,17 +284,20 @@ impl ExecutionGate {
                         elapsed_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
                     });
                 }
-                Some(Err(message)) if attempts == self.config.max_attempts => {
-                    return Err(ExecutionError::RunnerFailed { attempts, message });
-                }
-                Some(Err(_)) | None if attempts < self.config.max_attempts => {
+                Some(Err(error))
+                    if error.retryable && attempts < self.config.max_attempts =>
+                {
                     self.wait_before_retry(attempts, &mut cancellation).await?;
                     continue;
                 }
-                None => return Err(ExecutionError::TimedOut { attempts }),
-                Some(Err(message)) => {
-                    return Err(ExecutionError::RunnerFailed { attempts, message });
+                Some(Err(error)) => {
+                    return Err(ExecutionError::RunnerFailed {
+                        attempts,
+                        message: error.message,
+                    });
                 }
+                // A timeout has an unknown side-effect outcome. Never replay it automatically.
+                None => return Err(ExecutionError::TimedOut { attempts }),
             }
         }
 
@@ -587,11 +648,11 @@ mod tests {
         let (_cancel, receiver) = watch::channel(false);
 
         let result = gate
-            .run("retry", receiver, move |_, _| {
+            .run_with_retryable_errors("retry", receiver, move |_, _| {
                 let calls = Arc::clone(&calls_for_runner);
                 async move {
                     if calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                        Err("temporary failure".to_string())
+                        Err(RunnerError::retryable("temporary transport failure"))
                     } else {
                         Ok(json!({"ok": true}))
                     }
@@ -616,11 +677,11 @@ mod tests {
         let calls_for_runner = Arc::clone(&calls);
 
         let task = tokio::spawn(async move {
-            gate.run("cancel-during-backoff", receiver, move |_, _| {
+            gate.run_with_retryable_errors("cancel-during-backoff", receiver, move |_, _| {
                 let calls = Arc::clone(&calls_for_runner);
                 async move {
                     calls.fetch_add(1, Ordering::SeqCst);
-                    Err("retryable transport failure".to_string())
+                    Err(RunnerError::retryable("temporary transport failure"))
                 }
             })
             .await
@@ -635,6 +696,35 @@ mod tests {
         assert_eq!(
             task.await.unwrap(),
             Err(ExecutionError::Cancelled { attempts: 1 })
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn permanent_runner_errors_are_not_retried() {
+        let mut retry_config = config(1, 1);
+        retry_config.max_attempts = 3;
+        let gate = ExecutionGate::new(retry_config).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_runner = Arc::clone(&calls);
+        let (_cancel, receiver) = watch::channel(false);
+
+        let result = gate
+            .run_with_retryable_errors("permanent-error", receiver, move |_, _| {
+                let calls = Arc::clone(&calls_for_runner);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(RunnerError::permanent("invalid task input"))
+                }
+            })
+            .await;
+
+        assert_eq!(
+            result,
+            Err(ExecutionError::RunnerFailed {
+                attempts: 1,
+                message: "invalid task input".into()
+            })
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -661,15 +751,23 @@ mod tests {
     #[tokio::test]
     async fn times_out_an_attempt_without_exceeding_retry_limit() {
         let mut timeout_config = config(1, 1);
+        timeout_config.max_attempts = 3;
         timeout_config.attempt_timeout = Duration::from_millis(10);
         let gate = ExecutionGate::new(timeout_config).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_runner = Arc::clone(&calls);
         let (_cancel, receiver) = watch::channel(false);
         let result = gate
-            .run("timeout", receiver, |_, _| async {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                Ok(Value::Null)
+            .run("timeout", receiver, move |_, _| {
+                let calls = Arc::clone(&calls_for_runner);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    Ok(Value::Null)
+                }
             })
             .await;
         assert_eq!(result, Err(ExecutionError::TimedOut { attempts: 1 }));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
