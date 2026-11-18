@@ -853,7 +853,7 @@ mod tests {
             headers: HeaderMap,
             Json(body): Json<Value>,
         ) -> Json<Value> {
-            state.0.lock().unwrap().push(json!({
+            state.requests.lock().unwrap().push(json!({
                 "path":"/api/threads",
                 "authorization":headers.get(header::AUTHORIZATION).and_then(|v|v.to_str().ok()),
                 "body":body
@@ -867,7 +867,7 @@ mod tests {
             headers: HeaderMap,
             Json(body): Json<Value>,
         ) -> (StatusCode, Json<Value>) {
-            state.0.lock().unwrap().push(json!({
+            state.requests.lock().unwrap().push(json!({
                 "path":format!("/api/threads/{thread_id}/runs"),
                 "authorization":headers.get(header::AUTHORIZATION).and_then(|v|v.to_str().ok()),
                 "idempotency_key":headers.get("idempotency-key").and_then(|v|v.to_str().ok()),
