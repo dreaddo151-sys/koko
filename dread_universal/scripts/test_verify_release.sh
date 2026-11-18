@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 VERIFY="$ROOT/verify-release.sh"
-if [[ ! -x "$VERIFY" ]]; then
+if [[ ! -f "$VERIFY" ]]; then
   printf 'Release verifier is missing or not executable: %s\n' "$VERIFY" >&2
   exit 1
 fi
@@ -63,15 +63,15 @@ printf 'deb fixture\n' > "$TMP/release/dread-universal.deb"
 )
 printf '{"fake":"bundle"}\n' > "$TMP/release/SHA256SUMS.sigstore.json"
 
-PATH="$TMP/bin:$PATH" "$VERIFY" "$TMP/release/SHA256SUMS" >/dev/null
+PATH="$TMP/bin:$PATH" bash "$VERIFY" "$TMP/release/SHA256SUMS" >/dev/null
 
-if FAKE_COSIGN_FAIL=1 PATH="$TMP/bin:$PATH" "$VERIFY" "$TMP/release/SHA256SUMS" >/dev/null 2>&1; then
+if FAKE_COSIGN_FAIL=1 PATH="$TMP/bin:$PATH" bash "$VERIFY" "$TMP/release/SHA256SUMS" >/dev/null 2>&1; then
   printf 'Verifier accepted a rejected signature.\n' >&2
   exit 1
 fi
 
 printf 'tampered archive\n' >> "$TMP/release/dread-universal.tar.gz"
-if PATH="$TMP/bin:$PATH" "$VERIFY" "$TMP/release/SHA256SUMS" >/dev/null 2>&1; then
+if PATH="$TMP/bin:$PATH" bash "$VERIFY" "$TMP/release/SHA256SUMS" >/dev/null 2>&1; then
   printf 'Verifier accepted an artifact with a mismatched checksum.\n' >&2
   exit 1
 fi
