@@ -4784,18 +4784,19 @@ mod tests {
             completed["item"]["tasks"][0]["result"]["answer"],
             "completed"
         );
-        let starts = adapter.starts.lock().unwrap();
-        assert_eq!(starts.len(), 1);
-        assert_eq!(starts[0].capability_id, "hermes.run");
-        assert_eq!(
-            starts[0].input,
-            json!({"objective": "Inspect the approved workspace"})
-        );
-        assert_eq!(
-            starts[0].idempotency_key,
-            format!("project-dread:{task_id}")
-        );
-        drop(starts);
+        {
+            let starts = adapter.starts.lock().unwrap();
+            assert_eq!(starts.len(), 1);
+            assert_eq!(starts[0].capability_id, "hermes.run");
+            assert_eq!(
+                starts[0].input,
+                json!({"objective": "Inspect the approved workspace"})
+            );
+            assert_eq!(
+                starts[0].idempotency_key,
+                format!("project-dread:{task_id}")
+            );
+        }
 
         // An agent capability must never override a built-in task's runner.
         let mismatched = router
