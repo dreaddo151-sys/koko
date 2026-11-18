@@ -3992,10 +3992,7 @@ fn app(state: AppState) -> Router {
             "/api/capabilities/{id}/disable",
             axum::routing::post(disable_capability),
         )
-        .route(
-            "/api/capabilities/{id}/history",
-            get(capability_history),
-        )
+        .route("/api/capabilities/{id}/history", get(capability_history))
         .route(
             "/api/capabilities/{id}",
             get(get_capability).delete(remove_capability),
