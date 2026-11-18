@@ -4520,6 +4520,188 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn approved_agent_mission_node_dispatches_through_registered_adapter() {
+        let db = Arc::new(Mutex::new(open_database(":memory:").unwrap()));
+        let now = now_epoch();
+        let capability = CapabilityRecord {
+            id: "hermes.run".into(),
+            name: "Hermes run".into(),
+            kind: CapabilityKind::Agent,
+            description: "Approved Hermes task execution".into(),
+            version: Some("test".into()),
+            license: None,
+            provenance: CapabilityProvenance {
+                source_name: "DREAD operator registry".into(),
+                source_uri: None,
+                source_version: None,
+                source_revision: None,
+                imported_at: now,
+            },
+            compatibility: "reviewed".into(),
+            dependencies: Vec::new(),
+            adapter: Some("hermes".into()),
+            status: CapabilityStatus::Enabled,
+            manifest: json!({
+                "approval": {
+                    "approved_by": "test-operator",
+                    "approved_at": now,
+                    "reason": "Approve mock provider for mission regression"
+                }
+            }),
+        };
+        capability.validate().unwrap();
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO capabilities (id, record_json, created_at) VALUES (?1, ?2, ?3)",
+                params![
+                    capability.id,
+                    serde_json::to_string(&capability).unwrap(),
+                    now
+                ],
+            )
+            .unwrap();
+
+        let adapter = Arc::new(MockAgentAdapter::new());
+        let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
+        adapters.insert("hermes".into(), adapter.clone());
+        let (events, _) = broadcast::channel(128);
+        let state = AppState {
+            db,
+            gpu: GpuGatewayClient::new("http://127.0.0.1:1").unwrap(),
+            supervisor: None,
+            events,
+            execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
+            agent_adapters: Arc::new(adapters),
+            cancellations: Arc::new(Mutex::new(HashMap::new())),
+            api_token: Some("test-token".into()),
+            operator_id: "test-operator".into(),
+            auth_required: true,
+        };
+        let router = app(state);
+
+        let graph = json!({
+            "mission_id": "agent-provider-mission",
+            "nodes": [{
+                "id": "implement",
+                "depends_on": [],
+                "priority": 10,
+                "task_type": "agent_task",
+                "payload": {
+                    "capability_id": "hermes.run",
+                    "input": {"objective": "Inspect the approved workspace"}
+                }
+            }]
+        });
+        let created = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/missions")
+                    .header(AUTHORIZATION, "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(graph.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let instantiated = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/missions/agent-provider-mission/instantiate")
+                    .header(AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(instantiated.status(), StatusCode::ACCEPTED);
+        let body = to_bytes(instantiated.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        let task_id = value["item"]["tasks"][0]["task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let approved = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/tasks/{task_id}/approve"))
+                    .header(AUTHORIZATION, "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"reason": "Approve this agent mission node"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(approved.status(), StatusCode::OK);
+
+        let queued = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/tasks/{task_id}/run"))
+                    .header(AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(queued.status(), StatusCode::ACCEPTED);
+
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let response = router
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri("/api/missions/agent-provider-mission")
+                            .header(AUTHORIZATION, "Bearer test-token")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let mission: Value = serde_json::from_slice(&body).unwrap();
+                if mission["item"]["status"] == "completed" {
+                    break mission;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("approved provider-backed mission node should complete");
+
+        assert_eq!(completed["item"]["tasks"][0]["status"], "completed");
+        assert_eq!(
+            completed["item"]["tasks"][0]["result"]["answer"],
+            "completed"
+        );
+        let starts = adapter.starts.lock().unwrap();
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0].capability_id, "hermes.run");
+        assert_eq!(
+            starts[0].input,
+            json!({"objective": "Inspect the approved workspace"})
+        );
+        assert_eq!(
+            starts[0].idempotency_key,
+            format!("project-dread:{task_id}")
+        );
+    }
+
+    #[tokio::test]
     async fn agent_worker_persists_provider_identity_events_and_result() {
         let db = Arc::new(Mutex::new(open_database(":memory:").unwrap()));
         let now = now_epoch();
