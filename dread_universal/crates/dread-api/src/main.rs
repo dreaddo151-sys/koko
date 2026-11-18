@@ -1651,18 +1651,15 @@ fn resolve_agent_provider(
         )
         .optional()
         .map_err(|error| ApiError::internal(error.to_string()))?;
-    let encoded = encoded.ok_or_else(|| {
-        ApiError::conflict("Agent task capability is not registered")
-    })?;
+    let encoded =
+        encoded.ok_or_else(|| ApiError::conflict("Agent task capability is not registered"))?;
     let capability: CapabilityRecord = serde_json::from_str(&encoded).map_err(|error| {
         ApiError::internal(format!("Stored agent capability is invalid: {error}"))
     })?;
     capability
         .validate()
         .map_err(|error| ApiError::conflict(error.to_string()))?;
-    if capability.kind != CapabilityKind::Agent
-        || capability.status != CapabilityStatus::Enabled
-    {
+    if capability.kind != CapabilityKind::Agent || capability.status != CapabilityStatus::Enabled {
         return Err(ApiError::conflict(
             "Agent task capability must be an approved, enabled Agent",
         ));
@@ -1688,9 +1685,10 @@ fn resolve_agent_provider(
         ));
     }
 
-    let adapter = state.agent_adapters.get(provider).ok_or_else(|| {
-        ApiError::conflict("Agent capability provider adapter is not configured")
-    })?;
+    let adapter = state
+        .agent_adapters
+        .get(provider)
+        .ok_or_else(|| ApiError::conflict("Agent capability provider adapter is not configured"))?;
     if !adapter.descriptor().enabled || adapter.descriptor().adapter != provider {
         return Err(ApiError::conflict(
             "Agent capability provider adapter is disabled or mismatched",
@@ -1875,8 +1873,7 @@ async fn instantiate_mission(
                     ));
                 }
 
-                let provider =
-                    resolve_agent_provider(&state, &tx, requested_capability)?;
+                let provider = resolve_agent_provider(&state, &tx, requested_capability)?;
                 (Some(requested_capability.to_string()), input)
             }
             task_type => {
