@@ -1746,7 +1746,7 @@ async fn instantiate_mission(
         let node = nodes
             .get(node_id.as_str())
             .ok_or_else(|| ApiError::internal("Stored mission node is missing"))?;
-        match node.task_type.as_str() {
+        let (capability_id, task_payload) = match node.task_type.as_str() {
             "service_discovery" => {
                 if !node.payload.is_null()
                     && !node
@@ -1758,6 +1758,7 @@ async fn instantiate_mission(
                         "service_discovery mission nodes accept only an empty payload",
                     ));
                 }
+                (None, node.payload.clone())
             }
             "gpu_chat" => {
                 validate_gpu_chat_payload(&node.payload).map_err(ApiError::bad_request)?;
@@ -1767,6 +1768,99 @@ async fn instantiate_mission(
                         message: "GPU mission nodes require the authenticated Python GPU Supervisor bridge".into(),
                     });
                 }
+                (None, node.payload.clone())
+            }
+            "agent_task" => {
+                let object = node.payload.as_object().ok_or_else(|| {
+                    ApiError::bad_request(
+                        "agent_task mission payload must contain capability_id and input",
+                    )
+                })?;
+                if object
+                    .keys()
+                    .any(|key| !["capability_id", "input"].contains(&key.as_str()))
+                {
+                    return Err(ApiError::bad_request(
+                        "agent_task mission payload contains unsupported fields",
+                    ));
+                }
+                let requested_capability = object
+                    .get("capability_id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty() && value.len() <= 160)
+                    .ok_or_else(|| {
+                        ApiError::bad_request(
+                            "agent_task mission payload requires a valid capability_id",
+                        )
+                    })?;
+                let input = object.get("input").cloned().ok_or_else(|| {
+                    ApiError::bad_request("agent_task mission payload requires input")
+                })?;
+                if !input.is_object() {
+                    return Err(ApiError::bad_request(
+                        "agent_task input must be a JSON object",
+                    ));
+                }
+
+                let encoded: Option<String> = tx
+                    .query_row(
+                        "SELECT record_json FROM capabilities WHERE id = ?1",
+                        params![requested_capability],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(|error| ApiError::internal(error.to_string()))?;
+                let encoded = encoded.ok_or_else(|| {
+                    ApiError::conflict("Agent mission capability is not registered")
+                })?;
+                let capability: CapabilityRecord =
+                    serde_json::from_str(&encoded).map_err(|error| {
+                        ApiError::internal(format!(
+                            "Stored agent mission capability is invalid: {error}"
+                        ))
+                    })?;
+                capability
+                    .validate()
+                    .map_err(|error| ApiError::conflict(error.to_string()))?;
+                if capability.kind != CapabilityKind::Agent
+                    || capability.status != CapabilityStatus::Enabled
+                {
+                    return Err(ApiError::conflict(
+                        "Agent mission capability must be an approved, enabled agent",
+                    ));
+                }
+
+                let provider = capability.adapter.as_deref().ok_or_else(|| {
+                    ApiError::conflict("Agent mission capability has no provider adapter")
+                })?;
+                let expected_capability = match provider {
+                    "hermes" => "hermes.run",
+                    "deerflow" => "deerflow.run",
+                    "openhands" => "openhands.run",
+                    _ => {
+                        return Err(ApiError::conflict(
+                            "Agent mission capability does not use a reviewed provider",
+                        ));
+                    }
+                };
+                if capability.id != requested_capability
+                    || capability.id != expected_capability
+                {
+                    return Err(ApiError::conflict(
+                        "Agent mission capability ID does not match its reviewed provider",
+                    ));
+                }
+                let adapter = state.agent_adapters.get(provider).ok_or_else(|| {
+                    ApiError::conflict("Agent mission provider adapter is not configured")
+                })?;
+                if !adapter.descriptor().enabled || adapter.descriptor().adapter != provider {
+                    return Err(ApiError::conflict(
+                        "Agent mission provider adapter is disabled or mismatched",
+                    ));
+                }
+
+                (Some(capability.id), input)
             }
             task_type => {
                 return Err(ApiError::conflict(format!(
@@ -1774,11 +1868,11 @@ async fn instantiate_mission(
                     node.id
                 )));
             }
-        }
+        };
 
         let task_id = Uuid::new_v4().to_string();
         let title = format!("Mission node {}", node.id);
-        let payload_json = serde_json::to_string(&node.payload).map_err(|error| {
+        let payload_json = serde_json::to_string(&task_payload).map_err(|error| {
             ApiError::bad_request(format!("Invalid mission node payload: {error}"))
         })?;
         let dependencies_json = serde_json::to_string(&node.depends_on).map_err(|error| {
@@ -1786,8 +1880,8 @@ async fn instantiate_mission(
         })?;
         tx.execute(
             "INSERT INTO tasks (id, title, task_type, capability_id, payload_json, status, approval_required, created_at, updated_at)
-             VALUES (?1, ?2, ?3, NULL, ?4, 'pending_approval', 1, ?5, ?5)",
-            params![task_id, title, node.task_type, payload_json, now],
+             VALUES (?1, ?2, ?3, ?4, ?5, 'pending_approval', 1, ?6, ?6)",
+            params![task_id, title, node.task_type, capability_id, payload_json, now],
         )
         .map_err(|error| ApiError::internal(error.to_string()))?;
         tx.execute(
@@ -1804,6 +1898,7 @@ async fn instantiate_mission(
                 "status": "pending_approval",
                 "mission_id": id,
                 "mission_node_id": node.id,
+                "capability_id": capability_id,
                 "depends_on": node.depends_on
             }),
             "mission",
@@ -1813,6 +1908,7 @@ async fn instantiate_mission(
             "node_id": node.id,
             "task_id": task_id,
             "task_type": node.task_type,
+            "capability_id": capability_id,
             "depends_on": node.depends_on,
             "status": "pending_approval"
         }));
