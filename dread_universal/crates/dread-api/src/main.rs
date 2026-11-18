@@ -2119,14 +2119,7 @@ async fn respond_to_agent_confirmation(
         let latest_action_id = latest_action_payload
             .and_then(|payload| serde_json::from_str::<Value>(&payload).ok())
             .and_then(|event| event.get("id").and_then(Value::as_str).map(str::to_owned));
-        (
-            task.0,
-            task.1,
-            task.2,
-            waiting,
-            responded,
-            latest_action_id,
-        )
+        (task.0, task.1, task.2, waiting, responded, latest_action_id)
     };
 
     if status != "running" || provider.as_deref() != Some("openhands") {
