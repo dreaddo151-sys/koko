@@ -15,8 +15,8 @@ use axum::{
 };
 use dread_agents::{
     AgentAdapter, AgentEvent, AgentTaskState, CapabilityKind, CapabilityProvenance,
-    CapabilityRecord, CapabilityStatus, StartTaskRequest,
-    deerflow::DeerFlowApiAdapter, hermes::HermesApiAdapter,
+    CapabilityRecord, CapabilityStatus, StartTaskRequest, deerflow::DeerFlowApiAdapter,
+    hermes::HermesApiAdapter,
 };
 use dread_discovery::{
     discover, discover_agents, known_agent_endpoints, load_agents, load_services,
@@ -96,7 +96,9 @@ fn build_agent_adapters(
     }
     if let Some(deerflow) = config.deerflow {
         if !deerflow.isolated_workspace_per_task {
-            return Err("DeerFlow requires explicit per-task workspace isolation attestation".into());
+            return Err(
+                "DeerFlow requires explicit per-task workspace isolation attestation".into(),
+            );
         }
         let adapter = DeerFlowApiAdapter::new(
             &deerflow.endpoint,
@@ -3351,7 +3353,11 @@ mod tests {
         };
         let adapters = build_agent_adapters(config).unwrap();
         assert_eq!(adapters.len(), 2);
-        assert!(adapters.values().all(|adapter| adapter.descriptor().enabled));
+        assert!(
+            adapters
+                .values()
+                .all(|adapter| adapter.descriptor().enabled)
+        );
     }
 
     #[tokio::test]
