@@ -1992,7 +1992,9 @@ async fn list_missions(State(state): State<AppState>) -> Result<Json<Value>, Api
         }));
     }
 
-    Ok(Json(json!({"items": items, "count": items.len(), "limit": 100})))
+    Ok(Json(
+        json!({"items": items, "count": items.len(), "limit": 100}),
+    ))
 }
 
 async fn get_mission(
@@ -4345,10 +4347,7 @@ fn app(state: AppState) -> Router {
         .route("/api/system/profile", get(system_profile))
         .route("/api/gpu/health", get(gpu_health))
         .route("/api/gpu/models", get(gpu_models))
-        .route(
-            "/api/missions",
-            get(list_missions).post(create_mission),
-        )
+        .route("/api/missions", get(list_missions).post(create_mission))
         .route(
             "/api/missions/{id}/instantiate",
             axum::routing::post(instantiate_mission),
