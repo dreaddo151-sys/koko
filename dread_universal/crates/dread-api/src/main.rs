@@ -246,6 +246,14 @@ struct TaskRecord {
     updated_at: u64,
 }
 
+struct AgentTaskExecution {
+    task_id: String,
+    provider: String,
+    capability_id: String,
+    payload: Value,
+    initial_event_cursor: u64,
+}
+
 struct QueuedTaskRecovery {
     id: String,
     task_type: String,
@@ -2259,13 +2267,15 @@ fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), 
             .ok_or_else(|| ApiError::conflict("Provider adapter disappeared before dispatch"))?;
         tokio::spawn(execute_agent_task(
             state.clone(),
-            id,
-            provider,
             adapter,
-            task.capability_id.clone().unwrap_or_default(),
-            task.payload.clone(),
+            AgentTaskExecution {
+                task_id: id,
+                provider,
+                capability_id: task.capability_id.clone().unwrap_or_default(),
+                payload: task.payload.clone(),
+                initial_event_cursor: 0,
+            },
             cancel_receiver,
-            0,
         ));
     } else {
         let runner_type = task.task_type.clone();
@@ -2287,14 +2297,17 @@ fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), 
 
 async fn execute_agent_task(
     state: AppState,
-    task_id: String,
-    provider: String,
     adapter: Arc<dyn AgentAdapter>,
-    capability_id: String,
-    payload: Value,
+    execution: AgentTaskExecution,
     mut cancellation: watch::Receiver<bool>,
-    initial_event_cursor: u64,
 ) {
+    let AgentTaskExecution {
+        task_id,
+        provider,
+        capability_id,
+        payload,
+        initial_event_cursor,
+    } = execution;
     let now = now_epoch();
     {
         let Ok(mut conn) = state.db.lock() else {
@@ -3288,13 +3301,15 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
                 .ok_or_else(|| anyhow::anyhow!("Recovered provider adapter disappeared"))?;
             tokio::spawn(execute_agent_task(
                 state.clone(),
-                task.id,
-                provider,
                 adapter,
-                task.capability_id.unwrap_or_default(),
-                task.payload,
+                AgentTaskExecution {
+                    task_id: task.id,
+                    provider,
+                    capability_id: task.capability_id.unwrap_or_default(),
+                    payload: task.payload,
+                    initial_event_cursor: task.provider_event_cursor,
+                },
                 cancel_receiver,
-                task.provider_event_cursor,
             ));
         } else {
             tokio::spawn(execute_approved_task(
