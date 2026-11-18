@@ -5372,6 +5372,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capability_disable_is_atomic_and_audited_with_operator_reason() {
+        let db = Arc::new(Mutex::new(open_database(":memory:").unwrap()));
+        let record = CapabilityRecord {
+            id: "pstack.skill.disable-audit".into(),
+            name: "Disable audit test".into(),
+            kind: CapabilityKind::Skill,
+            description: "Enabled untrusted Markdown context".into(),
+            version: Some("1.0.0".into()),
+            license: Some("MIT".into()),
+            provenance: CapabilityProvenance {
+                source_name: "Pstack".into(),
+                source_uri: None,
+                source_version: None,
+                source_revision: None,
+                imported_at: 100,
+            },
+            compatibility: "review_required".into(),
+            dependencies: Vec::new(),
+            adapter: Some("local.markdown_context".into()),
+            status: CapabilityStatus::Enabled,
+            manifest: json!({
+                "fingerprint": "sha256:example",
+                "approval": {
+                    "approved_by": "prior-operator",
+                    "approved_at": 99,
+                    "reason": "Initial review"
+                }
+            }),
+        };
+        record.validate().unwrap();
+        let encoded = serde_json::to_string(&record).unwrap();
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO capabilities (id, record_json, created_at) VALUES (?1, ?2, ?3)",
+                params![record.id, encoded, record.provenance.imported_at],
+            )
+            .unwrap();
+
+        let (events, _) = broadcast::channel(32);
+        let state = AppState {
+            db: db.clone(),
+            gpu: GpuGatewayClient::new("http://127.0.0.1:1").unwrap(),
+            supervisor: None,
+            events,
+            execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
+            agent_adapters: Arc::new(HashMap::new()),
+            cancellations: Arc::new(Mutex::new(HashMap::new())),
+            api_token: Some("test-token".into()),
+            operator_id: "test-operator".into(),
+            auth_required: true,
+        };
+        let router = app(state);
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/capabilities/pstack.skill.disable-audit/disable")
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"reason": "Retiring this capability pending a security review"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let disabled: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(disabled["item"]["status"], "disabled");
+        assert!(disabled["item"]["manifest"].get("approval").is_none());
+        assert_eq!(disabled["audit_recorded"], true);
+
+        let (event_type, prior_record, reason, actor): (String, String, String, String) = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT event_type, record_json, reason, actor
+                 FROM capability_events WHERE capability_id = ?1",
+                params!["pstack.skill.disable-audit"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(event_type, "disabled");
+        assert_eq!(reason, "Retiring this capability pending a security review");
+        assert_eq!(actor, "test-operator");
+        let prior: CapabilityRecord = serde_json::from_str(&prior_record).unwrap();
+        assert_eq!(prior.status, CapabilityStatus::Enabled);
+        assert!(prior.manifest.get("approval").is_some());
+
+        let history = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/capabilities/pstack.skill.disable-audit/history")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(history.status(), StatusCode::OK);
+        let history_body = to_bytes(history.into_body(), usize::MAX).await.unwrap();
+        let history_json: Value = serde_json::from_slice(&history_body).unwrap();
+        assert_eq!(history_json["count"], 1);
+        assert_eq!(history_json["items"][0]["event_type"], "disabled");
+        assert_eq!(
+            history_json["items"][0]["reason"],
+            "Retiring this capability pending a security review"
+        );
+        assert_eq!(history_json["items"][0]["actor"], "test-operator");
+    }
+
+    #[tokio::test]
     async fn capability_removal_is_audited_and_referenced_records_are_protected() {
         let (router, server) = test_app().await;
         let make_capability = |id: &str| {
