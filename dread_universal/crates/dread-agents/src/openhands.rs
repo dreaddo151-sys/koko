@@ -841,7 +841,8 @@ mod tests {
             Some("LocalWorkspace")
         );
         assert_eq!(
-            body.pointer("/workspace/working_dir").and_then(Value::as_str),
+            body.pointer("/workspace/working_dir")
+                .and_then(Value::as_str),
             Some("/workspace")
         );
         assert_eq!(body["conversation_runtime"], "docker");
@@ -921,10 +922,7 @@ mod tests {
         assert_eq!(payload["agent"]["llm"]["stream"], false);
     }
 
-    async fn waiting_conversation(
-        Path(id): Path<String>,
-        headers: HeaderMap,
-    ) -> Json<Value> {
+    async fn waiting_conversation(Path(id): Path<String>, headers: HeaderMap) -> Json<Value> {
         assert_eq!(
             headers
                 .get("x-session-api-key")
@@ -954,10 +952,7 @@ mod tests {
     #[tokio::test]
     async fn confirmation_response_requires_pending_state_and_uses_authenticated_endpoint() {
         let app = Router::new()
-            .route(
-                "/api/conversations/{id}",
-                get(waiting_conversation),
-            )
+.route("/api/conversations/{id}", get(waiting_conversation))
             .route(
                 "/api/conversations/{id}/events/respond_to_confirmation",
                 post(respond_confirmation),
