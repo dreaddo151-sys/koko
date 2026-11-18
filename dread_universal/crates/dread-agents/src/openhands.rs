@@ -952,7 +952,7 @@ mod tests {
     #[tokio::test]
     async fn confirmation_response_requires_pending_state_and_uses_authenticated_endpoint() {
         let app = Router::new()
-.route("/api/conversations/{id}", get(waiting_conversation))
+            .route("/api/conversations/{id}", get(waiting_conversation))
             .route(
                 "/api/conversations/{id}/events/respond_to_confirmation",
                 post(respond_confirmation),
