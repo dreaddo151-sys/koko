@@ -538,6 +538,27 @@ async fn agents() -> Result<Json<Value>, ApiError> {
     })
 }
 
+async fn agent_adapter_registry(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let mut items: Vec<Value> = state
+        .agent_adapters
+        .iter()
+        .map(|(provider, adapter)| {
+            let descriptor = adapter.descriptor();
+            json!({
+                "provider": provider,
+                "id": descriptor.id,
+                "display_name": descriptor.display_name,
+                "adapter": descriptor.adapter,
+                "version": descriptor.version,
+                "endpoint": descriptor.endpoint,
+                "enabled": descriptor.enabled,
+            })
+        })
+        .collect();
+    items.sort_by(|left, right| left["provider"].as_str().cmp(&right["provider"].as_str()));
+    Ok(Json(json!({"items": items, "count": items.len()})))
+}
+
 async fn list_registry(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let conn = db_lock(&state)?;
     let mut stmt = conn
@@ -3029,6 +3050,7 @@ fn app(state: AppState) -> Router {
         .route("/api/gpu/{*path}", axum::routing::post(gpu_inference))
         .route("/api/services", get(services))
         .route("/api/agents", get(agents))
+        .route("/api/agent-adapters", get(agent_adapter_registry))
         .route(
             "/api/capabilities",
             get(list_capabilities).post(create_capability),
@@ -3358,6 +3380,26 @@ mod tests {
                 .values()
                 .all(|adapter| adapter.descriptor().enabled)
         );
+    }
+
+    #[tokio::test]
+    async fn agent_adapter_registry_exposes_only_configured_providers() {
+        let (router, server) = test_app().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/agent-adapters")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["count"], 0);
+        assert_eq!(value["items"], json!([]));
+        server.abort();
     }
 
     #[tokio::test]
