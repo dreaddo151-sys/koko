@@ -252,6 +252,9 @@ struct QueuedTaskRecovery {
     capability_id: Option<String>,
     approval_required: bool,
     approved_by: Option<String>,
+    payload: Value,
+    agent_provider: Option<String>,
+    provider_event_cursor: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2262,6 +2265,7 @@ fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), 
             task.capability_id.clone().unwrap_or_default(),
             task.payload.clone(),
             cancel_receiver,
+            0,
         ));
     } else {
         let runner_type = task.task_type.clone();
@@ -2289,6 +2293,7 @@ async fn execute_agent_task(
     capability_id: String,
     payload: Value,
     mut cancellation: watch::Receiver<bool>,
+    initial_event_cursor: u64,
 ) {
     let now = now_epoch();
     {
@@ -2345,7 +2350,7 @@ async fn execute_agent_task(
             params![task_id, provider_id, now_epoch()],
         );
     }
-    let mut cursor = 0u64;
+    let mut cursor = initial_event_cursor;
     loop {
         if *cancellation.borrow() {
             match adapter.cancel_task(&task_id, &provider_id).await {
