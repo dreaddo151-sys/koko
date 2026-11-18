@@ -682,7 +682,7 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
                     false,
                 ));
             }
-            let _ = self
+            let response = self
                 .json_request(
                     Method::POST,
                     &format!("/api/conversations/{provider_task_id}/pause"),
@@ -690,6 +690,14 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
                     &[],
                 )
                 .await?;
+            if response.get("success").and_then(Value::as_bool) != Some(true) {
+                return Err(adapter_error(
+                    "provider_cancel_not_confirmed",
+                    "OpenHands Agent Server did not confirm that the conversation was paused"
+                        .into(),
+                    false,
+                ));
+            }
             Ok(AgentTask {
                 task_id: task_id.to_string(),
                 state: AgentTaskState::Cancelled,
