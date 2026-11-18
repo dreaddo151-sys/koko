@@ -4621,7 +4621,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(instantiated.status(), StatusCode::ACCEPTED);
-        let body = to_bytes(instantiated.into_body(), usize::MAX).await.unwrap();
+        let body = to_bytes(instantiated.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
         let task_id = value["item"]["tasks"][0]["task_id"]
             .as_str()
