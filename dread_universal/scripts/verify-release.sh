@@ -27,7 +27,7 @@ if [[ ! -s "$BUNDLE_PATH" || -L "$BUNDLE_PATH" ]]; then
   exit 2
 fi
 
-EXPECTED_IDENTITY_REGEX='^https://github\\.com/dreaddo151-sys/koko/\\.github/workflows/dread-universal-release\\.yml@refs/(tags/v[0-9]+\\.[0-9]+\\.[0-9]+([.-][0-9A-Za-z.-]+)?|heads/main)$'
+EXPECTED_IDENTITY_REGEX='^https://github\.com/dreaddo151-sys/koko/\.github/workflows/dread-universal-release\.yml@refs/(tags/v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?|heads/main)$'
 EXPECTED_OIDC_ISSUER='https://token.actions.githubusercontent.com'
 
 printf 'Verifying release signature and GitHub workflow identity...\n'
