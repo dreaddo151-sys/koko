@@ -5055,21 +5055,21 @@ mod tests {
                 "manifest": {"execution": "never", "review_state": "disabled"}
             })
         };
-        let create = |router: Router, id: &str| async move {
+        let create = |router: Router, id: String| async move {
             router
                 .oneshot(
                     Request::builder()
                         .method("POST")
                         .uri("/api/capabilities")
                         .header("content-type", "application/json")
-                        .body(Body::from(make_capability(id).to_string()))
+                        .body(Body::from(make_capability(&id).to_string()))
                         .unwrap(),
                 )
                 .await
                 .unwrap()
         };
         let referenced_id = "pstack.skill.referenced";
-        let created = create(router.clone(), referenced_id).await;
+        let created = create(router.clone(), referenced_id.to_string()).await;
         assert_eq!(created.status(), StatusCode::CREATED);
 
         let task = router
@@ -5109,7 +5109,7 @@ mod tests {
         assert_eq!(blocked.status(), StatusCode::CONFLICT);
 
         let removable_id = "pstack.skill.removable";
-        let created = create(router.clone(), removable_id).await;
+        let created = create(router.clone(), removable_id.to_string()).await;
         assert_eq!(created.status(), StatusCode::CREATED);
         let removed = router
             .clone()
