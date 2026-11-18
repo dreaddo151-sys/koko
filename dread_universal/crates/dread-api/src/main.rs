@@ -5035,6 +5035,136 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capability_removal_is_audited_and_referenced_records_are_protected() {
+        let (router, server) = test_app().await;
+        let make_capability = |id: &str| {
+            json!({
+                "id": id,
+                "name": format!("Capability {id}"),
+                "kind": "skill",
+                "description": "Disabled Markdown context",
+                "version": "1.0.0",
+                "license": "MIT",
+                "provenance": {
+                    "source_name": "Pstack",
+                    "source_uri": "https://example.invalid/pstack",
+                    "source_version": "0.15.43",
+                    "source_revision": "pinned-revision",
+                    "imported_at": 100
+                },
+                "manifest": {"execution": "never", "review_state": "disabled"}
+            })
+        };
+        let create = |router: Router, id: &str| async move {
+            router
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/capabilities")
+                        .header("content-type", "application/json")
+                        .body(Body::from(make_capability(id).to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        };
+        let referenced_id = "pstack.skill.referenced";
+        let created = create(router.clone(), referenced_id).await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let task = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "title": "Keep referenced capability",
+                            "task_type": "agent_task",
+                            "capability_id": referenced_id,
+                            "payload": {"objective": "test"}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(task.status(), StatusCode::CREATED);
+
+        let blocked = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/capabilities/{referenced_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"reason": "Remove unused source"}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(blocked.status(), StatusCode::CONFLICT);
+
+        let removable_id = "pstack.skill.removable";
+        let created = create(router.clone(), removable_id).await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let removed = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/capabilities/{removable_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"reason": "Operator reviewed and removed this capability"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(removed.status(), StatusCode::OK);
+        let removed_body = to_bytes(removed.into_body(), usize::MAX).await.unwrap();
+        let removed_json: Value = serde_json::from_slice(&removed_body).unwrap();
+        assert_eq!(removed_json["removed"], true);
+        assert_eq!(removed_json["audit_recorded"], true);
+
+        let history = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/capabilities/{removable_id}/history"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(history.status(), StatusCode::OK);
+        let history_body = to_bytes(history.into_body(), usize::MAX).await.unwrap();
+        let history_json: Value = serde_json::from_slice(&history_body).unwrap();
+        assert_eq!(history_json["count"], 1);
+        assert_eq!(history_json["items"][0]["event_type"], "removed");
+        assert_eq!(
+            history_json["items"][0]["reason"],
+            "Operator reviewed and removed this capability"
+        );
+
+        let missing = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/capabilities/{removable_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn capability_batch_import_is_atomic_idempotent_and_never_executes() {
         let (router, server) = test_app().await;
         let make_record = |id: &str, source_hash: &str| {
