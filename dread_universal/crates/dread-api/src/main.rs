@@ -3064,7 +3064,9 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
     let mut emitted = Vec::new();
 
     let interrupted: Vec<String> = {
-        let mut statement = tx.prepare("SELECT id FROM tasks WHERE status = 'running'")?;
+        let mut statement = tx.prepare(
+            "SELECT id FROM tasks WHERE status = 'running' AND agent_provider IS NULL",
+        )?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
@@ -3078,50 +3080,167 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
              WHERE id IN (SELECT mission_id FROM mission_tasks WHERE task_id = ?1)",
             params![task_id],
         )?;
-        let reason = "Task interrupted by API process restart; it was not automatically replayed";
+        let reason = "Task interrupted by API process restart; built-in execution was not automatically replayed";
         tx.execute(
             "INSERT OR REPLACE INTO task_results (task_id, result_json, error, attempts, elapsed_ms, completed_at)
              VALUES (?1, NULL, ?2, 0, 0, ?3)",
             params![task_id, reason, now],
         )?;
-        emitted.push(
-            append_task_event(
-                &tx,
-                &task_id,
-                "task_interrupted",
-                &json!({"status": "failed", "reason": reason}),
-                "recovery",
-                now,
-            )
-            .map_err(|error| anyhow::anyhow!(error.message))?,
-        );
+        emitted.push(append_task_event(
+            &tx,
+            &task_id,
+            "task_interrupted",
+            &json!({"status": "failed", "reason": reason}),
+            "recovery",
+            now,
+        ).map_err(|error| anyhow::anyhow!(error.message))?);
     }
 
-    let queued: Vec<QueuedTaskRecovery> = {
+    let mut resumable = Vec::new();
+    let running_agents: Vec<QueuedTaskRecovery> = {
         let mut statement = tx.prepare(
-            "SELECT id, task_type, capability_id, approval_required, approved_by
-             FROM tasks WHERE status = 'queued'",
+            "SELECT id, task_type, capability_id, approval_required, approved_by, payload_json, agent_provider, provider_event_cursor
+             FROM tasks WHERE status = 'running' AND agent_provider IS NOT NULL",
         )?;
         let rows = statement.query_map([], |row| {
+            let payload: String = row.get(5)?;
             Ok(QueuedTaskRecovery {
                 id: row.get(0)?,
                 task_type: row.get(1)?,
                 capability_id: row.get(2)?,
                 approval_required: row.get::<_, i64>(3)? != 0,
                 approved_by: row.get(4)?,
+                payload: serde_json::from_str(&payload).unwrap_or(Value::Null),
+                agent_provider: row.get(6)?,
+                provider_event_cursor: row.get(7)?,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
 
-    let mut resumable = Vec::new();
-    for task in queued {
-        if task.task_type == "service_discovery"
-            && task.capability_id.is_none()
-            && task.approval_required
-            && task.approved_by.is_some()
+    for task in running_agents {
+        let provider = task.agent_provider.as_deref().unwrap_or_default();
+        let capability_enabled = if let Some(capability_id) = task.capability_id.as_deref() {
+            let encoded: Option<String> = tx.query_row(
+                "SELECT record_json FROM capabilities WHERE id = ?1",
+                params![capability_id],
+                |row| row.get(0),
+            ).optional()?;
+            encoded
+                .and_then(|value| serde_json::from_str::<CapabilityRecord>(&value).ok())
+                .is_some_and(|capability| {
+                    capability.status == CapabilityStatus::Enabled
+                        && capability.adapter.as_deref() == Some(provider)
+                })
+        } else {
+            false
+        };
+        let adapter_enabled = state.agent_adapters.get(provider)
+            .is_some_and(|adapter| adapter.descriptor().enabled);
+        if task.approval_required && task.approved_by.is_some()
+            && capability_enabled && adapter_enabled
         {
-            resumable.push((task.id, task.task_type));
+            tx.execute(
+                "UPDATE tasks SET status = 'queued', updated_at = ?2 WHERE id = ?1 AND status = 'running'",
+                params![task.id, now],
+            )?;
+            emitted.push(append_task_event(
+                &tx,
+                &task.id,
+                "task_recovery_resumed",
+                &json!({"status": "queued", "provider": provider, "provider_event_cursor": task.provider_event_cursor}),
+                "recovery",
+                now,
+            ).map_err(|error| anyhow::anyhow!(error.message))?);
+            resumable.push(task);
+        } else {
+            tx.execute(
+                "UPDATE tasks SET status = 'failed', updated_at = ?2 WHERE id = ?1 AND status = 'running'",
+                params![task.id, now],
+            )?;
+            tx.execute(
+                "UPDATE missions SET status = 'blocked'
+                 WHERE id IN (SELECT mission_id FROM mission_tasks WHERE task_id = ?1)",
+                params![task.id],
+            )?;
+            let reason = "Interrupted agent task cannot be resumed: provider, capability approval, or adapter configuration is no longer valid";
+            tx.execute(
+                "INSERT OR REPLACE INTO task_results (task_id, result_json, error, attempts, elapsed_ms, completed_at)
+                 VALUES (?1, NULL, ?2, 0, 0, ?3)",
+                params![task.id, reason, now],
+            )?;
+            emitted.push(append_task_event(
+                &tx,
+                &task.id,
+                "task_recovery_rejected",
+                &json!({"status": "failed", "reason": reason}),
+                "recovery",
+                now,
+            ).map_err(|error| anyhow::anyhow!(error.message))?);
+        }
+    }
+
+    let queued: Vec<QueuedTaskRecovery> = {
+        let mut statement = tx.prepare(
+            "SELECT id, task_type, capability_id, approval_required, approved_by, payload_json, agent_provider, provider_event_cursor
+             FROM tasks WHERE status = 'queued'",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let payload: String = row.get(5)?;
+            Ok(QueuedTaskRecovery {
+                id: row.get(0)?,
+                task_type: row.get(1)?,
+                capability_id: row.get(2)?,
+                approval_required: row.get::<_, i64>(3)? != 0,
+                approved_by: row.get(4)?,
+                payload: serde_json::from_str(&payload).unwrap_or(Value::Null),
+                agent_provider: row.get(6)?,
+                provider_event_cursor: row.get(7)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    for task in queued {
+        let builtin_eligible = task.task_type == "service_discovery"
+            && task.capability_id.is_none()
+            && task.agent_provider.is_none()
+            && task.approval_required
+            && task.approved_by.is_some();
+        let agent_eligible = if let (Some(provider), Some(capability_id)) =
+            (task.agent_provider.as_deref(), task.capability_id.as_deref())
+        {
+            let encoded: Option<String> = tx.query_row(
+                "SELECT record_json FROM capabilities WHERE id = ?1",
+                params![capability_id],
+                |row| row.get(0),
+            ).optional()?;
+            let capability_enabled = encoded
+                .and_then(|value| serde_json::from_str::<CapabilityRecord>(&value).ok())
+                .is_some_and(|capability| {
+                    capability.status == CapabilityStatus::Enabled
+                        && capability.adapter.as_deref() == Some(provider)
+                });
+            let adapter_enabled = state.agent_adapters.get(provider)
+                .is_some_and(|adapter| adapter.descriptor().enabled);
+            task.approval_required && task.approved_by.is_some()
+                && capability_enabled && adapter_enabled
+        } else {
+            false
+        };
+
+        if builtin_eligible || agent_eligible {
+            if task.agent_provider.is_some() {
+                emitted.push(append_task_event(
+                    &tx,
+                    &task.id,
+                    "task_recovery_resumed",
+                    &json!({"status": "queued", "provider": task.agent_provider}),
+                    "recovery",
+                    now,
+                ).map_err(|error| anyhow::anyhow!(error.message))?);
+            }
+            resumable.push(task);
             continue;
         }
 
@@ -3140,17 +3259,14 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
              VALUES (?1, NULL, ?2, 0, 0, ?3)",
             params![task.id, reason, now],
         )?;
-        emitted.push(
-            append_task_event(
-                &tx,
-                &task.id,
-                "task_recovery_rejected",
-                &json!({"status": "failed", "reason": reason}),
-                "recovery",
-                now,
-            )
-            .map_err(|error| anyhow::anyhow!(error.message))?,
-        );
+        emitted.push(append_task_event(
+            &tx,
+            &task.id,
+            "task_recovery_rejected",
+            &json!({"status": "failed", "reason": reason}),
+            "recovery",
+            now,
+        ).map_err(|error| anyhow::anyhow!(error.message))?);
     }
 
     tx.commit()?;
@@ -3158,23 +3274,40 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
         let _ = state.events.send(event);
     }
 
-    for (task_id, task_type) in &resumable {
+    let recovered_count = resumable.len();
+    for task in resumable {
         let (cancel_sender, cancel_receiver) = watch::channel(false);
         state
             .cancellations
             .lock()
             .map_err(|_| anyhow::anyhow!("Task cancellation registry is unavailable"))?
-            .insert(task_id.clone(), cancel_sender);
-        tokio::spawn(execute_approved_task(
-            state.clone(),
-            task_id.clone(),
-            task_type.clone(),
-            json!({}),
-            cancel_receiver,
-        ));
+            .insert(task.id.clone(), cancel_sender);
+        if let Some(provider) = task.agent_provider {
+            let adapter = state.agent_adapters.get(&provider)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Recovered provider adapter disappeared"))?;
+            tokio::spawn(execute_agent_task(
+                state.clone(),
+                task.id,
+                provider,
+                adapter,
+                task.capability_id.unwrap_or_default(),
+                task.payload,
+                cancel_receiver,
+                task.provider_event_cursor,
+            ));
+        } else {
+            tokio::spawn(execute_approved_task(
+                state.clone(),
+                task.id,
+                task.task_type,
+                task.payload,
+                cancel_receiver,
+            ));
+        }
     }
 
-    Ok(resumable.len())
+    Ok(recovered_count)
 }
 
 async fn get_task_result(
