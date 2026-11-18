@@ -14,8 +14,8 @@ use axum::{
     routing::get,
 };
 use dread_agents::{
-    AgentAdapter, AgentTaskState, StartTaskRequest, CapabilityKind, CapabilityProvenance, CapabilityRecord, CapabilityStatus,
-    deerflow::DeerFlowApiAdapter, hermes::HermesApiAdapter,
+    AgentAdapter, AgentTaskState, CapabilityKind, CapabilityProvenance, CapabilityRecord,
+    CapabilityStatus, StartTaskRequest, deerflow::DeerFlowApiAdapter, hermes::HermesApiAdapter,
 };
 use dread_discovery::{
     discover, discover_agents, known_agent_endpoints, load_agents, load_services,
@@ -402,10 +402,19 @@ fn open_database(path: &str) -> anyhow::Result<Connection> {
          );
          CREATE INDEX IF NOT EXISTS idx_mission_tasks_mission ON mission_tasks(mission_id);",
     )?;
-    for (column, declaration) in [("agent_provider", "TEXT"), ("provider_task_id", "TEXT"), ("provider_event_cursor", "INTEGER NOT NULL DEFAULT 0")] {
-        let columns = conn.prepare("PRAGMA table_info(tasks)")?.query_map([], |row| row.get::<_, String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    for (column, declaration) in [
+        ("agent_provider", "TEXT"),
+        ("provider_task_id", "TEXT"),
+        ("provider_event_cursor", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        let columns = conn
+            .prepare("PRAGMA table_info(tasks)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         if !columns.iter().any(|name| name == column) {
-            conn.execute_batch(&format!("ALTER TABLE tasks ADD COLUMN {column} {declaration};"))?;
+            conn.execute_batch(&format!(
+                "ALTER TABLE tasks ADD COLUMN {column} {declaration};"
+            ))?;
         }
     }
     Ok(conn)
@@ -2088,16 +2097,46 @@ fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), 
         });
     }
     let agent_provider = if let Some(capability_id) = task.capability_id.as_deref() {
-        let encoded: Option<String> = tx.query_row("SELECT record_json FROM capabilities WHERE id = ?1", params![capability_id], |row| row.get(0)).optional().map_err(|error| ApiError::internal(error.to_string()))?;
-        let encoded = encoded.ok_or_else(|| ApiError::not_found("Task capability was not found"))?;
-        let capability: CapabilityRecord = serde_json::from_str(&encoded).map_err(|error| ApiError::internal(format!("Stored capability is invalid: {error}")))?;
-        if capability.status != CapabilityStatus::Enabled { return Err(ApiError::conflict("Capability must be explicitly enabled before dispatch")); }
-        let provider = capability.adapter.as_deref().ok_or_else(|| ApiError::conflict("Enabled capability has no provider adapter"))?;
-        let adapter = state.agent_adapters.get(provider).ok_or_else(|| ApiError::conflict("Capability provider adapter is not configured"))?;
-        if !adapter.descriptor().enabled { return Err(ApiError::conflict("Capability provider adapter is disabled")); }
-        if !matches!(provider, "hermes" | "deerflow") { return Err(ApiError::conflict("No reviewed executor exists for this provider adapter")); }
+        let encoded: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM capabilities WHERE id = ?1",
+                params![capability_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        let encoded =
+            encoded.ok_or_else(|| ApiError::not_found("Task capability was not found"))?;
+        let capability: CapabilityRecord = serde_json::from_str(&encoded).map_err(|error| {
+            ApiError::internal(format!("Stored capability is invalid: {error}"))
+        })?;
+        if capability.status != CapabilityStatus::Enabled {
+            return Err(ApiError::conflict(
+                "Capability must be explicitly enabled before dispatch",
+            ));
+        }
+        let provider = capability
+            .adapter
+            .as_deref()
+            .ok_or_else(|| ApiError::conflict("Enabled capability has no provider adapter"))?;
+        let adapter = state
+            .agent_adapters
+            .get(provider)
+            .ok_or_else(|| ApiError::conflict("Capability provider adapter is not configured"))?;
+        if !adapter.descriptor().enabled {
+            return Err(ApiError::conflict(
+                "Capability provider adapter is disabled",
+            ));
+        }
+        if !matches!(provider, "hermes" | "deerflow") {
+            return Err(ApiError::conflict(
+                "No reviewed executor exists for this provider adapter",
+            ));
+        }
         Some(provider.to_string())
-    } else { None };
+    } else {
+        None
+    };
     if let Some((mission_id, dependencies_json)) = tx
         .query_row(
             "SELECT mission_id, depends_on_json FROM mission_tasks WHERE task_id = ?1",
@@ -2145,28 +2184,32 @@ fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), 
         .map_err(|error| ApiError::internal(error.to_string()))?;
     }
 
-    let runner_name = if let Some(provider) = agent_provider.as_deref() { provider } else { match task.task_type.as_str() {
-        "service_discovery" => "builtin.service_discovery",
-        "gpu_chat" => {
-            validate_gpu_chat_payload(&task.payload).map_err(ApiError::bad_request)?;
-            if state.supervisor.is_none() {
-                return Err(ApiError {
+    let runner_name = if let Some(provider) = agent_provider.as_deref() {
+        provider
+    } else {
+        match task.task_type.as_str() {
+            "service_discovery" => "builtin.service_discovery",
+            "gpu_chat" => {
+                validate_gpu_chat_payload(&task.payload).map_err(ApiError::bad_request)?;
+                if state.supervisor.is_none() {
+                    return Err(ApiError {
                     status: StatusCode::SERVICE_UNAVAILABLE,
                     message: "GPU chat is disabled until the authenticated Python GPU Supervisor bridge is configured".into(),
                 });
+                }
+                "builtin.gpu_chat"
             }
-            "builtin.gpu_chat"
+            _ => {
+                return Err(ApiError {
+                    status: StatusCode::CONFLICT,
+                    message: format!(
+                        "No reviewed built-in runner is registered for task type '{}'",
+                        task.task_type
+                    ),
+                });
+            }
         }
-        _ => {
-            return Err(ApiError {
-                status: StatusCode::CONFLICT,
-                message: format!(
-                    "No reviewed built-in runner is registered for task type '{}'",
-                    task.task_type
-                ),
-            });
-        }
-    }};
+    };
 
     let changed = tx
         .execute(
@@ -2206,12 +2249,30 @@ fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), 
         .map_err(|_| ApiError::internal("Task cancellation registry is unavailable"))?
         .insert(id.clone(), cancel_sender);
     if let Some(provider) = agent_provider {
-        let adapter = state.agent_adapters.get(&provider).cloned().ok_or_else(|| ApiError::conflict("Provider adapter disappeared before dispatch"))?;
-        tokio::spawn(execute_agent_task(state.clone(), id, provider, adapter, task.capability_id.clone().unwrap_or_default(), task.payload.clone(), cancel_receiver));
+        let adapter = state
+            .agent_adapters
+            .get(&provider)
+            .cloned()
+            .ok_or_else(|| ApiError::conflict("Provider adapter disappeared before dispatch"))?;
+        tokio::spawn(execute_agent_task(
+            state.clone(),
+            id,
+            provider,
+            adapter,
+            task.capability_id.clone().unwrap_or_default(),
+            task.payload.clone(),
+            cancel_receiver,
+        ));
     } else {
         let runner_type = task.task_type.clone();
         let runner_payload = task.payload.clone();
-        tokio::spawn(execute_approved_task(state.clone(), id, runner_type, runner_payload, cancel_receiver));
+        tokio::spawn(execute_approved_task(
+            state.clone(),
+            id,
+            runner_type,
+            runner_payload,
+            cancel_receiver,
+        ));
     }
 
     Ok((
@@ -2220,81 +2281,203 @@ fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), 
     ))
 }
 
-async fn execute_agent_task(state: AppState, task_id: String, provider: String, adapter: Arc<dyn AgentAdapter>, capability_id: String, payload: Value, mut cancellation: watch::Receiver<bool>) {
+async fn execute_agent_task(
+    state: AppState,
+    task_id: String,
+    provider: String,
+    adapter: Arc<dyn AgentAdapter>,
+    capability_id: String,
+    payload: Value,
+    mut cancellation: watch::Receiver<bool>,
+) {
     let now = now_epoch();
     {
-        let Ok(mut conn) = state.db.lock() else { return };
+        let Ok(mut conn) = state.db.lock() else {
+            return;
+        };
         let Ok(tx) = conn.transaction() else { return };
         let Ok(changed) = tx.execute("UPDATE tasks SET status = 'running', updated_at = ?2 WHERE id = ?1 AND status = 'queued'", params![task_id, now]) else { return };
-        if changed != 1 { return; }
-        let Ok(event) = append_task_event(&tx, &task_id, "task_started", &json!({"runner": provider, "capability_id": capability_id}), "executor", now) else { return };
-        if tx.commit().is_err() { return; }
+        if changed != 1 {
+            return;
+        }
+        let Ok(event) = append_task_event(
+            &tx,
+            &task_id,
+            "task_started",
+            &json!({"runner": provider, "capability_id": capability_id}),
+            "executor",
+            now,
+        ) else {
+            return;
+        };
+        if tx.commit().is_err() {
+            return;
+        }
         let _ = state.events.send(event);
     }
-    let request = StartTaskRequest { task_id: task_id.clone(), capability_id, input: payload, idempotency_key: format!("project-dread:{task_id}") };
+    let request = StartTaskRequest {
+        task_id: task_id.clone(),
+        capability_id,
+        input: payload,
+        idempotency_key: format!("project-dread:{task_id}"),
+    };
     let started = tokio::select! { result = adapter.start_task(request) => result, _ = cancellation.changed() => { finish_agent_task(&state, &task_id, "cancelled", None, Some("Cancelled before provider submission".into())); return; } };
-    let started = match started { Ok(task) => task, Err(error) => { finish_agent_task(&state, &task_id, "failed", None, Some(error.to_string())); return; } };
-    let Some(provider_id) = started.provider_task_id else { finish_agent_task(&state, &task_id, "failed", None, Some("Provider returned no task identifier".into())); return; };
-    if let Ok(conn) = state.db.lock() { let _ = conn.execute("UPDATE tasks SET provider_task_id = ?2, updated_at = ?3 WHERE id = ?1", params![task_id, provider_id, now_epoch()]); }
+    let started = match started {
+        Ok(task) => task,
+        Err(error) => {
+            finish_agent_task(&state, &task_id, "failed", None, Some(error.to_string()));
+            return;
+        }
+    };
+    let Some(provider_id) = started.provider_task_id else {
+        finish_agent_task(
+            &state,
+            &task_id,
+            "failed",
+            None,
+            Some("Provider returned no task identifier".into()),
+        );
+        return;
+    };
+    if let Ok(conn) = state.db.lock() {
+        let _ = conn.execute(
+            "UPDATE tasks SET provider_task_id = ?2, updated_at = ?3 WHERE id = ?1",
+            params![task_id, provider_id, now_epoch()],
+        );
+    }
     let mut cursor = 0u64;
     loop {
         if *cancellation.borrow() {
             match adapter.cancel_task(&task_id, &provider_id).await {
-                Ok(task) => finish_agent_task(&state, &task_id, "cancelled", task.result, task.error),
-                Err(error) => finish_agent_task(&state, &task_id, "failed", None, Some(format!("Provider cancellation failed: {error}"))),
+                Ok(task) => {
+                    finish_agent_task(&state, &task_id, "cancelled", task.result, task.error)
+                }
+                Err(error) => finish_agent_task(
+                    &state,
+                    &task_id,
+                    "failed",
+                    None,
+                    Some(format!("Provider cancellation failed: {error}")),
+                ),
             }
             return;
         }
         match adapter.events(&task_id, &provider_id, cursor).await {
-            Ok(events) => for event in events {
-                cursor = cursor.max(event.sequence);
-                if let Ok(mut conn) = state.db.lock()
-                    && let Ok(tx) = conn.transaction()
-                {
-                    let _ = tx.execute(
-                        "UPDATE tasks SET provider_event_cursor = ?2 WHERE id = ?1",
-                        params![task_id, cursor],
-                    );
-                    if let Ok(local) = append_task_event(
-                        &tx,
-                        &task_id,
-                        &event.event_type,
-                        &event.payload,
-                        &provider,
-                        event.occurred_at,
-                    ) && tx.commit().is_ok()
+            Ok(events) => {
+                for event in events {
+                    cursor = cursor.max(event.sequence);
+                    if let Ok(mut conn) = state.db.lock()
+                        && let Ok(tx) = conn.transaction()
                     {
-                        let _ = state.events.send(local);
+                        let _ = tx.execute(
+                            "UPDATE tasks SET provider_event_cursor = ?2 WHERE id = ?1",
+                            params![task_id, cursor],
+                        );
+                        if let Ok(local) = append_task_event(
+                            &tx,
+                            &task_id,
+                            &event.event_type,
+                            &event.payload,
+                            &provider,
+                            event.occurred_at,
+                        ) && tx.commit().is_ok()
+                        {
+                            let _ = state.events.send(local);
+                        }
                     }
                 }
-            },
-            Err(error) => { finish_agent_task(&state, &task_id, "failed", None, Some(format!("Provider event polling failed: {error}"))); return; }
+            }
+            Err(error) => {
+                finish_agent_task(
+                    &state,
+                    &task_id,
+                    "failed",
+                    None,
+                    Some(format!("Provider event polling failed: {error}")),
+                );
+                return;
+            }
         }
         match adapter.task_status(&task_id, &provider_id).await {
-            Ok(task) if matches!(task.state, AgentTaskState::Succeeded | AgentTaskState::Failed | AgentTaskState::Cancelled) => {
-                let result = adapter.task_result(&task_id, &provider_id).await.unwrap_or(task);
-                let status = match result.state { AgentTaskState::Succeeded => "completed", AgentTaskState::Cancelled => "cancelled", _ => "failed" };
+            Ok(task)
+                if matches!(
+                    task.state,
+                    AgentTaskState::Succeeded | AgentTaskState::Failed | AgentTaskState::Cancelled
+                ) =>
+            {
+                let result = adapter
+                    .task_result(&task_id, &provider_id)
+                    .await
+                    .unwrap_or(task);
+                let status = match result.state {
+                    AgentTaskState::Succeeded => "completed",
+                    AgentTaskState::Cancelled => "cancelled",
+                    _ => "failed",
+                };
                 finish_agent_task(&state, &task_id, status, result.result, result.error);
                 return;
             }
-            Ok(_) => {},
-            Err(error) => { finish_agent_task(&state, &task_id, "failed", None, Some(format!("Provider status polling failed: {error}"))); return; }
+            Ok(_) => {}
+            Err(error) => {
+                finish_agent_task(
+                    &state,
+                    &task_id,
+                    "failed",
+                    None,
+                    Some(format!("Provider status polling failed: {error}")),
+                );
+                return;
+            }
         }
         tokio::select! { _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}, _ = cancellation.changed() => {} }
     }
 }
 
-fn finish_agent_task(state: &AppState, task_id: &str, status: &str, result: Option<Value>, error: Option<String>) {
+fn finish_agent_task(
+    state: &AppState,
+    task_id: &str,
+    status: &str,
+    result: Option<Value>,
+    error: Option<String>,
+) {
     let now = now_epoch();
-    let Ok(mut conn) = state.db.lock() else { return };
+    let Ok(mut conn) = state.db.lock() else {
+        return;
+    };
     let Ok(tx) = conn.transaction() else { return };
-    let current: Option<String> = tx.query_row("SELECT status FROM tasks WHERE id = ?1", params![task_id], |row| row.get(0)).optional().ok().flatten();
-    if !matches!(current.as_deref(), Some("running" | "cancelled")) { return; }
-    let final_status = if current.as_deref() == Some("cancelled") { "cancelled" } else { status };
+    let current: Option<String> = tx
+        .query_row(
+            "SELECT status FROM tasks WHERE id = ?1",
+            params![task_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    if !matches!(current.as_deref(), Some("running" | "cancelled")) {
+        return;
+    }
+    let final_status = if current.as_deref() == Some("cancelled") {
+        "cancelled"
+    } else {
+        status
+    };
     let result_json = result.as_ref().map(Value::to_string);
-    if tx.execute("UPDATE tasks SET status = ?2, updated_at = ?3 WHERE id = ?1", params![task_id, final_status, now]).is_err() { return; }
+    if tx
+        .execute(
+            "UPDATE tasks SET status = ?2, updated_at = ?3 WHERE id = ?1",
+            params![task_id, final_status, now],
+        )
+        .is_err()
+    {
+        return;
+    }
     if tx.execute("INSERT OR REPLACE INTO task_results (task_id, result_json, error, attempts, elapsed_ms, completed_at) VALUES (?1, ?2, ?3, 1, 0, ?4)", params![task_id, result_json, error, now]).is_err() { return; }
-    let event_type = match final_status { "completed" => "task_succeeded", "cancelled" => "task_execution_cancelled", _ => "task_failed" };
+    let event_type = match final_status {
+        "completed" => "task_succeeded",
+        "cancelled" => "task_execution_cancelled",
+        _ => "task_failed",
+    };
     if let Ok(event) = append_task_event(
         &tx,
         task_id,
@@ -2306,7 +2489,9 @@ fn finish_agent_task(state: &AppState, task_id: &str, status: &str, result: Opti
     {
         let _ = state.events.send(event);
     }
-    if let Ok(mut registry) = state.cancellations.lock() { registry.remove(task_id); }
+    if let Ok(mut registry) = state.cancellations.lock() {
+        registry.remove(task_id);
+    }
 }
 
 fn validate_gpu_chat_payload(payload: &Value) -> Result<(), String> {
