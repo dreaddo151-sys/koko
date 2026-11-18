@@ -312,7 +312,8 @@ impl AgentAdapter for HermesApiAdapter {
             {
                 return Err(adapter_error(
                     "invalid_task_id",
-                    "DREAD task id must contain 1-160 ASCII letters, digits, '.', '_' or '-'".into(),
+                    "DREAD task id must contain 1-160 ASCII letters, digits, '.', '_' or '-'"
+                        .into(),
                     false,
                 ));
             }
@@ -323,11 +324,7 @@ impl AgentAdapter for HermesApiAdapter {
                     false,
                 ));
             }
-            let input_fields = [
-                "input",
-                "instructions",
-                "conversation_history",
-            ];
+            let input_fields = ["input", "instructions", "conversation_history"];
             if request.input.as_object().is_none_or(|object| {
                 object
                     .keys()
@@ -715,14 +712,10 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_caller_selected_hermes_sessions_before_network_access() {
-        let adapter = HermesApiAdapter::new(
-            "http://127.0.0.1:8642",
-            "test-api-key",
-            "Hermes",
-        )
-        .unwrap()
-        .attest_sandbox("docker", true)
-        .unwrap();
+        let adapter = HermesApiAdapter::new("http://127.0.0.1:8642", "test-api-key", "Hermes")
+            .unwrap()
+            .attest_sandbox("docker", true)
+            .unwrap();
         let result = adapter
             .start_task(StartTaskRequest {
                 task_id: "dread-task-2".into(),
@@ -736,14 +729,10 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_run_input_fields_before_network_access() {
-        let adapter = HermesApiAdapter::new(
-            "http://127.0.0.1:8642",
-            "test-api-key",
-            "Hermes",
-        )
-        .unwrap()
-        .attest_sandbox("docker", true)
-        .unwrap();
+        let adapter = HermesApiAdapter::new("http://127.0.0.1:8642", "test-api-key", "Hermes")
+            .unwrap()
+            .attest_sandbox("docker", true)
+            .unwrap();
         let request = StartTaskRequest {
             task_id: "dread-task-1".into(),
             capability_id: "hermes.run".into(),
