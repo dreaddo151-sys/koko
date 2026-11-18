@@ -760,7 +760,9 @@ pub fn detect_host() -> HostProfile {
             .zip(topology.sockets)
             .map(|(cores, sockets)| cores.saturating_mul(sockets))
     });
-    let cpu_logical_threads = topology.logical_threads.or_else(|| cpu_logical_threads(&cpuinfo));
+    let cpu_logical_threads = topology
+        .logical_threads
+        .or_else(|| cpu_logical_threads(&cpuinfo));
     let cuda_version = nvidia.as_deref().and_then(nvidia_cuda_version);
     let cuda_toolkits = cuda_toolkits();
     let cuda_toolkit_version = cuda_toolkits.first().map(|toolkit| toolkit.version.clone());

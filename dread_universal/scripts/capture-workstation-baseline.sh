@@ -60,6 +60,12 @@ OUT="$BASE_DIR/workstation-baseline-$STAMP.txt"
     code="$(curl --connect-timeout 2 --max-time 3 --silent --output /dev/null --write-out '%{http_code}' "$url" 2>/dev/null || true)"
     printf '%s: HTTP %s\n' "$label" "${code:-unreachable}"
   done
+  printf '\n=== CPU TOPOLOGY ===\n'
+  if command -v lscpu >/dev/null 2>&1; then
+    lscpu --json 2>&1 || lscpu 2>&1 || true
+  else
+    grep -E '^(processor|model name|physical id|core id):' /proc/cpuinfo 2>&1 || true
+  fi
   printf '\n=== NVIDIA DEVICES / LINK STATE ===\n'
   printf 'PCIe current link values are a point-in-time snapshot; idle power-saving downshift is expected. Validate link generation/width only under sustained GPU load.\n'
   if command -v nvidia-smi >/dev/null 2>&1; then
