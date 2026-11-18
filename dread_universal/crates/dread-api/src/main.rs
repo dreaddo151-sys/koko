@@ -341,6 +341,11 @@ struct AgentConfirmationResponse {
     expected_action_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct RemoveCapability {
+    reason: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct TaskEvent {
     task_id: String,
@@ -452,6 +457,17 @@ fn open_database(path: &str) -> anyhow::Result<Connection> {
              record_json TEXT NOT NULL,
              created_at INTEGER NOT NULL
          );
+         CREATE TABLE IF NOT EXISTS capability_events (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             capability_id TEXT NOT NULL,
+             event_type TEXT NOT NULL,
+             record_json TEXT NOT NULL,
+             reason TEXT NOT NULL,
+             actor TEXT NOT NULL,
+             created_at INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_capability_events_capability
+             ON capability_events(capability_id, id DESC);
          CREATE TABLE IF NOT EXISTS task_results (
              task_id TEXT PRIMARY KEY NOT NULL REFERENCES tasks(id),
              result_json TEXT,
@@ -1322,6 +1338,117 @@ async fn disable_capability(
     .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(Json(json!({"item": record, "execution": "never"})))
+}
+
+async fn remove_capability(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<RemoveCapability>,
+) -> Result<Json<Value>, ApiError> {
+    let reason = input.reason.trim();
+    let actor = state.operator_id.trim();
+    if reason.is_empty() || reason.len() > 2000 || actor.is_empty() || actor.len() > 160 {
+        return Err(ApiError::bad_request(
+            "A valid operator and removal reason of 1 to 2000 characters are required",
+        ));
+    }
+
+    let now = now_epoch();
+    let mut conn = db_lock(&state)?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let encoded: String = tx
+        .query_row(
+            "SELECT record_json FROM capabilities WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("Capability not found"))?;
+    let record: CapabilityRecord = serde_json::from_str(&encoded)
+        .map_err(|error| ApiError::internal(format!("Stored capability is invalid: {error}")))?;
+    if !matches!(
+        record.status,
+        CapabilityStatus::Disabled | CapabilityStatus::Rejected
+    ) {
+        return Err(ApiError::conflict(
+            "Only disabled or rejected capabilities can be removed",
+        ));
+    }
+
+    let referenced: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE capability_id = ?1)",
+            params![id],
+            |row| row.get(0),
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if referenced {
+        return Err(ApiError::conflict(
+            "Capability is referenced by task history and cannot be removed",
+        ));
+    }
+
+    tx.execute(
+        "INSERT INTO capability_events
+            (capability_id, event_type, record_json, reason, actor, created_at)
+         VALUES (?1, 'removed', ?2, ?3, ?4, ?5)",
+        params![id, encoded, reason, actor, now],
+    )
+    .map_err(|error| ApiError::internal(error.to_string()))?;
+    let audit_event_id = tx.last_insert_rowid();
+
+    let removed = tx
+        .execute("DELETE FROM capabilities WHERE id = ?1", params![id])
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if removed != 1 {
+        return Err(ApiError::conflict(
+            "Capability changed while the removal was being committed",
+        ));
+    }
+    tx.commit()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+
+    Ok(Json(json!({
+        "id": id,
+        "removed": true,
+        "audit_recorded": true,
+        "audit_event_id": audit_event_id,
+        "execution": "never"
+    })))
+}
+
+async fn capability_history(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT id, event_type, reason, actor, created_at
+             FROM capability_events
+             WHERE capability_id = ?1
+             ORDER BY id DESC
+             LIMIT 100",
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let rows = statement
+        .query_map(params![id], |row| {
+            Ok(json!({
+                "event_id": row.get::<_, i64>(0)?,
+                "event_type": row.get::<_, String>(1)?,
+                "reason": row.get::<_, String>(2)?,
+                "actor": row.get::<_, String>(3)?,
+                "created_at": row.get::<_, u64>(4)?
+            }))
+        })
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let items = rows
+        .collect::<rusqlite::Result<Vec<Value>>>()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(json!({"items": items, "count": items.len()})))
 }
 
 fn append_task_event(
@@ -3865,7 +3992,14 @@ fn app(state: AppState) -> Router {
             "/api/capabilities/{id}/disable",
             axum::routing::post(disable_capability),
         )
-        .route("/api/capabilities/{id}", get(get_capability))
+        .route(
+            "/api/capabilities/{id}/history",
+            get(capability_history),
+        )
+        .route(
+            "/api/capabilities/{id}",
+            get(get_capability).delete(remove_capability),
+        )
         .route("/api/registry", get(list_registry).post(create_registry))
         .route(
             "/api/registry/{id}",
