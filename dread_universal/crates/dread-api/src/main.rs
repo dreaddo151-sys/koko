@@ -346,6 +346,11 @@ struct RemoveCapability {
     reason: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct RefreshCapabilities {
+    reason: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct TaskEvent {
     task_id: String,
@@ -1057,14 +1062,20 @@ async fn discover_pstack_skills() -> Result<Json<Value>, ApiError> {
     })))
 }
 
-async fn import_discovered_skills(
-    State(state): State<AppState>,
-) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let root = pstack_skills_root()?;
-    let skills = discover_skills(&root).map_err(|e| ApiError::bad_request(e.to_string()))?;
-    let agents =
-        discover_agent_profiles(&root).map_err(|e| ApiError::bad_request(e.to_string()))?;
-    let now = now_epoch();
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalCapabilityRefreshOutcome {
+    Created,
+    Unchanged,
+    Updated,
+}
+
+fn local_pstack_capability_records(
+    root: &FsPath,
+    imported_at: u64,
+) -> Result<Vec<CapabilityRecord>, ApiError> {
+    let skills = discover_skills(root).map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let agents = discover_agent_profiles(root)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
     let source_revision = env::var("DREAD_PSTACK_REVISION")
         .ok()
         .filter(|value| !value.trim().is_empty());
@@ -1072,55 +1083,27 @@ async fn import_discovered_skills(
         .ok()
         .filter(|value| !value.trim().is_empty());
 
-    let mut discovered = Vec::new();
+    let mut records = Vec::with_capacity(skills.len() + agents.len());
     for item in skills {
-        discovered.push((
-            CapabilityKind::Skill,
-            item.id,
-            item.name,
-            item.description,
-            item.relative_path,
-            item.fingerprint,
-        ));
-    }
-    for item in agents {
-        discovered.push((
-            CapabilityKind::Agent,
-            item.id,
-            item.name,
-            item.description,
-            item.relative_path,
-            item.fingerprint,
-        ));
-    }
-
-    let mut conn = db_lock(&state)?;
-    let tx = conn
-        .transaction()
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-    let mut imported = 0usize;
-    let mut already_present = 0usize;
-
-    for (kind, id, name, description, relative_path, fingerprint) in &discovered {
-        let record = CapabilityRecord {
-            id: id.clone(),
-            name: name.clone(),
-            kind: *kind,
-            description: description.clone(),
+        records.push(CapabilityRecord {
+            id: item.id,
+            name: item.name,
+            kind: CapabilityKind::Skill,
+            description: item.description,
             version: source_version.clone(),
             license: None,
             provenance: pstack_local_provenance(
                 source_version.clone(),
                 source_revision.clone(),
-                now,
+                imported_at,
             ),
             compatibility: "review_required".into(),
             dependencies: Vec::new(),
             adapter: Some("local.markdown_context".into()),
             status: CapabilityStatus::Disabled,
             manifest: json!({
-                "source_relative_path": relative_path,
-                "fingerprint": fingerprint,
+                "source_relative_path": item.relative_path,
+                "fingerprint": item.fingerprint,
                 "fingerprint_algorithm": "sha256",
                 "trust": "untrusted_context",
                 "source_verification": "unverified_local_copy",
@@ -1128,34 +1111,275 @@ async fn import_discovered_skills(
                 "execution": "never",
                 "approval": null
             }),
-        };
-        record
-            .validate()
-            .map_err(|e| ApiError::bad_request(e.to_string()))?;
-        let encoded =
-            serde_json::to_string(&record).map_err(|e| ApiError::internal(e.to_string()))?;
-        let changed = tx
-            .execute(
-                "INSERT OR IGNORE INTO capabilities (id, record_json, created_at) VALUES (?1, ?2, ?3)",
-                params![record.id, encoded, now],
-            )
-            .map_err(|e| ApiError::internal(e.to_string()))?;
-
-        if changed == 1 {
-            imported += 1;
-        } else {
-            already_present += 1;
-        }
+        });
+    }
+    for item in agents {
+        records.push(CapabilityRecord {
+            id: item.id,
+            name: item.name,
+            kind: CapabilityKind::Agent,
+            description: item.description,
+            version: source_version.clone(),
+            license: None,
+            provenance: pstack_local_provenance(
+                source_version.clone(),
+                source_revision.clone(),
+                imported_at,
+            ),
+            compatibility: "review_required".into(),
+            dependencies: Vec::new(),
+            adapter: Some("local.markdown_context".into()),
+            status: CapabilityStatus::Disabled,
+            manifest: json!({
+                "source_relative_path": item.relative_path,
+                "fingerprint": item.fingerprint,
+                "fingerprint_algorithm": "sha256",
+                "trust": "untrusted_context",
+                "source_verification": "unverified_local_copy",
+                "revision_claim": if source_revision.is_some() { "operator_supplied_unverified" } else { "not_supplied" },
+                "execution": "never",
+                "approval": null
+            }),
+        });
     }
 
-    tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
+    for record in &records {
+        record
+            .validate()
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        let fingerprint = record
+            .manifest
+            .get("fingerprint")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if fingerprint.len() != 71 || !fingerprint.starts_with("sha256:") {
+            return Err(ApiError::bad_request(
+                "Local Pstack content fingerprint is not a SHA-256 digest",
+            ));
+        }
+    }
+    Ok(records)
+}
+
+/// Synchronize one local, explicitly unverified Markdown record inside a single DB
+/// transaction. A changed record can only be replaced while disabled and unreferenced.
+fn refresh_local_capability_record(
+    tx: &Transaction<'_>,
+    record: &CapabilityRecord,
+    reason: &str,
+    actor: &str,
+    now: u64,
+) -> Result<LocalCapabilityRefreshOutcome, ApiError> {
+    if record.status != CapabilityStatus::Disabled
+        || !matches!(record.kind, CapabilityKind::Skill | CapabilityKind::Agent)
+        || record.provenance.source_name != "Pstack local filesystem copy"
+        || record.manifest.get("source_verification").and_then(Value::as_str)
+            != Some("unverified_local_copy")
+        || record.manifest.get("execution").and_then(Value::as_str) != Some("never")
+        || record.manifest.get("fingerprint_algorithm").and_then(Value::as_str) != Some("sha256")
+    {
+        return Err(ApiError::bad_request(
+            "Refresh accepts only disabled-by-default local Pstack Markdown context records",
+        ));
+    }
+    record
+        .validate()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+
+    let proposed_json = serde_json::to_string(record)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let existing_json = tx
+        .query_row(
+            "SELECT record_json FROM capabilities WHERE id = ?1",
+            params![record.id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+
+    let Some(existing_json) = existing_json else {
+        tx.execute(
+            "INSERT INTO capabilities (id, record_json, created_at) VALUES (?1, ?2, ?3)",
+            params![record.id, proposed_json, now],
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+        tx.execute(
+            "INSERT INTO capability_events
+                (capability_id, event_type, record_json, reason, actor, created_at)
+             VALUES (?1, 'imported', ?2, ?3, ?4, ?5)",
+            params![record.id, proposed_json, reason, actor, now],
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+        return Ok(LocalCapabilityRefreshOutcome::Created);
+    };
+
+    let existing: CapabilityRecord = serde_json::from_str(&existing_json)
+        .map_err(|error| ApiError::internal(format!("Stored capability is invalid: {error}")))?;
+    let mut normalized_existing = existing.clone();
+    normalized_existing.status = CapabilityStatus::Disabled;
+    normalized_existing.provenance.imported_at = record.provenance.imported_at;
+    if let Some(manifest) = normalized_existing.manifest.as_object_mut() {
+        manifest.remove("approval");
+    }
+    if normalized_existing == *record {
+        return Ok(LocalCapabilityRefreshOutcome::Unchanged);
+    }
+
+    if existing.provenance.source_name != "Pstack local filesystem copy"
+        || existing.manifest.get("source_verification").and_then(Value::as_str)
+            != Some("unverified_local_copy")
+        || existing.kind != record.kind
+    {
+        return Err(ApiError::conflict(
+            "Existing capability is not the same local Pstack source type; it cannot be refreshed automatically",
+        ));
+    }
+    if existing.status != CapabilityStatus::Disabled {
+        return Err(ApiError::conflict(
+            "Changed source content can only refresh a disabled capability; disable or reject it explicitly first",
+        ));
+    }
+
+    let referenced: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE capability_id = ?1)",
+            params![record.id],
+            |row| row.get(0),
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if referenced {
+        return Err(ApiError::conflict(
+            "Changed capability is referenced by task history and cannot be refreshed",
+        ));
+    }
+
+    tx.execute(
+        "INSERT INTO capability_events
+            (capability_id, event_type, record_json, reason, actor, created_at)
+         VALUES (?1, 'source_refreshed', ?2, ?3, ?4, ?5)",
+        params![record.id, existing_json, reason, actor, now],
+    )
+    .map_err(|error| ApiError::internal(error.to_string()))?;
+    let changed = tx
+        .execute(
+            "UPDATE capabilities SET record_json = ?2 WHERE id = ?1",
+            params![record.id, proposed_json],
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if changed != 1 {
+        return Err(ApiError::conflict(
+            "Capability changed while its source refresh was being committed",
+        ));
+    }
+    Ok(LocalCapabilityRefreshOutcome::Updated)
+}
+
+async fn import_discovered_skills(
+    State(state): State<AppState>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let root = pstack_skills_root()?;
+    let records = local_pstack_capability_records(&root, now_epoch())?;
+    let mut conn = db_lock(&state)?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let mut imported = 0usize;
+    let mut already_present = 0usize;
+
+    for record in &records {
+        let existing_json = tx
+            .query_row(
+                "SELECT record_json FROM capabilities WHERE id = ?1",
+                params![record.id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        if let Some(existing_json) = existing_json {
+            let mut existing: CapabilityRecord = serde_json::from_str(&existing_json)
+                .map_err(|error| ApiError::internal(format!("Stored capability is invalid: {error}")))?;
+            existing.status = CapabilityStatus::Disabled;
+            existing.provenance.imported_at = record.provenance.imported_at;
+            if let Some(manifest) = existing.manifest.as_object_mut() {
+                manifest.remove("approval");
+            }
+            if existing != *record {
+                return Err(ApiError::conflict(format!(
+                    "Capability {} has changed local source content; use the audited refresh action",
+                    record.id
+                )));
+            }
+            already_present += 1;
+            continue;
+        }
+
+        let encoded = serde_json::to_string(record)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        tx.execute(
+            "INSERT INTO capabilities (id, record_json, created_at) VALUES (?1, ?2, ?3)",
+            params![record.id, encoded, record.provenance.imported_at],
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+        imported += 1;
+    }
+
+    tx.commit()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok((
         StatusCode::CREATED,
         Json(json!({
-            "source": "Pstack",
-            "discovered": discovered.len(),
+            "source": "Pstack local filesystem copy",
+            "discovered": records.len(),
             "imported": imported,
             "already_present": already_present,
+            "status": "disabled",
+            "execution": "never"
+        })),
+    ))
+}
+
+async fn refresh_discovered_capabilities(
+    State(state): State<AppState>,
+    Json(input): Json<RefreshCapabilities>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let reason = input.reason.trim();
+    let actor = state.operator_id.trim();
+    if reason.is_empty() || reason.len() > 2000 || actor.is_empty() || actor.len() > 160 {
+        return Err(ApiError::bad_request(
+            "A valid operator and refresh reason of 1 to 2000 characters are required",
+        ));
+    }
+
+    let root = pstack_skills_root()?;
+    let records = local_pstack_capability_records(&root, now_epoch())?;
+    let now = now_epoch();
+    let mut conn = db_lock(&state)?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+
+    let mut created = 0usize;
+    let mut updated = 0usize;
+    let mut unchanged = 0usize;
+    for record in &records {
+        match refresh_local_capability_record(&tx, record, reason, actor, now)? {
+            LocalCapabilityRefreshOutcome::Created => created += 1,
+            LocalCapabilityRefreshOutcome::Updated => updated += 1,
+            LocalCapabilityRefreshOutcome::Unchanged => unchanged += 1,
+        }
+    }
+
+    tx.commit()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "source": "Pstack local filesystem copy",
+            "discovered": records.len(),
+            "created": created,
+            "updated": updated,
+            "unchanged": unchanged,
+            "execution_started": false,
             "status": "disabled",
             "execution": "never"
         })),
@@ -4379,6 +4603,10 @@ fn app(state: AppState) -> Router {
             axum::routing::post(import_discovered_skills),
         )
         .route(
+            "/api/capabilities/refresh",
+            axum::routing::post(refresh_discovered_capabilities),
+        )
+        .route(
             "/api/capabilities/import-batch",
             axum::routing::post(import_capability_batch),
         )
@@ -5757,6 +5985,173 @@ mod tests {
         assert_eq!(event.event_type, "task_created");
         assert_eq!(event.sequence, 1);
         server.abort();
+    }
+
+    fn local_skill_record_for_test(fingerprint: &str, status: CapabilityStatus) -> CapabilityRecord {
+        CapabilityRecord {
+            id: "pstack.skill.refresh-test".into(),
+            name: "Refresh test skill".into(),
+            kind: CapabilityKind::Skill,
+            description: "Local context fixture".into(),
+            version: Some("0.1".into()),
+            license: None,
+            provenance: pstack_local_provenance(Some("0.1".into()), None, 100),
+            compatibility: "review_required".into(),
+            dependencies: Vec::new(),
+            adapter: Some("local.markdown_context".into()),
+            status,
+            manifest: json!({
+                "source_relative_path": "skills/refresh-test/SKILL.md",
+                "fingerprint": fingerprint,
+                "fingerprint_algorithm": "sha256",
+                "trust": "untrusted_context",
+                "source_verification": "unverified_local_copy",
+                "revision_claim": "not_supplied",
+                "execution": "never",
+                "approval": null
+            }),
+        }
+    }
+
+    #[test]
+    fn local_pstack_refresh_updates_disabled_source_and_audits_previous_record() {
+        let mut conn = open_database(":memory:").unwrap();
+        let old = local_skill_record_for_test(
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            CapabilityStatus::Disabled,
+        );
+        let new = local_skill_record_for_test(
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            CapabilityStatus::Disabled,
+        );
+        let old_json = serde_json::to_string(&old).unwrap();
+        conn.execute(
+            "INSERT INTO capabilities (id, record_json, created_at) VALUES (?1, ?2, ?3)",
+            params![old.id, old_json, 100],
+        )
+        .unwrap();
+
+        let tx = conn.transaction().unwrap();
+        assert_eq!(
+            refresh_local_capability_record(
+                &tx,
+                &new,
+                "operator reviewed source update",
+                "test-operator",
+                200,
+            )
+            .unwrap(),
+            LocalCapabilityRefreshOutcome::Updated
+        );
+        tx.commit().unwrap();
+
+        let stored: String = conn
+            .query_row(
+                "SELECT record_json FROM capabilities WHERE id = ?1",
+                params![new.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let stored: CapabilityRecord = serde_json::from_str(&stored).unwrap();
+        assert_eq!(
+            stored.manifest["fingerprint"].as_str(),
+            Some("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+        assert_eq!(stored.status, CapabilityStatus::Disabled);
+
+        let event: (String, String, String, String) = conn
+            .query_row(
+                "SELECT event_type, record_json, reason, actor FROM capability_events
+                 WHERE capability_id = ?1 ORDER BY id DESC LIMIT 1",
+                params![new.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(event.0, "source_refreshed");
+        let previous: CapabilityRecord = serde_json::from_str(&event.1).unwrap();
+        assert_eq!(
+            previous.manifest["fingerprint"].as_str(),
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert_eq!(event.2, "operator reviewed source update");
+        assert_eq!(event.3, "test-operator");
+    }
+
+    #[test]
+    fn local_pstack_refresh_rejects_changed_enabled_or_task_referenced_records() {
+        let mut conn = open_database(":memory:").unwrap();
+        let old_enabled = local_skill_record_for_test(
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            CapabilityStatus::Enabled,
+        );
+        let mut approved = old_enabled.clone();
+        approved.manifest["approval"] = json!({
+            "approved_by": "test-operator",
+            "approved_at": 100,
+            "reason": "previous review"
+        });
+        let new = local_skill_record_for_test(
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            CapabilityStatus::Disabled,
+        );
+        conn.execute(
+            "INSERT INTO capabilities (id, record_json, created_at) VALUES (?1, ?2, ?3)",
+            params![approved.id, serde_json::to_string(&approved).unwrap(), 100],
+        )
+        .unwrap();
+        let tx = conn.transaction().unwrap();
+        let error = refresh_local_capability_record(
+            &tx,
+            &new,
+            "source refresh attempt",
+            "test-operator",
+            200,
+        )
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        drop(tx);
+
+        let task_record = local_skill_record_for_test(
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            CapabilityStatus::Disabled,
+        );
+        conn.execute(
+            "UPDATE capabilities SET record_json = ?2 WHERE id = ?1",
+            params![task_record.id, serde_json::to_string(&task_record).unwrap()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks
+                (id, title, task_type, capability_id, payload_json, status, approval_required, created_at, updated_at)
+             VALUES ('task-refresh-reference', 'Historical task', 'agent_task', ?1, '{}', 'completed', 1, 100, 100)",
+            params![task_record.id],
+        )
+        .unwrap();
+
+        let tx = conn.transaction().unwrap();
+        let error = refresh_local_capability_record(
+            &tx,
+            &new,
+            "source refresh attempt",
+            "test-operator",
+            300,
+        )
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        drop(tx);
+
+        let unchanged: String = conn
+            .query_row(
+                "SELECT record_json FROM capabilities WHERE id = ?1",
+                params![task_record.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let unchanged: CapabilityRecord = serde_json::from_str(&unchanged).unwrap();
+        assert_eq!(
+            unchanged.manifest["fingerprint"].as_str(),
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
     }
 
     #[test]
