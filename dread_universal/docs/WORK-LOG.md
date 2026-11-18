@@ -1,6 +1,6 @@
 # PROJECT DREAD UNIVERSAL — Work Log and Handoff
 
-**Updated:** 2026-11-17  
+**Updated:** 2026-11-18  
 **Read together with:** `MASTER-PLAN.md`
 
 ## 1. Product constraints
@@ -17,7 +17,7 @@
 - Branch: `feature/universal-capability-discovery-clean-2026-11-17`.
 - Base: `work/futuristic-command-center-2026-11-17`.
 - Last checked: open, not merged, mergeable true; 37 commits, 19 files, 1,822 additions, 112 deletions.
-- Last checked head: `2168dc5366b9edc161e4940193751528b084e69e`.
+- Last checked head: `36e09c1ab59c4955518379166785ccd732277059` (adapter implementation candidate; documentation commits may advance PR HEAD without changing that tested implementation).
 - PR adds read-only host discovery, llama.cpp gateway config, OpenHands/LangGraph health probes, Pstack skill/profile discovery/import/preview/enable/disable and UI controls.
 - No PR #12 workflow run/status was reported at that check. Do not claim its new source passed CI.
 - GitHub branch edits are not a workstation install.
@@ -388,3 +388,16 @@ Do not repeat basic GPU enumeration, generic API health or standalone llama.cpp 
 - Audited the repository's 5,915-line `legacy-reference/dread_web_hub.py` and recorded its route families, Rust API overlap, reference-source security observations and safe side-by-side migration sequence in `LEGACY-HUB-COMPATIBILITY.md`.
 - **Gate 1 remains blocked:** the reference snapshot is not verified against the actual live `/mnt/sabrent/dread_workspace/dread_web_hub.py`; the Rust API does not provide full route/payload parity for chat, upload/media, workspace/visual tools, agent sessions/approvals or all legacy build routes. Do not switch the live hub based on the reference snapshot.
 - **Physical acceptance remains outstanding:** lscpu parser and package CI pass do not prove the current candidate's reported CPU topology, CUDA inventory or physical disks on the user's workstation.
+
+
+## Hermes and DeerFlow adapter implementation — 2026-11-18
+
+- Added `dread-agents::hermes::HermesApiAdapter` for the documented Hermes Runs API. It uses loopback-IP HTTP only, explicit bearer API key, no redirects, bounded payloads/responses, idempotency keys, run status/events/stop/result methods and local/provider task ID separation.
+- Hermes is disabled by default. A caller must explicitly attest a supported isolated terminal backend and per-task workspace before capabilities or task submission are enabled. DREAD task ID determines the Hermes session ID; caller-selected shared session IDs and prior-response chains are rejected to avoid cross-task conversation/workspace reuse.
+- Added `dread-agents::deerflow::DeerFlowApiAdapter` for the thread-scoped Gateway API. It uses loopback endpoint restriction, PAT bearer auth, strict API prefix, bounded payloads, deterministic per-task thread IDs, idempotent run creation, status/events/cancel/result and local/provider identity separation.
+- DeerFlow is disabled until the operator attests an isolated container-backed provider and one thread/workspace per DREAD task. LocalSandboxProvider is denied. The attestation rejects a configured remote/Kubernetes provisioner; AIO and BoxLite are the only supported provider classes.
+- Added mock HTTP lifecycle tests for both adapters plus endpoint, auth, sandbox denial, status mapping, idempotency, sequence replay, input bounds and task identity regressions.
+- CI run #605 (`44208381646`) passed all three jobs on implementation candidate `36e09c1ab59c4955518379166785ccd732277059`: Rust / Ubuntu 24.04, Web console / Ubuntu 24.04 and Ubuntu packages / smoke test.
+- Follow-up documentation commit `a8ccca71fe5342daf1e709399be65a7a945ec963` records the acceptance boundary. The PR HEAD may be newer than the implementation candidate because the docs are committed separately.
+
+**Not completed:** adapters are still library-only and are not wired into `dread-api` task/mission registration or execution dispatch. OpenHands has discovery/health probing only; its live task adapter remains outstanding. No Hermes, DeerFlow or OpenHands service was contacted on the physical workstation. Mock HTTP tests do not prove live provider behavior, sandbox isolation, cancellation of real work or recovery after provider/server restart. Phase 4 remains partial.
