@@ -109,8 +109,8 @@ function App() {
   const enableSkill=async()=>{
     if(!skillPreview)return;setBusy(true);setError("");
     try{
-      await api(`/api/capabilities/${encodeURIComponent(skillPreview.id)}/enable`,token,{method:"POST",body:JSON.stringify({reason:"Reviewed the displayed Markdown source in DREAD Universal Console; enable as untrusted model context only."})});
-      setNotice(`Enabled ${skillPreview.name} as untrusted model context. No code execution is permitted.`);
+      const out=await api<{audit_recorded:boolean;audit_event_id:number}>(`/api/capabilities/${encodeURIComponent(skillPreview.id)}/enable`,token,{method:"POST",body:JSON.stringify({reason:"Reviewed the displayed Markdown source in DREAD Universal Console; enable as untrusted model context only."})});
+      setNotice(`Enabled ${skillPreview.name} as untrusted model context. Audit event #${out.audit_event_id} was retained; no code execution is permitted.`);
       setSkillPreview(null);await refresh();
     }catch(e){setError(e instanceof Error?e.message:"Skill approval failed");}
     finally{setBusy(false);}
