@@ -1151,11 +1151,7 @@ mod tests {
             Json(json!({"success": false}))
         }
 
-        let app = Router::new()
-            .route(
-                "/api/conversations/{id}/pause",
-                post(pause_refused),
-            );
+        let app = Router::new().route("/api/conversations/{id}/pause", post(pause_refused));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1173,10 +1169,7 @@ mod tests {
         .unwrap();
 
         let task_id = "00000000-0000-4000-8000-000000000002";
-        let error = adapter
-            .cancel_task(task_id, task_id)
-            .await
-            .unwrap_err();
+        let error = adapter.cancel_task(task_id, task_id).await.unwrap_err();
 
         assert_eq!(error.code, "provider_cancel_not_confirmed");
         server.abort();
