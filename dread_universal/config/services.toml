@@ -17,3 +17,9 @@ id = "llama-cpp"
 name = "llama.cpp GPU Gateway"
 url = "http://127.0.0.1:11500/api/tags"
 role = "local-inference"
+
+[[services]]
+id = "gpu-supervisor-bridge"
+name = "DREAD Authenticated GPU Supervisor Bridge"
+url = "http://127.0.0.1:11502/health"
+role = "gpu-lifecycle-control"
