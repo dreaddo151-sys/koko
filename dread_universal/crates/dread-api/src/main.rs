@@ -13,7 +13,11 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use dread_agents::{CapabilityKind, CapabilityProvenance, CapabilityRecord, CapabilityStatus};
+use dread_agents::{
+    AgentAdapter, AgentEvent, AgentTaskState, CapabilityKind, CapabilityProvenance,
+    CapabilityRecord, CapabilityStatus, StartTaskRequest,
+    deerflow::DeerFlowApiAdapter, hermes::HermesApiAdapter,
+};
 use dread_discovery::{
     discover, discover_agents, known_agent_endpoints, load_agents, load_services,
 };
@@ -47,10 +51,111 @@ struct AppState {
     supervisor: Option<GpuSupervisorClient>,
     events: broadcast::Sender<TaskEvent>,
     execution: ExecutionGate,
+    agent_adapters: Arc<HashMap<String, Arc<dyn AgentAdapter>>>,
     cancellations: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     api_token: Option<String>,
     operator_id: String,
     auth_required: bool,
+}
+
+#[derive(Default)]
+struct AgentAdapterConfig {
+    hermes: Option<HermesAdapterConfig>,
+    deerflow: Option<DeerFlowAdapterConfig>,
+}
+
+struct HermesAdapterConfig {
+    endpoint: String,
+    api_key: String,
+    terminal_backend: String,
+    isolated_workspace_per_task: bool,
+}
+
+struct DeerFlowAdapterConfig {
+    endpoint: String,
+    api_prefix: String,
+    pat: String,
+    provider_class: String,
+    isolated_workspace_per_task: bool,
+    provisioner_url: Option<String>,
+}
+
+fn build_agent_adapters(
+    config: AgentAdapterConfig,
+) -> Result<HashMap<String, Arc<dyn AgentAdapter>>, String> {
+    let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
+    if let Some(hermes) = config.hermes {
+        if !hermes.isolated_workspace_per_task {
+            return Err("Hermes requires explicit per-task workspace isolation attestation".into());
+        }
+        let adapter = HermesApiAdapter::new(&hermes.endpoint, hermes.api_key, "Hermes")
+            .map_err(|error| error.to_string())?
+            .attest_sandbox(&hermes.terminal_backend, true)
+            .map_err(|error| error.to_string())?;
+        adapters.insert("hermes".into(), Arc::new(adapter));
+    }
+    if let Some(deerflow) = config.deerflow {
+        if !deerflow.isolated_workspace_per_task {
+            return Err("DeerFlow requires explicit per-task workspace isolation attestation".into());
+        }
+        let adapter = DeerFlowApiAdapter::new(
+            &deerflow.endpoint,
+            &deerflow.api_prefix,
+            deerflow.pat,
+            "DeerFlow",
+        )
+        .map_err(|error| error.to_string())?
+        .attest_container_sandbox(
+            &deerflow.provider_class,
+            true,
+            deerflow.provisioner_url.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
+        adapters.insert("deerflow".into(), Arc::new(adapter));
+    }
+    Ok(adapters)
+}
+
+fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn AgentAdapter>>> {
+    let mut config = AgentAdapterConfig::default();
+    let hermes_keys = [
+        "DREAD_HERMES_API_URL",
+        "DREAD_HERMES_API_KEY",
+        "DREAD_HERMES_SANDBOX_BACKEND",
+        "DREAD_HERMES_ISOLATED_WORKSPACE_PER_TASK",
+    ];
+    if hermes_keys.iter().any(|key| env::var_os(key).is_some()) {
+        config.hermes = Some(HermesAdapterConfig {
+            endpoint: env::var("DREAD_HERMES_API_URL")?,
+            api_key: env::var("DREAD_HERMES_API_KEY")?,
+            terminal_backend: env::var("DREAD_HERMES_SANDBOX_BACKEND")?,
+            isolated_workspace_per_task: env::var("DREAD_HERMES_ISOLATED_WORKSPACE_PER_TASK")
+                .is_ok_and(|value| value == "true"),
+        });
+    }
+
+    let deerflow_keys = [
+        "DREAD_DEERFLOW_API_URL",
+        "DREAD_DEERFLOW_PAT",
+        "DREAD_DEERFLOW_SANDBOX_PROVIDER",
+        "DREAD_DEERFLOW_ISOLATED_WORKSPACE_PER_TASK",
+        "DREAD_DEERFLOW_API_PREFIX",
+        "DREAD_DEERFLOW_PROVISIONER_URL",
+    ];
+    if deerflow_keys.iter().any(|key| env::var_os(key).is_some()) {
+        config.deerflow = Some(DeerFlowAdapterConfig {
+            endpoint: env::var("DREAD_DEERFLOW_API_URL")?,
+            api_prefix: env::var("DREAD_DEERFLOW_API_PREFIX")
+                .unwrap_or_else(|_| "/api/langgraph".into()),
+            pat: env::var("DREAD_DEERFLOW_PAT")?,
+            provider_class: env::var("DREAD_DEERFLOW_SANDBOX_PROVIDER")?,
+            isolated_workspace_per_task: env::var("DREAD_DEERFLOW_ISOLATED_WORKSPACE_PER_TASK")
+                .is_ok_and(|value| value == "true"),
+            provisioner_url: env::var("DREAD_DEERFLOW_PROVISIONER_URL").ok(),
+        });
+    }
+
+    build_agent_adapters(config).map_err(anyhow::Error::msg)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -3013,6 +3118,7 @@ async fn main() -> anyhow::Result<()> {
         info!("GPU inference is disabled until the Python GPU Supervisor bridge is configured");
     }
     let db = open_database(&db_path)?;
+    let agent_adapters = Arc::new(load_agent_adapters_from_env()?);
     let (events, _) = broadcast::channel(256);
     let state = AppState {
         db: Arc::new(Mutex::new(db)),
@@ -3021,6 +3127,7 @@ async fn main() -> anyhow::Result<()> {
         events,
         execution: ExecutionGate::new(ExecutionConfig::default())
             .map_err(|error| anyhow::anyhow!("Invalid execution configuration: {error:?}"))?,
+        agent_adapters,
         cancellations: Arc::new(Mutex::new(HashMap::new())),
         api_token,
         operator_id,
@@ -3178,6 +3285,7 @@ mod tests {
                 ),
                 events,
                 execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
+                agent_adapters: Arc::new(HashMap::new()),
                 cancellations: Arc::new(Mutex::new(HashMap::new())),
                 api_token,
                 operator_id: "test-operator".to_string(),
@@ -3412,6 +3520,7 @@ mod tests {
             supervisor: None,
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
+            agent_adapters: Arc::new(HashMap::new()),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             api_token: Some("test-token".to_string()),
             operator_id: "test-operator".to_string(),
