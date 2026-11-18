@@ -1873,7 +1873,7 @@ async fn instantiate_mission(
                     ));
                 }
 
-                let provider = resolve_agent_provider(&state, &tx, requested_capability)?;
+                resolve_agent_provider(&state, &tx, requested_capability)?;
                 (Some(requested_capability.to_string()), input)
             }
             task_type => {
