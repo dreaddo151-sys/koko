@@ -1145,6 +1145,43 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn does_not_report_cancellation_when_openhands_pause_returns_false() {
+        async fn pause_refused() -> Json<Value> {
+            Json(json!({"success": false}))
+        }
+
+        let app = Router::new()
+            .route(
+                "/api/conversations/{id}/pause",
+                post(pause_refused),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let adapter = OpenHandsAgentServerAdapter::new(
+            &format!("http://{address}"),
+            "session-secret",
+            "test/model",
+            "llm-secret",
+            "http://host.docker.internal:11500/v1",
+            "OpenHands test",
+        )
+        .unwrap()
+        .attest_docker_runtime(true, true)
+        .unwrap();
+
+        let task_id = "00000000-0000-4000-8000-000000000002";
+        let error = adapter
+            .cancel_task(task_id, task_id)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, "provider_cancel_not_confirmed");
+        server.abort();
+    }
+
     #[test]
     fn rejects_remote_servers_and_non_gateway_llm_endpoints() {
         assert!(
