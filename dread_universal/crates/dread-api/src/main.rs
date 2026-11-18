@@ -452,6 +452,20 @@ fn open_database(path: &str) -> anyhow::Result<Connection> {
          );
          CREATE INDEX IF NOT EXISTS idx_tasks_status_created ON tasks(status, created_at);
          CREATE INDEX IF NOT EXISTS idx_task_events_task_sequence ON task_events(task_id, sequence);
+         CREATE TABLE IF NOT EXISTS agent_action_confirmations (
+             task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+             action_id TEXT NOT NULL,
+             decision_state TEXT NOT NULL CHECK(decision_state IN ('pending', 'accepted', 'rejected', 'uncertain')),
+             accepted INTEGER NOT NULL,
+             reason TEXT NOT NULL,
+             approved_by TEXT NOT NULL,
+             provider_error TEXT,
+             created_at INTEGER NOT NULL,
+             updated_at INTEGER NOT NULL,
+             PRIMARY KEY(task_id, action_id)
+         );
+         CREATE INDEX IF NOT EXISTS idx_agent_action_confirmations_state
+             ON agent_action_confirmations(task_id, decision_state);
          CREATE TABLE IF NOT EXISTS capabilities (
              id TEXT PRIMARY KEY NOT NULL,
              record_json TEXT NOT NULL,
@@ -2178,6 +2192,110 @@ async fn approve_task(
     Ok(Json(json!({"item": task, "execution_started": false})))
 }
 
+fn reserve_agent_confirmation(
+    state: &AppState,
+    task_id: &str,
+    action_id: &str,
+    accepted: bool,
+    reason: &str,
+    approved_by: &str,
+) -> Result<(), ApiError> {
+    let now = now_epoch();
+    let mut conn = db_lock(state)?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let exists: bool = tx
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM agent_action_confirmations
+                WHERE task_id = ?1 AND action_id = ?2
+            )",
+            params![task_id, action_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if exists {
+        return Err(ApiError::conflict(
+            "A decision for this OpenHands action has already been submitted",
+        ));
+    }
+    tx.execute(
+        "INSERT INTO agent_action_confirmations
+            (task_id, action_id, decision_state, accepted, reason, approved_by, created_at, updated_at)
+         VALUES (?1, ?2, 'pending', ?3, ?4, ?5, ?6, ?6)",
+        params![task_id, action_id, accepted, reason, approved_by, now],
+    )
+    .map_err(|error| ApiError::internal(error.to_string()))?;
+    let event = append_task_event(
+        &tx,
+        task_id,
+        "agent_confirmation_pending",
+        &json!({
+            "action_id": action_id,
+            "accepted": accepted,
+            "approved_by": approved_by
+        }),
+        approved_by,
+        now,
+    )?;
+    tx.commit()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let _ = state.events.send(event);
+    Ok(())
+}
+
+fn finish_agent_confirmation_reservation(
+    state: &AppState,
+    task_id: &str,
+    action_id: &str,
+    decision_state: &str,
+    event_type: &str,
+    event_payload: &Value,
+    provider_error: Option<&str>,
+    release: bool,
+    actor: &str,
+) -> Result<(), ApiError> {
+    let now = now_epoch();
+    let mut conn = db_lock(state)?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let changed = if release {
+        tx.execute(
+            "DELETE FROM agent_action_confirmations
+             WHERE task_id = ?1 AND action_id = ?2 AND decision_state = 'pending'",
+            params![task_id, action_id],
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?
+    } else {
+        tx.execute(
+            "UPDATE agent_action_confirmations
+             SET decision_state = ?3, provider_error = ?4, updated_at = ?5
+             WHERE task_id = ?1 AND action_id = ?2 AND decision_state = 'pending'",
+            params![task_id, action_id, decision_state, provider_error, now],
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?
+    };
+    if changed != 1 {
+        return Err(ApiError::conflict(
+            "OpenHands confirmation reservation is no longer pending",
+        ));
+    }
+    let event = append_task_event(
+        &tx,
+        task_id,
+        event_type,
+        event_payload,
+        actor,
+        now,
+    )?;
+    tx.commit()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let _ = state.events.send(event);
+    Ok(())
+}
+
 async fn respond_to_agent_confirmation(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -2274,40 +2392,104 @@ async fn respond_to_agent_confirmation(
             status: StatusCode::SERVICE_UNAVAILABLE,
             message: "OpenHands adapter is not configured".into(),
         })?;
-    let current = adapter
-        .task_status(&id, &provider_task_id)
-        .await
-        .map_err(|error| ApiError {
-            status: StatusCode::BAD_GATEWAY,
-            message: format!("Could not verify OpenHands confirmation state: {error}"),
-        })?;
+
+    // Reserve the action before any provider network call. A durable primary
+    // key prevents concurrent/replayed browser requests from approving twice.
+    reserve_agent_confirmation(
+        &state,
+        &id,
+        expected_action_id,
+        input.accept,
+        reason,
+        approved_by,
+    )?;
+
+    let current = match adapter.task_status(&id, &provider_task_id).await {
+        Ok(task) => task,
+        Err(error) => {
+            finish_agent_confirmation_reservation(
+                &state,
+                &id,
+                expected_action_id,
+                "released",
+                "agent_confirmation_released",
+                &json!({"action_id": expected_action_id, "reason": "provider status could not be verified before submission"}),
+                None,
+                true,
+                approved_by,
+            )?;
+            return Err(ApiError {
+                status: StatusCode::BAD_GATEWAY,
+                message: format!("Could not verify OpenHands confirmation state: {error}"),
+            });
+        }
+    };
     if current.state != AgentTaskState::WaitingForConfirmation {
+        finish_agent_confirmation_reservation(
+            &state,
+            &id,
+            expected_action_id,
+            "released",
+            "agent_confirmation_released",
+            &json!({"action_id": expected_action_id, "reason": "provider is no longer waiting; no decision was submitted"}),
+            None,
+            true,
+            approved_by,
+        )?;
         return Err(ApiError::conflict(
             "OpenHands is no longer waiting for confirmation; refresh the mission trace",
         ));
     }
-    adapter
+
+    if let Err(error) = adapter
         .respond_to_confirmation(&id, &provider_task_id, input.accept, reason)
         .await
-        .map_err(|error| ApiError {
+    {
+        let detail = error.to_string();
+        finish_agent_confirmation_reservation(
+            &state,
+            &id,
+            expected_action_id,
+            "uncertain",
+            "agent_confirmation_uncertain",
+            &json!({
+                "action_id": expected_action_id,
+                "accepted": input.accept,
+                "approved_by": approved_by,
+                "message": "Provider response outcome is uncertain. Do not retry this action; inspect provider state or cancel the task."
+            }),
+            Some(&detail),
+            false,
+            approved_by,
+        )?;
+        return Err(ApiError {
             status: StatusCode::BAD_GATEWAY,
-            message: format!("OpenHands confirmation response failed: {error}"),
-        })?;
-    persist_task_event(
+            message: format!("OpenHands confirmation response failed; outcome marked uncertain: {error}"),
+        });
+    }
+
+    let final_state = if input.accept { "accepted" } else { "rejected" };
+    finish_agent_confirmation_reservation(
         &state,
         &id,
+        expected_action_id,
+        if input.accept { "accepted" } else { "rejected" },
         "agent_confirmation_response",
         &json!({
+            "action_id": expected_action_id,
             "accepted": input.accept,
             "reason": reason,
             "approved_by": approved_by
         }),
+        None,
+        false,
         approved_by,
     )?;
     Ok(Json(json!({
         "success": true,
         "task_id": id,
-        "accepted": input.accept
+        "accepted": input.accept,
+        "decision_state": final_state
     })))
 }
 
