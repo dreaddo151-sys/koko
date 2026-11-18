@@ -61,6 +61,7 @@ pub struct StartTaskRequest {
 pub enum AgentTaskState {
     Queued,
     Running,
+    WaitingForConfirmation,
     Succeeded,
     Failed,
     Cancelled,
@@ -132,6 +133,24 @@ pub trait AgentAdapter: Send + Sync {
         task_id: &'a str,
         provider_task_id: &'a str,
     ) -> AdapterFuture<'a, AgentTask>;
+    /// Accept or reject a provider action that is currently waiting for
+    /// operator confirmation. Providers without interactive approval support
+    /// fail closed by default.
+    fn respond_to_confirmation<'a>(
+        &'a self,
+        _task_id: &'a str,
+        _provider_task_id: &'a str,
+        _accept: bool,
+        _reason: &'a str,
+    ) -> AdapterFuture<'a, ()> {
+        Box::pin(async {
+            Err(AgentAdapterError {
+                code: "unsupported_confirmation".into(),
+                message: "This provider does not support interactive confirmations".into(),
+                retryable: false,
+            })
+        })
+    }
     fn task_result<'a>(
         &'a self,
         task_id: &'a str,
