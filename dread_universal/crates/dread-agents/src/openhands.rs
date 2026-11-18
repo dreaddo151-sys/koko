@@ -576,10 +576,7 @@ mod tests {
         http::HeaderMap,
         routing::{get, post},
     };
-    use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    };
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::net::TcpListener;
 
     async fn ready() -> &'static str {
