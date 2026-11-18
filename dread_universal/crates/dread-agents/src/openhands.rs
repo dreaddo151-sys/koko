@@ -188,6 +188,33 @@ impl OpenHandsAgentServerAdapter {
         }
     }
 
+    async fn require_docker_runtime(&self) -> Result<(), AgentAdapterError> {
+        let server_info = match self
+            .json_request(Method::GET, "/server_info", None, &[])
+            .await
+        {
+            Ok(value) => value,
+            Err(error) if error.code == "not_found" => {
+                return Err(adapter_error(
+                    "docker_runtime_unavailable",
+                    "OpenHands does not expose /server_info; refusing to assume Docker runtime availability".into(),
+                    false,
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+
+        if server_supports_docker_runtime(&server_info) {
+            Ok(())
+        } else {
+            Err(adapter_error(
+                "docker_runtime_unavailable",
+                "OpenHands Agent Server reports no selectable or active Docker conversation runtime".into(),
+                false,
+            ))
+        }
+    }
+
     async fn json_request(
         &self,
         method: Method,
@@ -452,19 +479,27 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
                     )
                 })?;
             let status = response.status();
+            let docker_runtime_available =
+                status.is_success() && self.require_docker_runtime().await.is_ok();
             Ok(AgentHealth {
-                state: if status.is_success() {
+                state: if docker_runtime_available {
                     AgentHealthState::Online
-                } else if status.is_server_error() || status == StatusCode::SERVICE_UNAVAILABLE {
+                } else if status.is_success()
+                    || status.is_server_error()
+                    || status == StatusCode::SERVICE_UNAVAILABLE
+                {
                     AgentHealthState::Degraded
                 } else {
                     AgentHealthState::Unknown
                 },
                 checked_at: now_epoch(),
-                detail: Some(format!(
-                    "OpenHands /ready returned HTTP {}",
-                    status.as_u16()
-                )),
+                detail: Some(if docker_runtime_available {
+                    "OpenHands /ready succeeded and Docker runtime is available".into()
+                } else if status.is_success() {
+                    "OpenHands is ready but Docker runtime availability could not be verified".into()
+                } else {
+                    format!("OpenHands /ready returned HTTP {}", status.as_u16())
+                }),
             })
         })
     }
@@ -472,6 +507,9 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
     fn capabilities<'a>(&'a self) -> AdapterFuture<'a, Vec<AgentCapability>> {
         Box::pin(async move {
             if !self.sandbox_attested || !self.secret_store_attested || !self.descriptor.enabled {
+                return Ok(Vec::new());
+            }
+            if self.require_docker_runtime().await.is_err() {
                 return Ok(Vec::new());
             }
             Ok(vec![AgentCapability {
@@ -501,6 +539,7 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
                 return Ok(self.to_task(&request.task_id, &existing));
             }
             let body = self.start_payload(&request)?;
+            self.require_docker_runtime().await?;
             match self
                 .json_request(Method::POST, "/api/conversations", Some(body), &[])
                 .await
@@ -751,6 +790,16 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
     }
 }
 
+fn server_supports_docker_runtime(server_info: &Value) -> bool {
+    if server_info.get("conversation_runtime").and_then(Value::as_str) == Some("docker") {
+        return true;
+    }
+    server_info
+        .get("available_conversation_runtimes")
+        .and_then(Value::as_array)
+        .is_some_and(|runtimes| runtimes.iter().any(|runtime| runtime.as_str() == Some("docker")))
+}
+
 fn validate_task_id(task_id: &str) -> Result<(), AgentAdapterError> {
     let bytes = task_id.as_bytes();
     if bytes.len() != 36
@@ -824,6 +873,19 @@ mod tests {
         "ready"
     }
 
+    async fn docker_server_info(headers: HeaderMap) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("x-session-api-key")
+                .and_then(|value| value.to_str().ok()),
+            Some("session-secret")
+        );
+        Json(json!({
+            "conversation_runtime": "local",
+            "available_conversation_runtimes": ["local", "docker"]
+        }))
+    }
+
     async fn create_conversation(headers: HeaderMap, Json(body): Json<Value>) -> Json<Value> {
         assert_eq!(
             headers
@@ -893,6 +955,25 @@ mod tests {
 
     async fn pause() -> Json<Value> {
         Json(json!({"success": true}))
+    }
+
+    #[test]
+    fn server_runtime_metadata_must_prove_docker_availability() {
+        assert!(server_supports_docker_runtime(&json!({
+            "conversation_runtime": "docker",
+            "available_conversation_runtimes": []
+        })));
+        assert!(server_supports_docker_runtime(&json!({
+            "conversation_runtime": "local",
+            "available_conversation_runtimes": ["local", "docker"]
+        })));
+        assert!(!server_supports_docker_runtime(&json!({
+            "conversation_runtime": "local",
+            "available_conversation_runtimes": ["local"]
+        })));
+        assert!(!server_supports_docker_runtime(&json!({
+            "available_conversation_runtimes": ["local"]
+        })));
     }
 
     #[test]
@@ -996,6 +1077,7 @@ mod tests {
         let created = Arc::new(AtomicBool::new(false));
         let app = Router::new()
             .route("/ready", get(ready))
+            .route("/server_info", get(docker_server_info))
             .route("/api/conversations", post(create_conversation))
             .route("/api/conversations/{id}", get(get_conversation))
             .route("/api/conversations/{id}/events/search", get(events_search))
