@@ -37,7 +37,9 @@ jobs:
       - name: Format and inspect Rust changes
         run: |
           cargo fmt --all
-          git diff -- dread_universal/crates/dread-api/src/main.rs
+          printf 'DREAD_FORMATTED_MAIN_BEGIN\\n'
+          base64 -w0 crates/dread-api/src/main.rs
+          printf '\\nDREAD_FORMATTED_MAIN_END\\n'
           cargo fmt --all -- --check
       - name: Lint
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
