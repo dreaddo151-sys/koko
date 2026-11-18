@@ -1,9 +1,9 @@
 //! OpenHands Agent Server adapter.
 //!
-//! The Agent Server is treated as an execution boundary, not as a trusted
-//! local process. The adapter is disabled until an operator attests that the
-//! server runs in a container with a distinct workspace per DREAD task and
-//! that OH_SECRET_KEY is configured for encrypted conversation secrets.
+//! Every DREAD conversation explicitly requests the Agent Server Docker runtime,
+//! which provisions a conversation-scoped container and workspace. The adapter
+//! remains disabled unless Docker runtime selection and stable OH_SECRET_KEY
+//! storage are configured on the Agent Server.
 
 use crate::{
     AdapterFuture, AgentAdapter, AgentAdapterError, AgentCapability, AgentDescriptor, AgentEvent,
@@ -31,8 +31,7 @@ pub struct OpenHandsAgentServerAdapter {
     session_api_key: String,
     llm_model: String,
     llm_api_key: String,
-    llm_base_url: Option<String>,
-    workspace_root: String,
+    llm_base_url: String,
     sandbox_attested: bool,
     secret_store_attested: bool,
 }
@@ -49,8 +48,7 @@ impl OpenHandsAgentServerAdapter {
         session_api_key: impl Into<String>,
         llm_model: impl Into<String>,
         llm_api_key: impl Into<String>,
-        llm_base_url: Option<String>,
-        workspace_root: impl Into<String>,
+        llm_base_url: impl Into<String>,
         display_name: impl Into<String>,
     ) -> Result<Self, AgentAdapterError> {
         let mut url = Url::parse(base_url).map_err(|error| {
@@ -94,7 +92,7 @@ impl OpenHandsAgentServerAdapter {
         let session_api_key = session_api_key.into();
         let llm_model = llm_model.into();
         let llm_api_key = llm_api_key.into();
-        let workspace_root = workspace_root.into();
+        let llm_base_url = llm_base_url.into();
         if session_api_key.trim().is_empty() || session_api_key.len() > 4096 {
             return Err(adapter_error(
                 "missing_session_key",
@@ -116,10 +114,7 @@ impl OpenHandsAgentServerAdapter {
                 false,
             ));
         }
-        validate_workspace_root(&workspace_root)?;
-        if let Some(base) = llm_base_url.as_deref() {
-            validate_llm_base_url(base)?;
-        }
+        validate_llm_base_url(&llm_base_url)?;
 
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -142,38 +137,24 @@ impl OpenHandsAgentServerAdapter {
             llm_model,
             llm_api_key,
             llm_base_url,
-            workspace_root,
             sandbox_attested: false,
             secret_store_attested: false,
         })
     }
 
-    /// Enable execution only after explicit container/workspace and secret
-    /// storage attestations. LocalWorkspace is safe here only because it is
-    /// scoped to the isolated Agent Server container.
-    pub fn attest_container_sandbox(
+    /// Enable only after Agent Server Docker runtime selection, Docker daemon
+    /// availability, and stable OH_SECRET_KEY storage have been configured.
+    /// Conversation creation still explicitly requests the Docker runtime;
+    /// the server must reject the request rather than falling back to Local.
+    pub fn attest_docker_runtime(
         mut self,
-        container_id: &str,
-        isolated_workspace_per_task: bool,
+        docker_runtime_enabled: bool,
         secret_store_configured: bool,
     ) -> Result<Self, AgentAdapterError> {
-        if container_id.trim().is_empty()
-            || container_id.len() > 128
-            || !container_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
-        {
+        if !docker_runtime_enabled {
             return Err(adapter_error(
-                "invalid_container_attestation",
-                "A valid container identifier is required".into(),
-                false,
-            ));
-        }
-        if !isolated_workspace_per_task {
-            return Err(adapter_error(
-                "workspace_isolation_required",
-                "OpenHands must use a distinct container workspace directory for every DREAD task"
-                    .into(),
+                "docker_runtime_required",
+                "OpenHands requires Docker conversation runtime selection on the Agent Server".into(),
                 false,
             ));
         }
@@ -200,7 +181,7 @@ impl OpenHandsAgentServerAdapter {
         } else {
             Err(adapter_error(
                 "sandbox_not_attested",
-                "OpenHands execution is disabled until its container, per-task workspace isolation, and OH_SECRET_KEY storage are attested".into(),
+                "OpenHands execution is disabled until Docker conversation runtime selection and stable OH_SECRET_KEY storage are configured".into(),
                 false,
             ))
         }
@@ -314,7 +295,8 @@ impl OpenHandsAgentServerAdapter {
             .unwrap_or("unknown");
         let state = match status {
             "idle" => AgentTaskState::Queued,
-            "running" | "waiting_for_confirmation" => AgentTaskState::Running,
+            "running" => AgentTaskState::Running,
+            "waiting_for_confirmation" => AgentTaskState::WaitingForConfirmation,
             "finished" => AgentTaskState::Succeeded,
             "error" | "stuck" => AgentTaskState::Failed,
             "paused" | "deleting" => AgentTaskState::Cancelled,
@@ -412,21 +394,16 @@ impl OpenHandsAgentServerAdapter {
         } else {
             format!("{instructions}\n\nObjective:\n{objective}")
         };
-        let mut llm = json!({
+        let llm = json!({
             "model": self.llm_model,
             "api_key": self.llm_api_key,
-            "temperature": 0
+            "base_url": self.llm_base_url,
+            "temperature": 0,
+            "stream": false
         });
-        if let Some(base_url) = self.llm_base_url.as_deref() {
-            llm["base_url"] = Value::String(base_url.to_string());
-        }
-        let working_dir = format!(
-            "{}/{}",
-            self.workspace_root.trim_end_matches('/'),
-            request.task_id
-        );
         Ok(json!({
             "conversation_id": request.task_id,
+            "conversation_runtime": "docker",
             "agent": {
                 "kind": "Agent",
                 "llm": llm,
@@ -438,9 +415,9 @@ impl OpenHandsAgentServerAdapter {
             },
             "workspace": {
                 "kind": "LocalWorkspace",
-                "working_dir": working_dir
+                "working_dir": "/workspace"
             },
-            "confirmation_policy": {"kind": "NeverConfirm"},
+            "confirmation_policy": {"kind": "AlwaysConfirm"},
             "initial_message": {
                 "role": "user",
                 "content": [{"type": "text", "text": message}],
@@ -740,43 +717,23 @@ fn validate_task_id(task_id: &str) -> Result<(), AgentAdapterError> {
     Ok(())
 }
 
-fn validate_workspace_root(root: &str) -> Result<(), AgentAdapterError> {
-    if root.trim().is_empty()
-        || root.len() > 512
-        || root.starts_with('/')
-        || root.contains('\\')
-        || !root
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._-/".contains(&byte))
-        || root
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
-    {
-        return Err(adapter_error(
-            "unsafe_workspace_root",
-            "OpenHands workspace root must be a safe relative path without traversal components"
-                .into(),
-            false,
-        ));
-    }
-    Ok(())
-}
-
 fn validate_llm_base_url(value: &str) -> Result<(), AgentAdapterError> {
     let url = Url::parse(value)
         .map_err(|error| adapter_error("invalid_llm_base_url", error.to_string(), false))?;
-    if !matches!(url.scheme(), "https" | "http")
+    if url.scheme() != "http"
+        || url.host_str() != Some("host.docker.internal")
+        || url.port() != Some(11500)
+        || url.path() != "/v1"
         || !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
-        || (url.scheme() == "http"
-            && !url
-                .host_str()
-                .and_then(|host| host.parse::<IpAddr>().ok())
-                .is_some_and(|ip| ip.is_loopback()))
     {
-        return Err(adapter_error("unsafe_llm_base_url", "OpenHands LLM base URL must use HTTPS or loopback HTTP without embedded credentials, query or fragment".into(), false));
+        return Err(adapter_error(
+            "unsafe_llm_base_url",
+            "OpenHands must use DREAD's Docker-reachable local GPU gateway at http://host.docker.internal:11500/v1".into(),
+            false,
+        ));
     }
     Ok(())
 }
