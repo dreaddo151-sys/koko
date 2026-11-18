@@ -7474,6 +7474,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_missions_returns_recent_plans_and_node_counts() {
+        let (router, server) = test_app().await;
+        let graph = json!({
+            "mission_id": "mission-list-regression",
+            "nodes": [
+                {"id": "discover", "depends_on": [], "priority": 4, "task_type": "service_discovery"},
+                {"id": "report", "depends_on": ["discover"], "priority": 1, "task_type": "service_discovery"}
+            ]
+        });
+        let created = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/missions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(graph.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/missions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let listed: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(listed["count"], 1);
+        assert_eq!(listed["items"][0]["mission_id"], "mission-list-regression");
+        assert_eq!(listed["items"][0]["status"], "planned");
+        assert_eq!(listed["items"][0]["node_count"], 2);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn mission_plan_rejects_cycles_and_oversized_graphs() {
         let (router, server) = test_app().await;
         let cyclic = json!({
