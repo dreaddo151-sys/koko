@@ -496,7 +496,8 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
                 detail: Some(if docker_runtime_available {
                     "OpenHands /ready succeeded and Docker runtime is available".into()
                 } else if status.is_success() {
-                    "OpenHands is ready but Docker runtime availability could not be verified".into()
+                    "OpenHands is ready but Docker runtime availability could not be verified"
+                        .into()
                 } else {
                     format!("OpenHands /ready returned HTTP {}", status.as_u16())
                 }),
@@ -791,13 +792,21 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
 }
 
 fn server_supports_docker_runtime(server_info: &Value) -> bool {
-    if server_info.get("conversation_runtime").and_then(Value::as_str) == Some("docker") {
+    if server_info
+        .get("conversation_runtime")
+        .and_then(Value::as_str)
+        == Some("docker")
+    {
         return true;
     }
     server_info
         .get("available_conversation_runtimes")
         .and_then(Value::as_array)
-        .is_some_and(|runtimes| runtimes.iter().any(|runtime| runtime.as_str() == Some("docker")))
+        .is_some_and(|runtimes| {
+            runtimes
+                .iter()
+                .any(|runtime| runtime.as_str() == Some("docker"))
+        })
 }
 
 fn validate_task_id(task_id: &str) -> Result<(), AgentAdapterError> {
