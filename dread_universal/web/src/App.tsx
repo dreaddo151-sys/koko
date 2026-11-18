@@ -116,9 +116,15 @@ function App() {
     finally{setBusy(false);}
   };
   const disableSkill=async(item:Capability)=>{
+    if(!token||!window.confirm(`Disable ${item.name} and revoke its model-context approval?`))return;
+    const reason=window.prompt("Reason for disabling this capability:");
+    if(reason===null||!reason.trim())return;
     setBusy(true);setError("");
-    try{await api(`/api/capabilities/${encodeURIComponent(item.id)}/disable`,token,{method:"POST"});setNotice(`Disabled ${item.name}.`);setSkillPreview(null);await refresh();}
-    catch(e){setError(e instanceof Error?e.message:"Skill disable failed");}
+    try{
+      const out=await api<{audit_recorded:boolean;audit_event_id:number}>(`/api/capabilities/${encodeURIComponent(item.id)}/disable`,token,{method:"POST",body:JSON.stringify({reason})});
+      setNotice(`Disabled ${item.name}. Audit event #${out.audit_event_id} was retained.`);
+      setSkillPreview(null);await refresh();
+    }catch(e){setError(e instanceof Error?e.message:"Skill disable failed");}
     finally{setBusy(false);}
   };
   const removeCapability=async(item:Capability)=>{
