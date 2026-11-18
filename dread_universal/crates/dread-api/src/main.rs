@@ -2245,6 +2245,7 @@ fn reserve_agent_confirmation(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish_agent_confirmation_reservation(
     state: &AppState,
     task_id: &str,
@@ -4524,10 +4525,12 @@ mod tests {
             http::HeaderMap,
             routing::{get, post},
         };
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         #[derive(Clone)]
         struct ConfirmationState {
             decision: Arc<Mutex<Option<Value>>>,
+            calls: Arc<AtomicUsize>,
         }
 
         async fn get_conversation(
@@ -4556,12 +4559,15 @@ mod tests {
                 Some("session-secret")
             );
             assert!(!id.is_empty());
+            state.calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(75)).await;
             *state.decision.lock().unwrap() = Some(body);
             Json(json!({"success": true}))
         }
 
         let confirmation_state = ConfirmationState {
             decision: Arc::new(Mutex::new(None)),
+            calls: Arc::new(AtomicUsize::new(0)),
         };
         let mock = Router::new()
             .route("/api/conversations/{id}", get(get_conversation))
@@ -4666,11 +4672,22 @@ mod tests {
         assert_eq!(stale.status(), StatusCode::CONFLICT);
         assert!(confirmation_state.decision.lock().unwrap().is_none());
 
-        let accepted = router.clone().oneshot(request("action-123")).await.unwrap();
-        assert_eq!(accepted.status(), StatusCode::OK);
+        let (first, second) = tokio::join!(
+            router.clone().oneshot(request("action-123")),
+            router.clone().oneshot(request("action-123"))
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+        let accepted = match (first.status(), second.status()) {
+            (StatusCode::OK, StatusCode::CONFLICT) => first,
+            (StatusCode::CONFLICT, StatusCode::OK) => second,
+            statuses => panic!("expected one success and one conflict, got {statuses:?}"),
+        };
+        assert_eq!(confirmation_state.calls.load(Ordering::SeqCst), 1);
         let accepted_body = to_bytes(accepted.into_body(), usize::MAX).await.unwrap();
         let accepted_json: Value = serde_json::from_slice(&accepted_body).unwrap();
         assert_eq!(accepted_json["success"], true);
+        assert_eq!(accepted_json["decision_state"], "accepted");
 
         let provider_decision = confirmation_state.decision.lock().unwrap().clone().unwrap();
         assert_eq!(provider_decision["accept"], true);
@@ -4686,8 +4703,20 @@ mod tests {
             )
             .unwrap();
         let recorded: Value = serde_json::from_str(&recorded).unwrap();
+        assert_eq!(recorded["action_id"], "action-123");
         assert_eq!(recorded["accepted"], true);
         assert_eq!(recorded["approved_by"], "test-operator");
+        let reservation_state: String = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT decision_state FROM agent_action_confirmations
+                 WHERE task_id = ?1 AND action_id = 'action-123'",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reservation_state, "accepted");
 
         let replay = router.oneshot(request("action-123")).await.unwrap();
         assert_eq!(replay.status(), StatusCode::CONFLICT);
