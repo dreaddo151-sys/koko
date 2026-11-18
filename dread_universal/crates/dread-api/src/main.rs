@@ -2103,16 +2103,19 @@ async fn respond_to_agent_confirmation(
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(|error| ApiError::internal(error.to_string()))?;
-        let latest_action_payload: Option<String> = conn
-            .query_row(
-                "SELECT payload_json FROM task_events
-                 WHERE task_id = ?1 AND event_type = 'ActionEvent'
-                 ORDER BY sequence DESC LIMIT 1",
-                params![id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| ApiError::internal(error.to_string()))?;
+        let latest_action_payload: Option<String> = match waiting {
+            Some(wait_sequence) => conn
+                .query_row(
+                    "SELECT payload_json FROM task_events
+                     WHERE task_id = ?1 AND event_type = 'ActionEvent' AND sequence < ?2
+                     ORDER BY sequence DESC LIMIT 1",
+                    params![id, wait_sequence],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| ApiError::internal(error.to_string()))?,
+            None => None,
+        };
         let latest_action_id = latest_action_payload
             .and_then(|payload| serde_json::from_str::<Value>(&payload).ok())
             .and_then(|event| event.get("id").and_then(Value::as_str).map(str::to_owned));
