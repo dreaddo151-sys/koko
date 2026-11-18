@@ -85,10 +85,8 @@ struct OpenHandsAdapterConfig {
     session_api_key: String,
     llm_model: String,
     llm_api_key: String,
-    llm_base_url: Option<String>,
-    workspace_root: String,
-    container_id: String,
-    isolated_workspace_per_task: bool,
+    llm_base_url: String,
+    docker_runtime_enabled: bool,
     secret_store_configured: bool,
 }
 
@@ -128,8 +126,11 @@ fn build_agent_adapters(
         adapters.insert("deerflow".into(), Arc::new(adapter));
     }
     if let Some(openhands) = config.openhands {
-        if !openhands.isolated_workspace_per_task || !openhands.secret_store_configured {
-            return Err("OpenHands requires explicit per-task container workspace isolation and OH_SECRET_KEY storage attestation".into());
+        if !openhands.docker_runtime_enabled || !openhands.secret_store_configured {
+            return Err("OpenHands requires Docker conversation runtime selection and stable OH_SECRET_KEY storage".into());
+        }
+        if openhands.llm_base_url != "http://host.docker.internal:11500/v1" {
+            return Err("OpenHands LLM traffic must use DREAD's Docker-reachable local GPU gateway".into());
         }
         let adapter = OpenHandsAgentServerAdapter::new(
             &openhands.endpoint,
@@ -137,11 +138,10 @@ fn build_agent_adapters(
             openhands.llm_model,
             openhands.llm_api_key,
             openhands.llm_base_url,
-            openhands.workspace_root,
             "OpenHands",
         )
         .map_err(|error| error.to_string())?
-        .attest_container_sandbox(&openhands.container_id, true, true)
+        .attest_docker_runtime(true, true)
         .map_err(|error| error.to_string())?;
         adapters.insert("openhands".into(), Arc::new(adapter));
     }
@@ -192,9 +192,8 @@ fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn Agen
         "DREAD_OPENHANDS_SESSION_API_KEY",
         "DREAD_OPENHANDS_LLM_MODEL",
         "DREAD_OPENHANDS_LLM_API_KEY",
-        "DREAD_OPENHANDS_WORKSPACE_ROOT",
-        "DREAD_OPENHANDS_CONTAINER_ID",
-        "DREAD_OPENHANDS_ISOLATED_WORKSPACE_PER_TASK",
+        "DREAD_OPENHANDS_LLM_BASE_URL",
+        "DREAD_OPENHANDS_DOCKER_RUNTIME_ENABLED",
         "DREAD_OPENHANDS_SECRET_STORE_CONFIGURED",
     ];
     if openhands_keys.iter().any(|key| env::var_os(key).is_some()) {
@@ -203,10 +202,8 @@ fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn Agen
             session_api_key: env::var("DREAD_OPENHANDS_SESSION_API_KEY")?,
             llm_model: env::var("DREAD_OPENHANDS_LLM_MODEL")?,
             llm_api_key: env::var("DREAD_OPENHANDS_LLM_API_KEY")?,
-            llm_base_url: env::var("DREAD_OPENHANDS_LLM_BASE_URL").ok(),
-            workspace_root: env::var("DREAD_OPENHANDS_WORKSPACE_ROOT")?,
-            container_id: env::var("DREAD_OPENHANDS_CONTAINER_ID")?,
-            isolated_workspace_per_task: env::var("DREAD_OPENHANDS_ISOLATED_WORKSPACE_PER_TASK")
+            llm_base_url: env::var("DREAD_OPENHANDS_LLM_BASE_URL")?,
+            docker_runtime_enabled: env::var("DREAD_OPENHANDS_DOCKER_RUNTIME_ENABLED")
                 .is_ok_and(|value| value == "true"),
             secret_store_configured: env::var("DREAD_OPENHANDS_SECRET_STORE_CONFIGURED")
                 .is_ok_and(|value| value == "true"),
@@ -332,6 +329,12 @@ struct CreateTask {
 
 #[derive(Debug, Deserialize)]
 struct ApproveTask {
+    reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentConfirmationResponse {
+    accept: bool,
     reason: String,
 }
 
@@ -1352,6 +1355,26 @@ fn append_task_event(
     })
 }
 
+fn persist_task_event(
+    state: &AppState,
+    task_id: &str,
+    event_type: &str,
+    payload: &Value,
+    actor: &str,
+) -> Result<(), ApiError> {
+    let now = now_epoch();
+    let mut conn = db_lock(state)?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let event = append_task_event(&tx, task_id, event_type, payload, actor, now)?;
+    tx.commit()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    drop(conn);
+    let _ = state.events.send(event);
+    Ok(())
+}
+
 fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
     let payload: String = row.get(4)?;
     let status: String = row.get(5)?;
@@ -2025,6 +2048,109 @@ async fn approve_task(
     Ok(Json(json!({"item": task, "execution_started": false})))
 }
 
+async fn respond_to_agent_confirmation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<AgentConfirmationResponse>,
+) -> Result<Json<Value>, ApiError> {
+    let approved_by = state.operator_id.trim();
+    let reason = input.reason.trim();
+    if approved_by.is_empty() || reason.is_empty() {
+        return Err(ApiError::bad_request("approved_by and reason are required"));
+    }
+    if approved_by.len() > 160 || reason.len() > 2000 {
+        return Err(ApiError::bad_request(
+            "confirmation fields exceed their maximum length",
+        ));
+    }
+
+    let (status, provider, provider_task_id, latest_wait, latest_response) = {
+        let conn = db_lock(&state)?;
+        let task = conn
+            .query_row(
+                "SELECT status, agent_provider, provider_task_id FROM tasks WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .ok_or_else(|| ApiError::not_found("Task not found"))?;
+        let (waiting, responded): (Option<u64>, Option<u64>) = conn
+            .query_row(
+                "SELECT
+                    MAX(CASE WHEN event_type = 'agent_waiting_for_confirmation' THEN sequence END),
+                    MAX(CASE WHEN event_type = 'agent_confirmation_response' THEN sequence END)
+                 FROM task_events WHERE task_id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        (task.0, task.1, task.2, waiting, responded)
+    };
+
+    if status != "running" || provider.as_deref() != Some("openhands") {
+        return Err(ApiError::conflict(
+            "Only a running OpenHands task can receive an agent-action decision",
+        ));
+    }
+    if latest_wait.is_none() || latest_wait <= latest_response {
+        return Err(ApiError::conflict(
+            "The task has no outstanding OpenHands action awaiting confirmation",
+        ));
+    }
+    let provider_task_id = provider_task_id
+        .ok_or_else(|| ApiError::conflict("OpenHands provider task identity is missing"))?;
+    let adapter = state
+        .agent_adapters
+        .get("openhands")
+        .cloned()
+        .ok_or_else(|| ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "OpenHands adapter is not configured".into(),
+        })?;
+    let current = adapter
+        .task_status(&id, &provider_task_id)
+        .await
+        .map_err(|error| ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            message: format!("Could not verify OpenHands confirmation state: {error}"),
+        })?;
+    if current.state != AgentTaskState::WaitingForConfirmation {
+        return Err(ApiError::conflict(
+            "OpenHands is no longer waiting for confirmation; refresh the mission trace",
+        ));
+    }
+    adapter
+        .respond_to_confirmation(&id, &provider_task_id, input.accept, reason)
+        .await
+        .map_err(|error| ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            message: format!("OpenHands confirmation response failed: {error}"),
+        })?;
+    persist_task_event(
+        &state,
+        &id,
+        "agent_confirmation_response",
+        &json!({
+            "accepted": input.accept,
+            "reason": reason,
+            "approved_by": approved_by
+        }),
+        approved_by,
+    )?;
+    Ok(Json(json!({
+        "success": true,
+        "task_id": id,
+        "accepted": input.accept
+    })))
+}
+
 fn ready_mission_task_ids(state: &AppState, mission_id: &str) -> Result<Vec<String>, ApiError> {
     let conn = db_lock(state)?;
     let mission_status = conn
@@ -2421,6 +2547,7 @@ async fn execute_agent_task(
         );
     }
     let mut cursor = initial_event_cursor;
+    let mut confirmation_waiting = false;
     loop {
         if *cancellation.borrow() {
             match adapter.cancel_task(&task_id, &provider_id).await {
@@ -2492,7 +2619,48 @@ async fn execute_agent_task(
                 finish_agent_task(&state, &task_id, status, result.result, result.error);
                 return;
             }
-            Ok(_) => {}
+            Ok(task) if task.state == AgentTaskState::WaitingForConfirmation => {
+                if !confirmation_waiting {
+                    if let Err(error) = persist_task_event(
+                        &state,
+                        &task_id,
+                        "agent_waiting_for_confirmation",
+                        &json!({"provider": provider, "status": "waiting_for_confirmation"}),
+                        "executor",
+                    ) {
+                        finish_agent_task(
+                            &state,
+                            &task_id,
+                            "failed",
+                            None,
+                            Some(format!("Could not persist agent confirmation state: {error:?}")),
+                        );
+                        return;
+                    }
+                    confirmation_waiting = true;
+                }
+            }
+            Ok(_) => {
+                if confirmation_waiting {
+                    if let Err(error) = persist_task_event(
+                        &state,
+                        &task_id,
+                        "agent_confirmation_resumed",
+                        &json!({"provider": provider}),
+                        "executor",
+                    ) {
+                        finish_agent_task(
+                            &state,
+                            &task_id,
+                            "failed",
+                            None,
+                            Some(format!("Could not persist agent resume state: {error:?}")),
+                        );
+                        return;
+                    }
+                    confirmation_waiting = false;
+                }
+            }
             Err(error) => {
                 finish_agent_task(
                     &state,
@@ -3630,6 +3798,10 @@ fn app(state: AppState) -> Router {
         .route("/api/tasks/{id}/stream", get(task_event_stream))
         .route("/api/tasks/{id}/result", get(get_task_result))
         .route("/api/tasks/{id}/approve", axum::routing::post(approve_task))
+        .route(
+            "/api/tasks/{id}/agent-confirmation",
+            axum::routing::post(respond_to_agent_confirmation),
+        )
         .route("/api/tasks/{id}/run", axum::routing::post(run_task))
         .route("/api/tasks/{id}/cancel", axum::routing::post(cancel_task))
         .route("/api/gpu/{*path}", axum::routing::post(gpu_inference))
@@ -4183,10 +4355,8 @@ mod tests {
                 session_api_key: "oh-session-test".into(),
                 llm_model: "llama.cpp/qwen-test".into(),
                 llm_api_key: "llm-test".into(),
-                llm_base_url: Some("http://127.0.0.1:11500/v1".into()),
-                workspace_root: "workspace/dread-tasks".into(),
-                container_id: "dread-openhands-test".into(),
-                isolated_workspace_per_task: true,
+                llm_base_url: "http://host.docker.internal:11500/v1".into(),
+                docker_runtime_enabled: true,
                 secret_store_configured: true,
             }),
         };
