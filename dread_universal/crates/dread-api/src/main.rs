@@ -1844,9 +1844,7 @@ async fn instantiate_mission(
                         ));
                     }
                 };
-                if capability.id != requested_capability
-                    || capability.id != expected_capability
-                {
+                if capability.id != requested_capability || capability.id != expected_capability {
                     return Err(ApiError::conflict(
                         "Agent mission capability ID does not match its reviewed provider",
                     ));
