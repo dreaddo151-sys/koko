@@ -660,6 +660,60 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
         })
     }
 
+    fn respond_to_confirmation<'a>(
+        &'a self,
+        task_id: &'a str,
+        provider_task_id: &'a str,
+        accept: bool,
+        reason: &'a str,
+    ) -> AdapterFuture<'a, ()> {
+        Box::pin(async move {
+            self.require_attested()?;
+            validate_task_id(task_id)?;
+            if provider_task_id != task_id {
+                return Err(adapter_error(
+                    "provider_id_mismatch",
+                    "OpenHands conversation ID must match the DREAD task ID".into(),
+                    false,
+                ));
+            }
+            let reason = reason.trim();
+            if reason.is_empty() || reason.len() > 2000 {
+                return Err(adapter_error(
+                    "invalid_confirmation_reason",
+                    "Confirmation reason must contain 1-2000 characters".into(),
+                    false,
+                ));
+            }
+            let conversation = self.conversation(provider_task_id).await?.ok_or_else(|| {
+                adapter_error(
+                    "not_found",
+                    "OpenHands conversation does not exist".into(),
+                    false,
+                )
+            })?;
+            if self.to_task(task_id, &conversation).state
+                != AgentTaskState::WaitingForConfirmation
+            {
+                return Err(adapter_error(
+                    "confirmation_not_pending",
+                    "OpenHands conversation is not waiting for operator confirmation".into(),
+                    false,
+                ));
+            }
+            self.json_request(
+                Method::POST,
+                &format!(
+                    "/api/conversations/{provider_task_id}/events/respond_to_confirmation"
+                ),
+                Some(json!({"accept": accept, "reason": reason})),
+                &[],
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
     fn task_result<'a>(
         &'a self,
         task_id: &'a str,
@@ -788,6 +842,13 @@ mod tests {
             body.pointer("/workspace/kind").and_then(Value::as_str),
             Some("LocalWorkspace")
         );
+        assert_eq!(
+            body.pointer("/workspace/working_dir").and_then(Value::as_str),
+            Some("/workspace")
+        );
+        assert_eq!(body["conversation_runtime"], "docker");
+        assert_eq!(body["confirmation_policy"]["kind"], "AlwaysConfirm");
+        assert_eq!(body["agent"]["llm"]["stream"], false);
         assert!(
             body.pointer("/initial_message/run")
                 .and_then(Value::as_bool)
@@ -842,8 +903,7 @@ mod tests {
             "session-secret",
             "local/model",
             "local-gateway-key",
-            Some("https://gateway.example.test/v1".into()),
-            "workspace/dread-tasks",
+            "http://host.docker.internal:11500/v1",
             "OpenHands test",
         )
         .unwrap();
@@ -861,6 +921,81 @@ mod tests {
         assert_eq!(payload["workspace"]["working_dir"], "/workspace");
         assert_eq!(payload["confirmation_policy"]["kind"], "AlwaysConfirm");
         assert_eq!(payload["agent"]["llm"]["stream"], false);
+    }
+
+    async fn waiting_conversation(
+        Path(id): Path<String>,
+        headers: HeaderMap,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("x-session-api-key")
+                .and_then(|v| v.to_str().ok()),
+            Some("session-secret")
+        );
+        Json(json!({"id": id, "execution_status": "waiting_for_confirmation"}))
+    }
+
+    async fn respond_confirmation(
+        Path(id): Path<String>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get("x-session-api-key")
+                .and_then(|v| v.to_str().ok()),
+            Some("session-secret")
+        );
+        assert!(!id.is_empty());
+        assert_eq!(body["accept"], true);
+        assert_eq!(body["reason"], "Reviewed in DREAD");
+        Json(json!({"success": true}))
+    }
+
+    #[tokio::test]
+    async fn confirmation_response_requires_pending_state_and_uses_authenticated_endpoint() {
+        let app = Router::new()
+            .route(
+                "/api/conversations/{id}",
+                get(waiting_conversation),
+            )
+            .route(
+                "/api/conversations/{id}/events/respond_to_confirmation",
+                post(respond_confirmation),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let adapter = OpenHandsAgentServerAdapter::new(
+            &format!("http://{address}"),
+            "session-secret",
+            "test/model",
+            "llm-secret",
+            "http://host.docker.internal:11500/v1",
+            "OpenHands test",
+        )
+        .unwrap()
+        .attest_docker_runtime(true, true)
+        .unwrap();
+        let task_id = "00000000-0000-4000-8000-000000000001";
+        adapter
+            .respond_to_confirmation(task_id, task_id, true, "Reviewed in DREAD")
+            .await
+            .unwrap();
+        assert!(
+            adapter
+                .respond_to_confirmation(
+                    "00000000-0000-4000-8000-000000000002",
+                    task_id,
+                    true,
+                    "wrong local identity",
+                )
+                .await
+                .is_err()
+        );
+        server.abort();
     }
 
     #[tokio::test]
@@ -882,15 +1017,12 @@ mod tests {
             "session-secret",
             "test/model",
             "llm-secret",
-            None,
-            "workspace/dread-tasks",
+            "http://host.docker.internal:11500/v1",
             "OpenHands test",
         )
         .unwrap();
         assert!(adapter.capabilities().await.unwrap().is_empty());
-        let adapter = adapter
-            .attest_container_sandbox("dread-agent-server-test", true, true)
-            .unwrap();
+        let adapter = adapter.attest_docker_runtime(true, true).unwrap();
         assert!(adapter.descriptor().enabled);
         assert_eq!(adapter.capabilities().await.unwrap()[0].id, "openhands.run");
 
@@ -930,15 +1062,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsafe_workspace_and_non_loopback_servers() {
+    fn rejects_remote_servers_and_non_gateway_llm_endpoints() {
         assert!(
             OpenHandsAgentServerAdapter::new(
                 "http://example.com:8000",
                 "session",
                 "model",
                 "key",
-                None,
-                "workspace/tasks",
+                "http://host.docker.internal:11500/v1",
                 "OpenHands"
             )
             .is_err()
@@ -949,8 +1080,7 @@ mod tests {
                 "session",
                 "model",
                 "key",
-                None,
-                "../outside",
+                "http://127.0.0.1:11500/v1",
                 "OpenHands"
             )
             .is_err()
