@@ -438,3 +438,17 @@ Do not repeat basic GPU enumeration, generic API health or standalone llama.cpp 
 - **Workstation status: blocked / not inspected.** This chat had no authorized SSH/workstation terminal session. No live service status, process, port, environment configuration, credential-presence metadata, provider endpoint or sandbox permission was read. No commands were run on the user's Ubuntu host.
 - No workstation files or services were modified. The Python Master Hub, ComfyUI and Python GPU Supervisor were left untouched; no stop/restart/replacement/deployment occurred. PR remains unmerged.
 - Next step is a read-only workstation baseline with redacted configuration metadata, followed by independent verification of live provider API versions, per-task container/workspace isolation, tool allowlists, secret handling, cancellation and restart recovery. Only after those checks should a controlled real-provider task be considered. Other outstanding gates remain full legacy Hub parity, dual-3090 concurrent inference/media artifacts, resource-aware mission policy, signed transactional extension management/updater, and physical Ubuntu install/upgrade/reboot/rollback acceptance.
+
+
+## Recovered Ubuntu workstation test evidence — 2026-11-17 23:33
+
+A saved terminal capture, `Pasted text(20261117-233320).txt`, was recovered from the user's project files and inspected during the 2026-11-18 checkpoint. It records commands executed in the Ubuntu workspace `/mnt/sabrent/dread_workspace/dread_universal_upstream/dread_universal`, on branch `feature/universal-capability-discovery-clean-2026-11-17` tracking its origin branch:
+
+- `cargo fmt --all -- --check`: exit status 0.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit status 0.
+- `cargo test --workspace --locked`: exit status 0; 87 unit tests passed, zero failures (11 agents, 35 API, 11 discovery, 6 GPU, 9 orchestrator, 8 platform, 7 skills).
+- `cargo build --workspace --release --locked`: exit status 0.
+
+This is **actual prior Ubuntu workstation execution**, not GitHub CI. It should be credited and not repeated merely as a generic Rust regression. It predates the final PR #12 head and does not prove that the final provider-adapter changes were installed or that live provider endpoints were contacted. The Hermes HTTP lifecycle in this run is a test; it is not a live Hermes task. This capture does not establish live OpenHands/DeerFlow sandbox isolation, tool allowlists, current service status, dual-GPU concurrency or media artifact acceptance.
+
+Separate previously recorded live evidence remains valid at its own timestamps: 2026-11-16 Rust API health/service discovery and the 2026-11-17 Supervisor-bridged llama.cpp inference returning `DREAD GPU INFERENCE OK`. These are historical live proofs, not a fresh current-candidate integration test. Preserve the Python Master Hub, ComfyUI and Python GPU Supervisor; do not repeat broad checks without a specific candidate-integration reason.
