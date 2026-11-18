@@ -2444,7 +2444,9 @@ fn finish_agent_task(
     let Ok(mut conn) = state.db.lock() else {
         return;
     };
-    let Ok(tx) = conn.transaction() else { return };
+    let Ok(tx) = conn.transaction() else {
+        return;
+    };
     let current: Option<String> = tx
         .query_row(
             "SELECT status FROM tasks WHERE id = ?1",
@@ -2472,25 +2474,88 @@ fn finish_agent_task(
     {
         return;
     }
-    if tx.execute("INSERT OR REPLACE INTO task_results (task_id, result_json, error, attempts, elapsed_ms, completed_at) VALUES (?1, ?2, ?3, 1, 0, ?4)", params![task_id, result_json, error, now]).is_err() { return; }
+    if tx
+        .execute(
+            "INSERT OR REPLACE INTO task_results (task_id, result_json, error, attempts, elapsed_ms, completed_at)
+             VALUES (?1, ?2, ?3, 1, 0, ?4)",
+            params![task_id, result_json, error, now],
+        )
+        .is_err()
+    {
+        return;
+    }
+
+    let mission_id: Option<String> = tx
+        .query_row(
+            "SELECT mission_id FROM mission_tasks WHERE task_id = ?1",
+            params![task_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    if let Some(mission_id) = mission_id.as_deref() {
+        if final_status == "completed" {
+            let incomplete: i64 = match tx.query_row(
+                "SELECT COUNT(*)
+                 FROM mission_tasks mt JOIN tasks t ON t.id = mt.task_id
+                 WHERE mt.mission_id = ?1 AND t.status != 'completed'",
+                params![mission_id],
+                |row| row.get(0),
+            ) {
+                Ok(count) => count,
+                Err(_) => return,
+            };
+            if incomplete == 0
+                && tx
+                    .execute(
+                        "UPDATE missions SET status = 'completed' WHERE id = ?1",
+                        params![mission_id],
+                    )
+                    .is_err()
+            {
+                return;
+            }
+        } else if tx
+            .execute(
+                "UPDATE missions SET status = 'blocked' WHERE id = ?1",
+                params![mission_id],
+            )
+            .is_err()
+        {
+            return;
+        }
+    }
+
     let event_type = match final_status {
         "completed" => "task_succeeded",
         "cancelled" => "task_execution_cancelled",
         _ => "task_failed",
     };
-    if let Ok(event) = append_task_event(
+    let event = match append_task_event(
         &tx,
         task_id,
         event_type,
         &json!({"status": final_status, "error": error}),
         "executor",
         now,
-    ) && tx.commit().is_ok()
-    {
-        let _ = state.events.send(event);
+    ) {
+        Ok(event) => event,
+        Err(_) => return,
+    };
+    if tx.commit().is_err() {
+        return;
     }
+    let _ = state.events.send(event);
+    drop(conn);
+
     if let Ok(mut registry) = state.cancellations.lock() {
         registry.remove(task_id);
+    }
+    if final_status == "completed"
+        && let Some(mission_id) = mission_id
+    {
+        dispatch_ready_mission_tasks(state.clone(), mission_id);
     }
 }
 
