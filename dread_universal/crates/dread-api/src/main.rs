@@ -2248,10 +2248,23 @@ async fn execute_agent_task(state: AppState, task_id: String, provider: String, 
         match adapter.events(&task_id, &provider_id, cursor).await {
             Ok(events) => for event in events {
                 cursor = cursor.max(event.sequence);
-                if let Ok(mut conn) = state.db.lock() {
-                    if let Ok(tx) = conn.transaction() {
-                        let _ = tx.execute("UPDATE tasks SET provider_event_cursor = ?2 WHERE id = ?1", params![task_id, cursor]);
-                        if let Ok(local) = append_task_event(&tx, &task_id, &event.event_type, &event.payload, &provider, event.occurred_at) { if tx.commit().is_ok() { let _ = state.events.send(local); } }
+                if let Ok(mut conn) = state.db.lock()
+                    && let Ok(tx) = conn.transaction()
+                {
+                    let _ = tx.execute(
+                        "UPDATE tasks SET provider_event_cursor = ?2 WHERE id = ?1",
+                        params![task_id, cursor],
+                    );
+                    if let Ok(local) = append_task_event(
+                        &tx,
+                        &task_id,
+                        &event.event_type,
+                        &event.payload,
+                        &provider,
+                        event.occurred_at,
+                    ) && tx.commit().is_ok()
+                    {
+                        let _ = state.events.send(local);
                     }
                 }
             },
@@ -2282,7 +2295,17 @@ fn finish_agent_task(state: &AppState, task_id: &str, status: &str, result: Opti
     if tx.execute("UPDATE tasks SET status = ?2, updated_at = ?3 WHERE id = ?1", params![task_id, final_status, now]).is_err() { return; }
     if tx.execute("INSERT OR REPLACE INTO task_results (task_id, result_json, error, attempts, elapsed_ms, completed_at) VALUES (?1, ?2, ?3, 1, 0, ?4)", params![task_id, result_json, error, now]).is_err() { return; }
     let event_type = match final_status { "completed" => "task_succeeded", "cancelled" => "task_execution_cancelled", _ => "task_failed" };
-    if let Ok(event) = append_task_event(&tx, task_id, event_type, &json!({"status": final_status, "error": error}), "executor", now) { if tx.commit().is_ok() { let _ = state.events.send(event); } }
+    if let Ok(event) = append_task_event(
+        &tx,
+        task_id,
+        event_type,
+        &json!({"status": final_status, "error": error}),
+        "executor",
+        now,
+    ) && tx.commit().is_ok()
+    {
+        let _ = state.events.send(event);
+    }
     if let Ok(mut registry) = state.cancellations.lock() { registry.remove(task_id); }
 }
 
