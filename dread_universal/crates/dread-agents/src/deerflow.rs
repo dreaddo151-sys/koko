@@ -971,7 +971,7 @@ mod tests {
             "DeerFlow test",
         )
         .unwrap()
-        .attest_container_sandbox("AioSandboxProvider", true)
+        .attest_container_sandbox("AioSandboxProvider", true, None)
         .unwrap();
 
         assert_eq!(
