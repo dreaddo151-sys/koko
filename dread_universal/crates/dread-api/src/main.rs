@@ -1074,8 +1074,8 @@ fn local_pstack_capability_records(
     imported_at: u64,
 ) -> Result<Vec<CapabilityRecord>, ApiError> {
     let skills = discover_skills(root).map_err(|error| ApiError::bad_request(error.to_string()))?;
-    let agents = discover_agent_profiles(root)
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let agents =
+        discover_agent_profiles(root).map_err(|error| ApiError::bad_request(error.to_string()))?;
     let source_revision = env::var("DREAD_PSTACK_REVISION")
         .ok()
         .filter(|value| !value.trim().is_empty());
@@ -1173,10 +1173,17 @@ fn refresh_local_capability_record(
     if record.status != CapabilityStatus::Disabled
         || !matches!(record.kind, CapabilityKind::Skill | CapabilityKind::Agent)
         || record.provenance.source_name != "Pstack local filesystem copy"
-        || record.manifest.get("source_verification").and_then(Value::as_str)
+        || record
+            .manifest
+            .get("source_verification")
+            .and_then(Value::as_str)
             != Some("unverified_local_copy")
         || record.manifest.get("execution").and_then(Value::as_str) != Some("never")
-        || record.manifest.get("fingerprint_algorithm").and_then(Value::as_str) != Some("sha256")
+        || record
+            .manifest
+            .get("fingerprint_algorithm")
+            .and_then(Value::as_str)
+            != Some("sha256")
     {
         return Err(ApiError::bad_request(
             "Refresh accepts only disabled-by-default local Pstack Markdown context records",
@@ -1186,8 +1193,8 @@ fn refresh_local_capability_record(
         .validate()
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
 
-    let proposed_json = serde_json::to_string(record)
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let proposed_json =
+        serde_json::to_string(record).map_err(|error| ApiError::internal(error.to_string()))?;
     let existing_json = tx
         .query_row(
             "SELECT record_json FROM capabilities WHERE id = ?1",
@@ -1226,7 +1233,10 @@ fn refresh_local_capability_record(
     }
 
     if existing.provenance.source_name != "Pstack local filesystem copy"
-        || existing.manifest.get("source_verification").and_then(Value::as_str)
+        || existing
+            .manifest
+            .get("source_verification")
+            .and_then(Value::as_str)
             != Some("unverified_local_copy")
         || existing.kind != record.kind
     {
@@ -1296,8 +1306,10 @@ async fn import_discovered_skills(
             .optional()
             .map_err(|error| ApiError::internal(error.to_string()))?;
         if let Some(existing_json) = existing_json {
-            let mut existing: CapabilityRecord = serde_json::from_str(&existing_json)
-                .map_err(|error| ApiError::internal(format!("Stored capability is invalid: {error}")))?;
+            let mut existing: CapabilityRecord =
+                serde_json::from_str(&existing_json).map_err(|error| {
+                    ApiError::internal(format!("Stored capability is invalid: {error}"))
+                })?;
             existing.status = CapabilityStatus::Disabled;
             existing.provenance.imported_at = record.provenance.imported_at;
             if let Some(manifest) = existing.manifest.as_object_mut() {
@@ -1313,8 +1325,8 @@ async fn import_discovered_skills(
             continue;
         }
 
-        let encoded = serde_json::to_string(record)
-            .map_err(|error| ApiError::internal(error.to_string()))?;
+        let encoded =
+            serde_json::to_string(record).map_err(|error| ApiError::internal(error.to_string()))?;
         tx.execute(
             "INSERT INTO capabilities (id, record_json, created_at) VALUES (?1, ?2, ?3)",
             params![record.id, encoded, record.provenance.imported_at],
@@ -5987,7 +5999,10 @@ mod tests {
         server.abort();
     }
 
-    fn local_skill_record_for_test(fingerprint: &str, status: CapabilityStatus) -> CapabilityRecord {
+    fn local_skill_record_for_test(
+        fingerprint: &str,
+        status: CapabilityStatus,
+    ) -> CapabilityRecord {
         CapabilityRecord {
             id: "pstack.skill.refresh-test".into(),
             name: "Refresh test skill".into(),
