@@ -401,3 +401,15 @@ Do not repeat basic GPU enumeration, generic API health or standalone llama.cpp 
 - Follow-up documentation commit `a8ccca71fe5342daf1e709399be65a7a945ec963` records the acceptance boundary. The PR HEAD may be newer than the implementation candidate because the docs are committed separately.
 
 **Not completed:** adapters are still library-only and are not wired into `dread-api` task/mission registration or execution dispatch. OpenHands has discovery/health probing only; its live task adapter remains outstanding. No Hermes, DeerFlow or OpenHands service was contacted on the physical workstation. Mock HTTP tests do not prove live provider behavior, sandbox isolation, cancellation of real work or recovery after provider/server restart. Phase 4 remains partial.
+
+
+## Environment-driven agent registry and cancellation cleanup — 2026-11-18
+
+- Added `AgentAdapterConfig` and `build_agent_adapters` to construct Hermes and DeerFlow clients only when their required endpoint, credentials, sandbox backend/provider and explicit per-task isolation attestations are supplied.
+- Added fail-closed environment loading. Partial configuration fails startup instead of silently registering an unsafe/incomplete provider. Hermes uses `DREAD_HERMES_API_URL`, `DREAD_HERMES_API_KEY`, `DREAD_HERMES_SANDBOX_BACKEND`, `DREAD_HERMES_ISOLATED_WORKSPACE_PER_TASK=true`. DeerFlow uses `DREAD_DEERFLOW_API_URL`, `DREAD_DEERFLOW_PAT`, `DREAD_DEERFLOW_SANDBOX_PROVIDER`, `DREAD_DEERFLOW_ISOLATED_WORKSPACE_PER_TASK=true`, optional `DREAD_DEERFLOW_API_PREFIX` (default `/api/langgraph`), and optional `DREAD_DEERFLOW_PROVISIONER_URL` (non-empty remote provisioners rejected).
+- Added protected `GET /api/agent-adapters` inventory returning configured provider descriptors only; no credentials or live provider requests are exposed.
+- Added a bounded 5-second cooperative cleanup grace in `ExecutionGate` after active cancellation, so an execution runner can react to the cancellation watch and request provider-side cancellation before the future is dropped.
+- Added tests for explicit isolation requirements, remote provisioner rejection, valid provider registration, empty registry inventory, and active-runner cleanup. The latest push CI run #625 (`44209673688`) passed all three jobs: Rust / Ubuntu 24.04, Web console / Ubuntu 24.04 and Ubuntu packages / smoke test.
+- The subsequent plan-documentation commit `8edd98ead22ed096a66b1757c14d6d51c50ba201` records these boundaries.
+
+**Not completed:** the new registry is not yet connected to persisted task creation/approval/dispatch. `GET /api/agent-adapters` is inventory only. The API still does not start/poll/cancel Hermes or DeerFlow tasks, persist provider events, or recover provider runs. OpenHands remains discovery/health-only. No live agent provider or physical workstation service was contacted. The 5-second cleanup grace is a scheduler primitive; it does not itself prove a real provider cancellation.
