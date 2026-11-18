@@ -4145,6 +4145,7 @@ mod tests {
                 isolated_workspace_per_task: false,
             }),
             deerflow: None,
+            openhands: None,
         };
         assert!(build_agent_adapters(hermes).is_err());
 
@@ -4158,6 +4159,7 @@ mod tests {
                 isolated_workspace_per_task: true,
                 provisioner_url: Some("http://provisioner:8002".into()),
             }),
+            openhands: None,
         };
         assert!(build_agent_adapters(deerflow).is_err());
     }
@@ -4179,6 +4181,7 @@ mod tests {
                 isolated_workspace_per_task: true,
                 provisioner_url: None,
             }),
+            openhands: None,
         };
         let adapters = build_agent_adapters(config).unwrap();
         assert_eq!(adapters.len(), 2);
