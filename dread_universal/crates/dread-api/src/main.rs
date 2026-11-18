@@ -2220,6 +2220,72 @@ fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), 
     ))
 }
 
+async fn execute_agent_task(state: AppState, task_id: String, provider: String, adapter: Arc<dyn AgentAdapter>, capability_id: String, payload: Value, mut cancellation: watch::Receiver<bool>) {
+    let now = now_epoch();
+    {
+        let Ok(mut conn) = state.db.lock() else { return };
+        let Ok(tx) = conn.transaction() else { return };
+        let Ok(changed) = tx.execute("UPDATE tasks SET status = 'running', updated_at = ?2 WHERE id = ?1 AND status = 'queued'", params![task_id, now]) else { return };
+        if changed != 1 { return; }
+        let Ok(event) = append_task_event(&tx, &task_id, "task_started", &json!({"runner": provider, "capability_id": capability_id}), "executor", now) else { return };
+        if tx.commit().is_err() { return; }
+        let _ = state.events.send(event);
+    }
+    let request = StartTaskRequest { task_id: task_id.clone(), capability_id, input: payload, idempotency_key: format!("project-dread:{task_id}") };
+    let started = tokio::select! { result = adapter.start_task(request) => result, _ = cancellation.changed() => { finish_agent_task(&state, &task_id, "cancelled", None, Some("Cancelled before provider submission".into())); return; } };
+    let started = match started { Ok(task) => task, Err(error) => { finish_agent_task(&state, &task_id, "failed", None, Some(error.to_string())); return; } };
+    let Some(provider_id) = started.provider_task_id else { finish_agent_task(&state, &task_id, "failed", None, Some("Provider returned no task identifier".into())); return; };
+    if let Ok(conn) = state.db.lock() { let _ = conn.execute("UPDATE tasks SET provider_task_id = ?2, updated_at = ?3 WHERE id = ?1", params![task_id, provider_id, now_epoch()]); }
+    let mut cursor = 0u64;
+    loop {
+        if *cancellation.borrow() {
+            match adapter.cancel_task(&task_id, &provider_id).await {
+                Ok(task) => finish_agent_task(&state, &task_id, "cancelled", task.result, task.error),
+                Err(error) => finish_agent_task(&state, &task_id, "failed", None, Some(format!("Provider cancellation failed: {error}"))),
+            }
+            return;
+        }
+        match adapter.events(&task_id, &provider_id, cursor).await {
+            Ok(events) => for event in events {
+                cursor = cursor.max(event.sequence);
+                if let Ok(mut conn) = state.db.lock() {
+                    if let Ok(tx) = conn.transaction() {
+                        let _ = tx.execute("UPDATE tasks SET provider_event_cursor = ?2 WHERE id = ?1", params![task_id, cursor]);
+                        if let Ok(local) = append_task_event(&tx, &task_id, &event.event_type, &event.payload, &provider, event.occurred_at) { if tx.commit().is_ok() { let _ = state.events.send(local); } }
+                    }
+                }
+            },
+            Err(error) => { finish_agent_task(&state, &task_id, "failed", None, Some(format!("Provider event polling failed: {error}"))); return; }
+        }
+        match adapter.task_status(&task_id, &provider_id).await {
+            Ok(task) if matches!(task.state, AgentTaskState::Succeeded | AgentTaskState::Failed | AgentTaskState::Cancelled) => {
+                let result = adapter.task_result(&task_id, &provider_id).await.unwrap_or(task);
+                let status = match result.state { AgentTaskState::Succeeded => "completed", AgentTaskState::Cancelled => "cancelled", _ => "failed" };
+                finish_agent_task(&state, &task_id, status, result.result, result.error);
+                return;
+            }
+            Ok(_) => {},
+            Err(error) => { finish_agent_task(&state, &task_id, "failed", None, Some(format!("Provider status polling failed: {error}"))); return; }
+        }
+        tokio::select! { _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}, _ = cancellation.changed() => {} }
+    }
+}
+
+fn finish_agent_task(state: &AppState, task_id: &str, status: &str, result: Option<Value>, error: Option<String>) {
+    let now = now_epoch();
+    let Ok(mut conn) = state.db.lock() else { return };
+    let Ok(tx) = conn.transaction() else { return };
+    let current: Option<String> = tx.query_row("SELECT status FROM tasks WHERE id = ?1", params![task_id], |row| row.get(0)).optional().ok().flatten();
+    if !matches!(current.as_deref(), Some("running" | "cancelled")) { return; }
+    let final_status = if current.as_deref() == Some("cancelled") { "cancelled" } else { status };
+    let result_json = result.as_ref().map(Value::to_string);
+    if tx.execute("UPDATE tasks SET status = ?2, updated_at = ?3 WHERE id = ?1", params![task_id, final_status, now]).is_err() { return; }
+    if tx.execute("INSERT OR REPLACE INTO task_results (task_id, result_json, error, attempts, elapsed_ms, completed_at) VALUES (?1, ?2, ?3, 1, 0, ?4)", params![task_id, result_json, error, now]).is_err() { return; }
+    let event_type = match final_status { "completed" => "task_succeeded", "cancelled" => "task_execution_cancelled", _ => "task_failed" };
+    if let Ok(event) = append_task_event(&tx, task_id, event_type, &json!({"status": final_status, "error": error}), "executor", now) { if tx.commit().is_ok() { let _ = state.events.send(event); } }
+    if let Ok(mut registry) = state.cancellations.lock() { registry.remove(task_id); }
+}
+
 fn validate_gpu_chat_payload(payload: &Value) -> Result<(), String> {
     let object = payload
         .as_object()
