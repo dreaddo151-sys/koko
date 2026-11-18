@@ -52,6 +52,7 @@ install -m 0644 .env.example "$BUNDLE/.env.example"
 install -m 0755 scripts/install-user.sh "$BUNDLE/install-user.sh"
 install -m 0644 scripts/dread_gpu_supervisor_bridge.py "$BUNDLE/scripts/"
 install -m 0755 scripts/capture-workstation-baseline.sh "$BUNDLE/scripts/"
+install -m 0755 scripts/verify-release.sh "$BUNDLE/scripts/"
 install -m 0644 README.md "$BUNDLE/README.md"
 install -m 0644 docs/MASTER-PLAN.md docs/VERIFICATION.md docs/GPU_OWNERSHIP_BOUNDARY.md "$BUNDLE/docs/"
 
@@ -69,6 +70,7 @@ cp -a "$WEB_ROOT/." "$DEB/usr/share/dread-universal/web/dist/"
 install -m 0644 config/services.toml config/agents.toml "$DEB/usr/share/dread-universal/config/"
 install -m 0644 scripts/dread_gpu_supervisor_bridge.py "$DEB/usr/share/dread-universal/scripts/"
 install -m 0755 scripts/capture-workstation-baseline.sh "$DEB/usr/share/dread-universal/scripts/"
+install -m 0755 scripts/verify-release.sh "$DEB/usr/share/dread-universal/scripts/"
 install -m 0755 scripts/configure-user.sh "$DEB/usr/share/dread-universal/configure-user.sh"
 install -m 0644 systemd/dread-universal.service "$DEB/usr/lib/systemd/user/"
 install -m 0644 README.md "$DEB/usr/share/doc/dread-universal/"
@@ -92,7 +94,7 @@ dpkg-deb --build --root-owner-group "$DEB" "$DEB_PATH" >/dev/null
 dpkg-deb --contents "$DEB_PATH" >/dev/null
 (
   cd "$OUT_DIR"
-  sha256sum "$(basename "$TAR_PATH")" "$(basename "$DEB_PATH")" > SHA256SUMS
+  sha256sum "$(basename "$TAR_PATH")" "$(basename "$DEB_PATH")" verify-release.sh > SHA256SUMS
 )
 
 printf 'Ubuntu packages created:\n  %s\n  %s\n  %s/SHA256SUMS\n' "$TAR_PATH" "$DEB_PATH" "$OUT_DIR"
