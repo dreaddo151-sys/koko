@@ -649,6 +649,25 @@ mod tests {
         assert!(HermesApiAdapter::new("http://127.0.0.1:8642", "key", "Hermes").is_ok());
     }
 
+    #[tokio::test]
+    async fn hermes_adapter_stays_disabled_until_sandbox_is_verified() {
+        let adapter =
+            HermesApiAdapter::new("http://127.0.0.1:8642", "test-api-key", "Hermes").unwrap();
+
+        assert!(!adapter.descriptor().enabled);
+        assert!(adapter.capabilities().await.unwrap().is_empty());
+
+        let result = adapter
+            .start_task(StartTaskRequest {
+                task_id: "dread-task-isolated".into(),
+                capability_id: "hermes.run".into(),
+                input: json!({"input":"inspect approved workspace"}),
+                idempotency_key: "dread-task-isolated".into(),
+            })
+            .await;
+        assert_eq!(result.unwrap_err().code, "sandbox_not_attested");
+    }
+
     #[test]
     fn rejects_unsupported_run_input_fields_before_network_access() {
         let adapter =
