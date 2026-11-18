@@ -516,3 +516,42 @@ Candidate `c930fcd2d72433f7f43b772ab154ba11037f4175` adds:
 - Registry and cancellation regression tests are included. CI push run #625 (`44209673688`) passed Rust, Web and Ubuntu package smoke jobs on this candidate.
 
 **Still incomplete:** the API has not yet dispatched agent-run tasks to the registry. The inventory route is discovery only. Provider task creation, persisted provider events, remote cancellation and recovery are the next required implementation, followed by OpenHands task support and live sandbox acceptance.
+
+
+## Provider execution and recovery status — 2026-11-18 (PR #12)
+
+This addendum supersedes earlier statements in this document and the work log that Hermes and DeerFlow were library-only, that OpenHands had health discovery only, or that provider execution/recovery was not connected. It records repository and CI evidence only. It does not mark Phase 4 or the full product complete.
+
+- Repository: `dreaddo151-sys/koko`; PR #12 remains open and unmerged.
+- Branch: `feature/universal-capability-discovery-clean-2026-11-17`.
+- Verified source head: `976880a5cf6ffc587fb420d4458a29ede0d7410c`.
+- GitHub Actions run #690 (`44220143462`, push) and run #691 (`44220150439`, PR) both passed all three jobs at this exact head: Rust / Ubuntu 24.04, Web console / Ubuntu 24.04, and Ubuntu packages / smoke test.
+- Rust gates passed: `cargo fmt --all -- --check`, strict Clippy with warnings denied, `cargo test --workspace --locked` (111 passed, 0 failed across the workspace), and optimized release build. Installer syntax, portable installation migration/rollback, Python bridge/importer regressions, and the single-owner GPU boundary check also passed.
+- The Web job verified the committed npm lockfile, installed locked dependencies and built the production React console.
+- The package job assembled the Ubuntu `.deb` and portable bundle, verified package checksums and contents, installed the package in a disposable Ubuntu 24.04 runner, and smoke-tested the packaged API and production console. Artifacts were uploaded by the workflow.
+- The Rust tests include authenticated/task-scoped OpenHands Agent Server lifecycle coverage, provider registration/attestation checks, provider task persistence, task event replay, queue recovery, and mission dispatch regressions.
+
+### Implemented provider execution slice
+
+- `HermesApiAdapter`, `DeerFlowApiAdapter` and `OpenHandsAgentServerAdapter` are concrete implementations registered through fail-closed environment configuration. Provider credentials are never returned by the protected adapter inventory.
+- The task API routes approved provider-backed tasks through the worker. A provider capability must still be enabled and mapped to the selected adapter. A health probe alone never authorizes task execution.
+- Workers persist the provider task identity, provider event cursor, task event audit history, result and error. Event records are committed before they are published to stream subscribers.
+- Startup recovery requeues previously running provider tasks only when approval is recorded, the matching capability remains enabled and the configured adapter remains enabled. It resumes from the persisted event cursor and relies on deterministic provider identities/idempotent start behavior to reattach rather than create duplicate remote work. Invalid recovery candidates fail closed and block their mission.
+- Provider configuration is unset by default. Hermes requires an explicitly attested isolated terminal backend and workspace per task. DeerFlow requires AIO or BoxLite and a per-task isolated thread/workspace; local sandbox and remote provisioner configurations are rejected. OpenHands requires an explicit container identity, per-task workspace isolation and operator attestation that the Agent Server's stable `OH_SECRET_KEY` is securely configured.
+- The OpenHands integration uses the Agent Server conversation API, paginated event search and pause operation. A provider pause is resumable at the OpenHands side; DREAD records its task as cancelled, but this is not permanent conversation deletion.
+
+### Updated acceptance ledger
+
+| Phase | Current status | Remaining acceptance |
+|---|---|---|
+| 3 Task kernel and missions | Durable task lifecycle, approval-gated dispatch, bounded execution, persisted provider identity/events/cursor, provider recovery and dependency-aware mission dispatch are implemented and CI-tested | Resource-aware scheduling, explicit mission result/aggregation policy, live provider cancellation and restart drills |
+| 4 Agent adapters | Hermes, DeerFlow and OpenHands adapters are registered and connected to the approved task worker; mock lifecycle and recovery tests pass | Verify actual provider API versions, credentials, isolated sandboxes/workspaces, tool permissions, cancellation and restart recovery on the Ubuntu workstation |
+| 10 Ubuntu packaging | CI builds packages and validates checksums, contents, portable migration/rollback and disposable `.deb` API/UI smoke tests | Clean physical workstation install/upgrade/reboot, service-preservation and failed-`.deb`-upgrade rollback |
+| 11 Release | Not accepted | Complete remaining phases, dual-RTX-3090 acceptance, SBOM/license review, signed release metadata and workstation recovery evidence |
+
+### Safety and evidence boundary
+
+- These CI runs did not contact the user's live Hermes, DeerFlow or OpenHands endpoint, deploy the candidate to the workstation, execute a real provider task, restart a real provider, or validate container isolation and tool policy.
+- They did not install, restart or replace the legacy Python Hub, ComfyUI, Ollama, GPU Supervisor or other workstation services. The existing Python GPU Supervisor remains the single GPU lease authority.
+- Provider environment flags are operator attestations. They are not an automated proof of a secure container, per-task filesystem boundary or secret store. Keep providers disabled until those conditions have been independently verified.
+- The API and production console package are CI-verified candidates, not a completed Master Hub migration or production release. PR #12 must remain open/unmerged until the physical Ubuntu workstation and remaining product acceptance gates are complete.
