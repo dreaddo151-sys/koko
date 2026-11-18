@@ -47,8 +47,10 @@ jobs:
           name: dread-universal-api-ubuntu
           path: dread_universal/target/release/dread-universal
           if-no-files-found: error
-      - name: Validate Ubuntu installer scripts
-        run: bash -n scripts/install-user.sh scripts/configure-user.sh scripts/package-ubuntu.sh scripts/test_install_user.sh scripts/capture-workstation-baseline.sh
+      - name: Validate Ubuntu installer and release verification scripts
+        run: bash -n scripts/install-user.sh scripts/configure-user.sh scripts/package-ubuntu.sh scripts/test_install_user.sh scripts/capture-workstation-baseline.sh scripts/verify-release.sh scripts/test_verify_release.sh
+      - name: Test signed release verifier failure paths
+        run: bash scripts/test_verify_release.sh
       - name: Test portable install migration and rollback
         working-directory: dread_universal
         run: bash scripts/test_install_user.sh
@@ -94,9 +96,12 @@ jobs:
         with:
           name: dread-universal-web-ubuntu
           path: dread_universal/web/dist
-      - name: Validate installer scripts
+      - name: Validate installer and release verification scripts
         working-directory: dread_universal
-        run: bash -n scripts/install-user.sh scripts/configure-user.sh scripts/package-ubuntu.sh scripts/capture-workstation-baseline.sh
+        run: bash -n scripts/install-user.sh scripts/configure-user.sh scripts/package-ubuntu.sh scripts/capture-workstation-baseline.sh scripts/verify-release.sh scripts/test_verify_release.sh
+      - name: Test signed release verifier failure paths
+        working-directory: dread_universal
+        run: bash scripts/test_verify_release.sh
       - name: Assemble Ubuntu deb and portable bundle
         working-directory: dread_universal
         run: bash scripts/package-ubuntu.sh
@@ -112,6 +117,8 @@ jobs:
           grep -Fqx 'bundle/bin/dread-universal' "$archive_listing"
           grep -Fqx 'bundle/web/dist/index.html' "$archive_listing"
           grep -Fqx 'bundle/scripts/capture-workstation-baseline.sh' "$archive_listing"
+          grep -Fqx 'bundle/scripts/verify-release.sh' "$archive_listing"
+          grep -Fq 'verify-release.sh' dist/release/SHA256SUMS
       - name: Install and smoke-test packaged API and production console
         working-directory: dread_universal
         run: |
@@ -121,6 +128,7 @@ jobs:
           test -x /usr/share/dread-universal/configure-user.sh
           test -f /usr/lib/systemd/user/dread-universal.service
           test -x /usr/share/dread-universal/scripts/capture-workstation-baseline.sh
+          test -x /usr/share/dread-universal/scripts/verify-release.sh
           db_dir="$(mktemp -d)"
           api_log="$(mktemp)"
           token="$(openssl rand -hex 32)"
@@ -159,4 +167,5 @@ jobs:
             dread_universal/dist/release/*.deb
             dread_universal/dist/release/*.tar.gz
             dread_universal/dist/release/SHA256SUMS
+            dread_universal/dist/release/verify-release.sh
           if-no-files-found: error
