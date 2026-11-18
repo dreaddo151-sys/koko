@@ -359,3 +359,13 @@ Do not repeat basic GPU enumeration, generic API health or standalone llama.cpp 
 - Candidate commit: `4cfc38b955cc93d6b4550b402a2dab9db14f30a4`.
 - GitHub Actions run #565 (`44203367682`) passed all three jobs: Rust / Ubuntu 24.04, Web console / Ubuntu 24.04, and Ubuntu packages / smoke test. Rust checks included formatting, strict Clippy, workspace tests, release build, installer syntax, portable migration/rollback, Python bridge/importer regressions and GPU single-owner guard. Package checks included checksum/content validation and disposable Ubuntu 24.04 API/UI/authenticated host-profile smoke tests.
 - Run #565 is CI evidence only. It does not prove the current candidate is installed on the physical workstation or that dual-GPU inference, ComfyUI concurrency, real media artifacts, agent execution, or release rollback have passed there.
+
+
+## Multi-version CUDA Toolkit inventory — 2026-11-18
+
+- Expanded read-only CUDA compiler discovery from one selected `nvcc` to a full distinct compiler inventory. Discovery checks the PATH-selected compiler, `/usr/local/cuda/bin/nvcc`, and versioned `/usr/local/cuda-*/bin/nvcc` locations; canonical paths are deduplicated.
+- Each discovered toolkit reports its parsed compiler version and exact compiler path. The existing `cuda_toolkit_version` field remains as the PATH-first preferred version for compatibility; the additive `cuda_toolkits` array exposes every discovered compiler to API clients and the React host profile.
+- Added regression coverage for simultaneous CUDA 12.8 and 13.0 compiler installations. The UI now lists all discovered toolkits rather than implying only one is installed.
+- The candidate initially failed only the Rust formatting check in run #570; the exact rustfmt diff was applied in commit `13e400c96ebd0434f9c48b1da5532a8b20a79de9`.
+- GitHub Actions run #571 (`44204021257`) passed all three jobs on that candidate: Rust / Ubuntu 24.04, Web console / Ubuntu 24.04, and Ubuntu packages / smoke test. Rust formatting, strict Clippy, workspace tests, release build, installer/rollback tests, Python bridge/importer tests and GPU single-owner guard passed. Web production build and disposable Ubuntu package/API/UI/authenticated profile smoke tests passed.
+- This remains CI evidence. It does not prove both compilers are discovered on the physical workstation until the current candidate's host profile is run there. The known workstation had CUDA 12.8 and 13.0 compiler files in the earlier inventory; this new array is not yet physically accepted on that host.

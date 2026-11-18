@@ -476,3 +476,8 @@ Run #527 validates the current PR HEAD, whose commit updates acceptance document
 ## Latest implementation evidence — 2026-11-18
 
 Candidate `4cfc38b955cc93d6b4550b402a2dab9db14f30a4` adds capped cancellable retry backoff to the execution primitive and corrects the GNU mounted-filesystem probe to use the supported `df --output` interface. GitHub Actions run #565 (`44203367682`) passed all three Ubuntu 24.04 CI jobs. Retry remains disabled by default (one attempt); per-node retry policy, retryability/idempotency classification, resource-aware mission scheduling, provider cancellation propagation and interrupted-mission recovery remain incomplete. Physical workstation acceptance remains outstanding. See WORK-LOG.md for the dated evidence entry.
+
+
+## Latest discovery implementation evidence — 2026-11-18
+
+Candidate `13e400c96ebd0434f9c48b1da5532a8b20a79de9` adds a complete distinct `nvcc` compiler inventory (version plus compiler path) while preserving the PATH-first compatibility field. The UI lists all discovered toolkits; a regression covers CUDA 12.8 and 13.0. CI run #571 (`44204021257`) passed all three Ubuntu 24.04 jobs. Physical workstation confirmation is still outstanding. See WORK-LOG.md for the dated entry.
