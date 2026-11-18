@@ -15,7 +15,8 @@ use axum::{
 };
 use dread_agents::{
     AgentAdapter, AgentTaskState, CapabilityKind, CapabilityProvenance, CapabilityRecord,
-    CapabilityStatus, StartTaskRequest, deerflow::DeerFlowApiAdapter, hermes::HermesApiAdapter, openhands::OpenHandsAgentServerAdapter,
+    CapabilityStatus, StartTaskRequest, deerflow::DeerFlowApiAdapter, hermes::HermesApiAdapter,
+    openhands::OpenHandsAgentServerAdapter,
 };
 use dread_discovery::{
     discover, discover_agents, known_agent_endpoints, load_agents, load_services,
@@ -140,11 +141,7 @@ fn build_agent_adapters(
             "OpenHands",
         )
         .map_err(|error| error.to_string())?
-        .attest_container_sandbox(
-            &openhands.container_id,
-            true,
-            true,
-        )
+        .attest_container_sandbox(&openhands.container_id, true, true)
         .map_err(|error| error.to_string())?;
         adapters.insert("openhands".into(), Arc::new(adapter));
     }
