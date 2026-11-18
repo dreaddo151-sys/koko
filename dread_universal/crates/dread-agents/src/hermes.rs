@@ -266,6 +266,9 @@ impl AgentAdapter for HermesApiAdapter {
 
     fn capabilities<'a>(&'a self) -> AdapterFuture<'a, Vec<AgentCapability>> {
         Box::pin(async move {
+            if !self.sandbox_attested || !self.descriptor.enabled {
+                return Ok(Vec::new());
+            }
             let value = self
                 .json_request(reqwest::Method::GET, "/v1/capabilities", None, None)
                 .await?;
@@ -278,7 +281,7 @@ impl AgentAdapter for HermesApiAdapter {
                         .and_then(Value::as_bool)
                         .unwrap_or(false)
                 });
-            if !self.sandbox_attested || !self.descriptor.enabled || !supports_runs {
+            if !supports_runs {
                 return Ok(Vec::new());
             }
             Ok(vec![AgentCapability {
