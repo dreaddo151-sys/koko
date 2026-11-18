@@ -1285,10 +1285,7 @@ async fn enable_capability(
 ) -> Result<Json<Value>, ApiError> {
     let reason = input.reason.trim();
     let approved_by = state.operator_id.trim();
-    if reason.is_empty()
-        || reason.len() > 2000
-        || approved_by.is_empty()
-        || approved_by.len() > 160
+    if reason.is_empty() || reason.len() > 2000 || approved_by.is_empty() || approved_by.len() > 160
     {
         return Err(ApiError::bad_request(
             "A valid operator and review reason of 1 to 2000 characters are required",
@@ -1316,13 +1313,17 @@ async fn enable_capability(
     let fingerprint = match record.kind {
         CapabilityKind::Skill => {
             load_skill_context(&root, &record.id)
-                .map_err(|error| ApiError::conflict(format!("Skill source is no longer valid: {error}")))?
+                .map_err(|error| {
+                    ApiError::conflict(format!("Skill source is no longer valid: {error}"))
+                })?
                 .descriptor
                 .fingerprint
         }
         CapabilityKind::Agent => {
             load_agent_profile_context(&root, &record.id)
-                .map_err(|error| ApiError::conflict(format!("Agent profile is no longer valid: {error}")))?
+                .map_err(|error| {
+                    ApiError::conflict(format!("Agent profile is no longer valid: {error}"))
+                })?
                 .descriptor
                 .fingerprint
         }
@@ -1334,8 +1335,8 @@ async fn enable_capability(
     };
     approve_capability_record(&mut record, approved_by, reason, now, &fingerprint)?;
 
-    let updated = serde_json::to_string(&record)
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let updated =
+        serde_json::to_string(&record).map_err(|error| ApiError::internal(error.to_string()))?;
     let changed = tx
         .execute(
             "UPDATE capabilities SET record_json = ?2 WHERE id = ?1",
