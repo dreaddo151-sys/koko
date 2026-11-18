@@ -58,6 +58,15 @@ pub struct PhysicalStorageDevice {
     pub partitions: Vec<StoragePartition>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CpuTopology {
+    logical_threads: Option<usize>,
+    sockets: Option<usize>,
+    cores_per_socket: Option<usize>,
+    threads_per_core: Option<usize>,
+    numa_nodes: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct CudaToolkit {
     pub version: String,
@@ -73,6 +82,12 @@ pub struct HostProfile {
     pub kernel_release: Option<String>,
     pub cpu_model: Option<String>,
     pub cpu_physical_cores: Option<usize>,
+    /// Logical processors visible to the OS, distinct from process CPU quota.
+    pub cpu_logical_threads: Option<usize>,
+    pub cpu_sockets: Option<usize>,
+    pub cpu_cores_per_socket: Option<usize>,
+    pub cpu_threads_per_core: Option<usize>,
+    pub cpu_numa_nodes: Option<usize>,
     /// CUDA compatibility level advertised by the installed NVIDIA driver.
     pub cuda_version: Option<String>,
     /// Preferred CUDA Toolkit compiler version (PATH-first), when installed.
@@ -366,6 +381,59 @@ fn cpu_model(contents: &str) -> Option<String> {
             None
         }
     })
+}
+
+fn cpu_logical_threads(contents: &str) -> Option<usize> {
+    let count = contents
+        .lines()
+        .filter(|line| {
+            line.split_once(':')
+                .is_some_and(|(key, _)| key.trim() == "processor")
+        })
+        .count();
+    (count > 0).then_some(count)
+}
+
+fn parse_lscpu_topology(output: &str) -> CpuTopology {
+    let Ok(payload) = serde_json::from_str::<Value>(output) else {
+        return CpuTopology::default();
+    };
+    let Some(rows) = payload.get("lscpu").and_then(Value::as_array) else {
+        return CpuTopology::default();
+    };
+    let value = |name: &str| {
+        rows.iter().find_map(|row| {
+            let field = row
+                .get("field")
+                .and_then(Value::as_str)?
+                .trim()
+                .trim_end_matches(':')
+                .trim();
+            if field != name {
+                return None;
+            }
+            row.get("data")
+                .and_then(Value::as_str)?
+                .split_whitespace()
+                .next()?
+                .parse::<usize>()
+                .ok()
+        })
+    };
+    CpuTopology {
+        logical_threads: value("CPU(s)"),
+        sockets: value("Socket(s)"),
+        cores_per_socket: value("Core(s) per socket"),
+        threads_per_core: value("Thread(s) per core"),
+        numa_nodes: value("NUMA node(s)"),
+    }
+}
+
+fn discover_cpu_topology() -> CpuTopology {
+    find_binary(&["lscpu"])
+        .and_then(|binary| run_probe(&binary, &["--json"]))
+        .map(|output| parse_lscpu_topology(&output))
+        .unwrap_or_default()
 }
 
 fn cpu_physical_cores(contents: &str) -> Option<usize> {
@@ -685,7 +753,14 @@ pub fn detect_host() -> HostProfile {
     let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
     let (root_disk_total_mib, root_disk_available_mib) = root_disk_capacity_mib();
     let storage_devices = mounted_storage_devices();
-    let cpu_physical_cores = cpu_physical_cores(&cpuinfo);
+    let topology = discover_cpu_topology();
+    let cpu_physical_cores = cpu_physical_cores(&cpuinfo).or_else(|| {
+        topology
+            .cores_per_socket
+            .zip(topology.sockets)
+            .map(|(cores, sockets)| cores.saturating_mul(sockets))
+    });
+    let cpu_logical_threads = topology.logical_threads.or_else(|| cpu_logical_threads(&cpuinfo));
     let cuda_version = nvidia.as_deref().and_then(nvidia_cuda_version);
     let cuda_toolkits = cuda_toolkits();
     let cuda_toolkit_version = cuda_toolkits.first().map(|toolkit| toolkit.version.clone());
@@ -702,6 +777,11 @@ pub fn detect_host() -> HostProfile {
             .filter(|value| !value.is_empty()),
         cpu_model: cpu_model(&cpuinfo),
         cpu_physical_cores,
+        cpu_logical_threads,
+        cpu_sockets: topology.sockets,
+        cpu_cores_per_socket: topology.cores_per_socket,
+        cpu_threads_per_core: topology.threads_per_core,
+        cpu_numa_nodes: topology.numa_nodes,
         cuda_version,
         cuda_toolkit_version,
         cuda_toolkits,
@@ -752,6 +832,33 @@ mod tests {
         let sample = "processor : 0\nphysical id : 0\ncore id : 0\n\nprocessor : 1\nphysical id : 0\ncore id : 0\n\nprocessor : 2\nphysical id : 0\ncore id : 1\n\nprocessor : 3\nphysical id : 1\ncore id : 0\n";
         assert_eq!(cpu_physical_cores(sample), Some(3));
         assert_eq!(cpu_physical_cores("processor : 0\nprocessor : 1\n"), None);
+    }
+
+    #[test]
+    fn lscpu_json_parser_reports_sockets_cores_threads_and_numa() {
+        let output = r#"{
+            "lscpu": [
+                {"field": "CPU(s):", "data": "12"},
+                {"field": "Thread(s) per core:", "data": "2"},
+                {"field": "Core(s) per socket:", "data": "6"},
+                {"field": "Socket(s):", "data": "1"},
+                {"field": "NUMA node(s):", "data": "1"}
+            ]
+        }"#;
+        let topology = parse_lscpu_topology(output);
+        assert_eq!(topology.logical_threads, Some(12));
+        assert_eq!(topology.threads_per_core, Some(2));
+        assert_eq!(topology.cores_per_socket, Some(6));
+        assert_eq!(topology.sockets, Some(1));
+        assert_eq!(topology.numa_nodes, Some(1));
+        assert_eq!(parse_lscpu_topology("not-json"), CpuTopology::default());
+    }
+
+    #[test]
+    fn proc_cpuinfo_logical_processor_count_is_separate_from_quota() {
+        let sample = "processor : 0\nmodel name : CPU\n\nprocessor : 1\nmodel name : CPU\n";
+        assert_eq!(cpu_logical_threads(sample), Some(2));
+        assert_eq!(cpu_logical_threads("model name : CPU\n"), None);
     }
 
     #[test]
