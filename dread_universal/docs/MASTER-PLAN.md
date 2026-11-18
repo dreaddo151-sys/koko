@@ -481,3 +481,8 @@ Candidate `4cfc38b955cc93d6b4550b402a2dab9db14f30a4` adds capped cancellable ret
 ## Latest discovery implementation evidence — 2026-11-18
 
 Candidate `13e400c96ebd0434f9c48b1da5532a8b20a79de9` adds a complete distinct `nvcc` compiler inventory (version plus compiler path) while preserving the PATH-first compatibility field. The UI lists all discovered toolkits; a regression covers CUDA 12.8 and 13.0. CI run #571 (`44204021257`) passed all three Ubuntu 24.04 jobs. Physical workstation confirmation is still outstanding. See WORK-LOG.md for the dated entry.
+
+
+## Latest execution-safety evidence — 2026-11-18
+
+Candidate `9e9a7502c5a149214749599483bf17b28ee412cd` adds explicit retryable/permanent error classification. Ordinary runner string errors and timeouts are not automatically replayed; only explicitly retryable provider failures can enter capped, cancellable backoff. CI run #578 (`44204756118`) passed all three Ubuntu 24.04 jobs. Mission-specific retry policy, provider idempotency wiring and recovery remain incomplete. See WORK-LOG.md.

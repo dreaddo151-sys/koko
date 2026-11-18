@@ -369,3 +369,12 @@ Do not repeat basic GPU enumeration, generic API health or standalone llama.cpp 
 - The candidate initially failed only the Rust formatting check in run #570; the exact rustfmt diff was applied in commit `13e400c96ebd0434f9c48b1da5532a8b20a79de9`.
 - GitHub Actions run #571 (`44204021257`) passed all three jobs on that candidate: Rust / Ubuntu 24.04, Web console / Ubuntu 24.04, and Ubuntu packages / smoke test. Rust formatting, strict Clippy, workspace tests, release build, installer/rollback tests, Python bridge/importer tests and GPU single-owner guard passed. Web production build and disposable Ubuntu package/API/UI/authenticated profile smoke tests passed.
 - This remains CI evidence. It does not prove both compilers are discovered on the physical workstation until the current candidate's host profile is run there. The known workstation had CUDA 12.8 and 13.0 compiler files in the earlier inventory; this new array is not yet physically accepted on that host.
+
+
+## Retry safety and idempotency boundary — 2026-11-18
+
+- Added a typed `RunnerError` with explicit permanent/retryable classification. The compatibility `ExecutionGate::run` path maps ordinary string errors to permanent failures, so existing API runners cannot be retried accidentally.
+- Added `run_with_retryable_errors` for future providers that can prove a failure is safe to retry (for example, by a provider idempotency key). Only explicitly retryable failures enter the capped exponential backoff. A timeout is not retried because the remote side-effect outcome may be unknown. Cancellation remains observable during backoff.
+- Regression tests cover retry of explicitly retryable transport errors, ordinary string/permanent errors not being replayed, cancellation during backoff, and timeout not being replayed even when the configured maximum is three attempts.
+- Candidate `9e9a7502c5a149214749599483bf17b28ee412cd`; GitHub Actions run #578 (`44204756118`) passed all three jobs. Rust formatting, strict Clippy, workspace tests, release build, installer/rollback, Python bridge/importer and GPU single-owner checks passed; Web production build and Ubuntu package/API/UI/authenticated profile smoke passed.
+- **Remaining limitation:** this is a safe retry primitive, not a complete mission retry policy. The production API still uses the permanent-error compatibility path and default one attempt. Mission-node retry settings, provider-specific idempotency integration, resource-class scheduling, and retry/recovery aggregation remain outstanding.
