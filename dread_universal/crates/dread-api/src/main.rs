@@ -2283,14 +2283,7 @@ fn finish_agent_confirmation_reservation(
             "OpenHands confirmation reservation is no longer pending",
         ));
     }
-    let event = append_task_event(
-        &tx,
-        task_id,
-        event_type,
-        event_payload,
-        actor,
-        now,
-    )?;
+    let event = append_task_event(&tx, task_id, event_type, event_payload, actor, now)?;
     tx.commit()
         .map_err(|error| ApiError::internal(error.to_string()))?;
     let _ = state.events.send(event);
@@ -2465,7 +2458,9 @@ async fn respond_to_agent_confirmation(
         )?;
         return Err(ApiError {
             status: StatusCode::BAD_GATEWAY,
-            message: format!("OpenHands confirmation response failed; outcome marked uncertain: {error}"),
+            message: format!(
+                "OpenHands confirmation response failed; outcome marked uncertain: {error}"
+            ),
         });
     }
 
