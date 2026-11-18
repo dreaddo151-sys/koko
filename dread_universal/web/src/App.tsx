@@ -5,7 +5,7 @@ import { Activity, AlertCircle, Bot, Check, ChevronRight, Cpu, Gauge, KeyRound, 
 type Model = { id: string };
 type Task = { id: string; title: string; task_type: string; status: string; created_at: number };
 type Agent = { id: string; name: string; status: string; adapter?: string };
-type Event = { sequence: number; event_type: string; actor: string; created_at: number };
+type Event = { sequence: number; event_type: string; actor: string; created_at: number; payload?: Record<string, unknown> };
 type Result = { result?: unknown; error?: string | null; attempts?: number; elapsed_ms?: number };
 type Capability = { id: string; name: string; kind: string; description: string; version?: string | null; license?: string | null; compatibility: string; dependencies: string[]; adapter?: string | null; status: string; provenance: { source_name: string; source_version?: string | null } };
 type SkillPreview = { id: string; name: string; description: string; content: string; trust: string; execution: string };
@@ -37,7 +37,7 @@ const mib = (value: number | null) => value === null ? "NOT REPORTED" : `${(valu
 
 function Pill({value}:{value:string}) {
   const s = value.toLowerCase();
-  const tone = ["online","ok","completed","approved","ready"].includes(s) ? "good" : ["running","queued","pending_approval"].includes(s) ? "warm" : ["failed","offline","cancelled","degraded","locked"].includes(s) ? "bad" : "";
+  const tone = ["online","ok","completed","approved","ready"].includes(s) ? "good" : ["running","queued","pending_approval","waiting_for_confirmation"].includes(s) ? "warm" : ["failed","offline","cancelled","degraded","locked"].includes(s) ? "bad" : "";
   return <span className={`pill ${tone}`}><i />{value.replaceAll("_"," ")}</span>;
 }
 function App() {
@@ -123,6 +123,29 @@ function App() {
   };
   const disconnect=()=>{setToken("");setDraft("");setPage("overview");setActive("");setEvents([]);setResult(null);setTasks([]);setAgents([]);setCapabilities([]);setModels([]);setServices([]);setModel("");setConnected(false);setSupervisorConfigured(false);};
   const activeTask=tasks.find(x=>x.id===active);
+  const latestWaitEvent=[...events].reverse().find(event=>event.event_type==="agent_waiting_for_confirmation");
+  const latestDecisionEvent=[...events].reverse().find(event=>event.event_type==="agent_confirmation_response");
+  const pendingActionEvent=latestWaitEvent?[...events].reverse().find(event=>event.event_type==="ActionEvent"&&event.sequence<latestWaitEvent.sequence):undefined;
+  const pendingAction=pendingActionEvent?.payload??{};
+  const pendingActionId=typeof pendingAction.id==="string"?pendingAction.id:"";
+  const pendingActionTool=typeof pendingAction.tool_name==="string"?pendingAction.tool_name.slice(0,120):"";
+  const pendingActionSummary=typeof pendingAction.summary==="string"?pendingAction.summary.slice(0,2000):"";
+  const pendingActionRisk=typeof pendingAction.security_risk==="string"?pendingAction.security_risk.slice(0,32):"UNKNOWN";
+  const awaitingAgentConfirmation=Boolean(activeTask?.status==="running"&&latestWaitEvent&&(!latestDecisionEvent||latestWaitEvent.sequence>latestDecisionEvent.sequence));
+  const respondToAgentConfirmation=async(accept:boolean)=>{
+    if(!token||!active||!pendingActionId)return;
+    setBusy(true);setError("");
+    try{
+      await api(`/api/tasks/${active}/agent-confirmation`,token,{method:"POST",body:JSON.stringify({
+        accept,
+        reason:accept?"Operator reviewed and accepted the displayed OpenHands action in DREAD Console.":"Operator rejected the displayed OpenHands action in DREAD Console.",
+        expected_action_id:pendingActionId
+      })});
+      setNotice(accept?"OpenHands action approved. The agent may continue.":"OpenHands action rejected. The agent received the denial.");
+      await refresh();
+    }catch(e){setError(e instanceof Error?e.message:"OpenHands confirmation decision failed");}
+    finally{setBusy(false);}
+  };
   const nav:[Page,string,ReactNode,string][]=[
     ["overview","Command deck",<Activity/>,"01"],["gpu","GPU telemetry",<Gauge/>,"02"],["models","Model arsenal",<Layers3/>,"03"],["agents","Agent network",<Bot/>,"04"],["tasks","Mission queue",<Workflow/>,"05"],["capabilities","Pstack registry",<ShieldCheck/>,"06"]
   ];
