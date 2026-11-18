@@ -134,13 +134,14 @@ impl DeerFlowApiAdapter {
         let supported = [
             "AioSandboxProvider",
             "BoxliteProvider",
-            "E2BSandboxProvider",
-            "OpenSandboxProvider",
         ];
-        if !supported.iter().any(|provider| provider_class.ends_with(provider)) {
+        if !supported
+            .iter()
+            .any(|provider| provider_class.ends_with(provider))
+        {
             return Err(adapter_error(
                 "unsafe_sandbox_provider",
-                "DeerFlow must use AioSandboxProvider, BoxliteProvider, E2BSandboxProvider or OpenSandboxProvider; LocalSandboxProvider and unknown providers are denied".into(),
+                "DeerFlow must use the local AioSandboxProvider or BoxliteProvider; LocalSandboxProvider and remote/unknown providers are denied".into(),
                 false,
             ));
         }
@@ -157,7 +158,12 @@ impl DeerFlowApiAdapter {
     }
 
     fn endpoint(&self, path: &str) -> String {
-        format!("{}{}{}", self.base_url.as_str().trim_end_matches('/'), self.api_prefix, path)
+        format!(
+            "{}{}{}",
+            self.base_url.as_str().trim_end_matches('/'),
+            self.api_prefix,
+            path
+        )
     }
 
     async fn json_request(
@@ -193,11 +199,7 @@ impl DeerFlowApiAdapter {
         parse_json_response(response).await
     }
 
-    async fn read_run(
-        &self,
-        thread_id: &str,
-        run_id: &str,
-    ) -> Result<Value, AgentAdapterError> {
+    async fn read_run(&self, thread_id: &str, run_id: &str) -> Result<Value, AgentAdapterError> {
         validate_thread_id(thread_id)?;
         validate_run_id(run_id)?;
         self.json_request(
@@ -210,9 +212,7 @@ impl DeerFlowApiAdapter {
         .await
     }
 
-    fn split_provider_id(
-        provider_task_id: &str,
-    ) -> Result<(&str, &str), AgentAdapterError> {
+    fn split_provider_id(provider_task_id: &str) -> Result<(&str, &str), AgentAdapterError> {
         let (thread_id, run_id) = provider_task_id.split_once(':').ok_or_else(|| {
             adapter_error(
                 "invalid_provider_task_id",
@@ -226,7 +226,11 @@ impl DeerFlowApiAdapter {
     }
 
     fn to_task(&self, task_id: &str, provider_task_id: &str, run: &Value) -> AgentTask {
-        let state = run_state(run.get("status").and_then(Value::as_str).unwrap_or("unknown"));
+        let state = run_state(
+            run.get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+        );
         AgentTask {
             task_id: task_id.to_string(),
             state,
@@ -289,7 +293,10 @@ impl AgentAdapter for DeerFlowApiAdapter {
                     AgentHealthState::Unknown
                 },
                 checked_at: now_epoch(),
-                detail: Some(format!("DeerFlow /health/ready returned HTTP {}", status.as_u16())),
+                detail: Some(format!(
+                    "DeerFlow /health/ready returned HTTP {}",
+                    status.as_u16()
+                )),
             })
         })
     }
@@ -337,10 +344,20 @@ impl AgentAdapter for DeerFlowApiAdapter {
                 ));
             }
             let object = request.input.as_object().ok_or_else(|| {
-                adapter_error("invalid_input", "DeerFlow input must be an object".into(), false)
+                adapter_error(
+                    "invalid_input",
+                    "DeerFlow input must be an object".into(),
+                    false,
+                )
             })?;
             if object.keys().any(|key| {
-                !["objective", "assistant_id", "model_name", "thinking_enabled"].contains(&key.as_str())
+                ![
+                    "objective",
+                    "assistant_id",
+                    "model_name",
+                    "thinking_enabled",
+                ]
+                .contains(&key.as_str())
             }) {
                 return Err(adapter_error(
                     "invalid_input",
@@ -360,8 +377,22 @@ impl AgentAdapter for DeerFlowApiAdapter {
                         false,
                     )
                 })?;
+            if object.get("assistant_id").is_some_and(|value| !value.is_string())
+                || object.get("model_name").is_some_and(|value| !value.is_string())
+                || object
+                    .get("thinking_enabled")
+                    .is_some_and(|value| !value.is_boolean())
+            {
+                return Err(adapter_error(
+                    "invalid_input",
+                    "DeerFlow assistant_id/model_name/thinking_enabled fields have invalid types".into(),
+                    false,
+                ));
+            }
             let assistant_id = object.get("assistant_id").and_then(Value::as_str);
-            if assistant_id.is_some_and(|value| value.is_empty() || value.len() > MAX_ASSISTANT_ID_BYTES) {
+            if assistant_id
+                .is_some_and(|value| value.is_empty() || value.len() > MAX_ASSISTANT_ID_BYTES)
+            {
                 return Err(adapter_error(
                     "invalid_input",
                     "DeerFlow assistant_id must contain 1-128 characters".into(),
@@ -476,22 +507,30 @@ impl AgentAdapter for DeerFlowApiAdapter {
     ) -> AdapterFuture<'a, Vec<AgentEvent>> {
         Box::pin(async move {
             let (thread_id, run_id) = Self::split_provider_id(provider_task_id)?;
+            let query = if after_sequence == 0 {
+                Vec::new()
+            } else {
+                vec![("after_seq", after_sequence.to_string())]
+            };
             let events = self
                 .json_request(
                     reqwest::Method::GET,
                     &format!("/threads/{thread_id}/runs/{run_id}/events"),
                     None,
                     None,
-                    &[("after_seq", after_sequence.to_string())],
+                    &query,
                 )
                 .await?;
-            let rows = events.as_array().or_else(|| events.get("data").and_then(Value::as_array)).ok_or_else(|| {
-                adapter_error(
-                    "invalid_provider_response",
-                    "DeerFlow events endpoint did not return an array".into(),
-                    false,
-                )
-            })?;
+            let rows = events
+                .as_array()
+                .or_else(|| events.get("data").and_then(Value::as_array))
+                .ok_or_else(|| {
+                    adapter_error(
+                        "invalid_provider_response",
+                        "DeerFlow events endpoint did not return an array".into(),
+                        false,
+                    )
+                })?;
             Ok(rows
                 .iter()
                 .filter_map(|row| {
@@ -636,10 +675,7 @@ fn adapter_error(code: &str, message: String, retryable: bool) -> AgentAdapterEr
 }
 
 fn validate_idempotency_key(key: &str) -> Result<(), AgentAdapterError> {
-    if key.is_empty()
-        || key.len() > 255
-        || !key.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
-    {
+    if key.is_empty() || key.len() > 255 || !key.bytes().all(|byte| (0x21..=0x7e).contains(&byte)) {
         return Err(adapter_error(
             "invalid_idempotency_key",
             "DeerFlow Idempotency-Key must be 1-255 visible ASCII characters".into(),
@@ -684,11 +720,9 @@ fn validate_run_id(run_id: &str) -> Result<(), AgentAdapterError> {
 fn thread_id_for_task(task_id: &str) -> String {
     // Stable FNV-1a mapping makes thread creation idempotent across a retry
     // after an uncertain HTTP result without exposing arbitrary task text.
-    let hash = task_id
-        .bytes()
-        .fold(0xcbf29ce484222325_u64, |state, byte| {
-            (state ^ u64::from(byte)).wrapping_mul(0x100000001b3)
-        });
+    let hash = task_id.bytes().fold(0xcbf29ce484222325_u64, |state, byte| {
+        (state ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    });
     format!("dread-{hash:016x}")
 }
 
@@ -724,8 +758,18 @@ mod tests {
         )
         .unwrap();
         assert!(!adapter.descriptor().enabled);
-        assert!(adapter.clone().attest_container_sandbox("LocalSandboxProvider", true).is_err());
-        assert!(adapter.clone().attest_container_sandbox("AioSandboxProvider", false).is_err());
+        assert!(
+            adapter
+                .clone()
+                .attest_container_sandbox("LocalSandboxProvider", true)
+                .is_err()
+        );
+        assert!(
+            adapter
+                .clone()
+                .attest_container_sandbox("AioSandboxProvider", false)
+                .is_err()
+        );
         let enabled = adapter
             .attest_container_sandbox("deerflow.sandbox.aio:AioSandboxProvider", true)
             .unwrap();
@@ -734,10 +778,27 @@ mod tests {
 
     #[test]
     fn rejects_remote_endpoints_and_unknown_api_prefixes() {
-        assert!(DeerFlowApiAdapter::new("http://example.com:2026", "/api", "dfp_token", "DeerFlow").is_err());
-        assert!(DeerFlowApiAdapter::new("http://localhost:2026", "/api", "dfp_token", "DeerFlow").is_err());
-        assert!(DeerFlowApiAdapter::new("http://127.0.0.1:2026", "/other", "dfp_token", "DeerFlow").is_err());
-        assert!(DeerFlowApiAdapter::new("http://user:pass@127.0.0.1:2026", "/api", "dfp_token", "DeerFlow").is_err());
+        assert!(
+            DeerFlowApiAdapter::new("http://example.com:2026", "/api", "dfp_token", "DeerFlow")
+                .is_err()
+        );
+        assert!(
+            DeerFlowApiAdapter::new("http://localhost:2026", "/api", "dfp_token", "DeerFlow")
+                .is_err()
+        );
+        assert!(
+            DeerFlowApiAdapter::new("http://127.0.0.1:2026", "/other", "dfp_token", "DeerFlow")
+                .is_err()
+        );
+        assert!(
+            DeerFlowApiAdapter::new(
+                "http://user:pass@127.0.0.1:2026",
+                "/api",
+                "dfp_token",
+                "DeerFlow"
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -754,7 +815,10 @@ mod tests {
 
     #[test]
     fn thread_id_is_stable_and_provider_id_validation_is_strict() {
-        assert_eq!(thread_id_for_task("task_123"), thread_id_for_task("task_123"));
+        assert_eq!(
+            thread_id_for_task("task_123"),
+            thread_id_for_task("task_123")
+        );
         assert!(validate_thread_id("dread-123").is_ok());
         assert!(validate_thread_id("../etc").is_err());
         assert!(validate_run_id("run-123").is_ok());
@@ -777,7 +841,10 @@ mod tests {
         use tokio::net::TcpListener;
 
         #[derive(Clone)]
-        struct MockState(Arc<Mutex<Vec<Value>>>);
+        struct MockState {
+            requests: Arc<Mutex<Vec<Value>>>,
+            status: Arc<Mutex<String>>,
+        }
 
         async fn create_thread(
             State(state): State<MockState>,
@@ -810,15 +877,19 @@ mod tests {
             )
         }
 
-        async fn get_run(Path((_thread_id, run_id)): Path<(String, String)>) -> Json<Value> {
-            Json(json!({"run_id":run_id,"status":"success","result":{"answer":"done"}}))
+        async fn get_run(
+            State(state): State<MockState>,
+            Path((_thread_id, run_id)): Path<(String, String)>,
+        ) -> Json<Value> {
+            let status = state.status.lock().unwrap().clone();
+            Json(json!({"run_id":run_id,"status":status,"result":{"answer":"done"}}))
         }
 
         async fn get_events(
             Path((_thread_id, _run_id)): Path<(String, String)>,
             Query(query): Query<std::collections::HashMap<String, String>>,
         ) -> Json<Value> {
-            assert_eq!(query.get("after_seq").map(String::as_str), Some("0"));
+            assert!(query.is_empty());
             Json(json!([{"seq":1,"event":"run.started","data":{"status":"running"}}]))
         }
 
@@ -827,21 +898,30 @@ mod tests {
             Path((_thread_id, run_id)): Path<(String, String)>,
             Query(query): Query<std::collections::HashMap<String, String>>,
         ) -> impl IntoResponse {
-            state.0.lock().unwrap().push(json!({
+            state.requests.lock().unwrap().push(json!({
                 "path":format!("/cancel/{run_id}"),
                 "action":query.get("action"),
                 "wait":query.get("wait")
             }));
-            (StatusCode::ACCEPTED, Json(json!({"status":"cancelled"})))
+            *state.status.lock().unwrap() = "cancelled".into();
+            StatusCode::NO_CONTENT
         }
 
         async fn get_messages(Path((_thread_id, _run_id)): Path<(String, String)>) -> Json<Value> {
-            Json(json!({"data":[{"role":"assistant","content":"verified result"}],"has_more":false}))
+            Json(
+                json!({"data":[{"role":"assistant","content":"verified result"}],"has_more":false}),
+            )
         }
 
-        let state = MockState(Arc::new(Mutex::new(Vec::new())));
+        let state = MockState {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            status: Arc::new(Mutex::new("success".into())),
+        };
         let app = Router::new()
-            .route("/api/health/ready", get(|| async { Json(json!({"status":"ready"})) }))
+            .route(
+                "/health/ready",
+                get(|| async { Json(json!({"status":"ready"})) }),
+            )
             .route("/api/threads", post(create_thread))
             .route("/api/threads/{thread_id}/runs", post(create_run))
             .route("/api/threads/{thread_id}/runs/{run_id}", get(get_run))
@@ -883,18 +963,22 @@ mod tests {
         let events = adapter.events("dread-task-123", &provider_id, 0).await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].sequence, 1);
-
-        let cancelled = adapter.cancel_task("dread-task-123", &provider_id).await.unwrap();
-        assert_eq!(cancelled.state, AgentTaskState::Succeeded);
         let result = adapter.task_result("dread-task-123", &provider_id).await.unwrap();
         assert_eq!(result.result.unwrap()["messages"][0]["content"], "verified result");
 
-        let requests = state.0.lock().unwrap();
+        let cancelled = adapter.cancel_task("dread-task-123", &provider_id).await.unwrap();
+        assert_eq!(cancelled.state, AgentTaskState::Cancelled);
+
+        let requests = state.requests.lock().unwrap();
         let run_request = requests.iter().find(|row| row["path"].as_str().unwrap_or("").ends_with("/runs")).unwrap();
         assert_eq!(run_request["authorization"], "Bearer dfp_test-token");
         assert_eq!(run_request["idempotency_key"], "dread-task-123");
         assert_eq!(run_request["body"]["on_disconnect"], "continue");
         assert_eq!(run_request["body"]["multitask_strategy"], "reject");
-        assert!(requests.iter().any(|row| row["action"] == "interrupt" && row["wait"] == "true"));
+        assert!(
+            requests
+                .iter()
+                .any(|row| row["action"] == "interrupt" && row["wait"] == "true")
+        );
     }
 }
