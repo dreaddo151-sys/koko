@@ -4,6 +4,10 @@ import { Activity, AlertCircle, Bot, Check, ChevronRight, Cpu, Gauge, KeyRound, 
 
 type Model = { id: string };
 type Task = { id: string; title: string; task_type: string; status: string; created_at: number };
+type MissionNode = { id: string; depends_on?: string[]; priority?: number; task_type: string; payload?: unknown };
+type MissionSummary = { mission_id: string; status: string; created_at: number; node_count: number };
+type MissionTask = { node_id: string; task_id: string; depends_on: string[]; status: string; result?: unknown; error?: string | null; attempts: number; elapsed_ms: number };
+type MissionDetail = { mission_id: string; graph: { mission_id: string; nodes: MissionNode[] }; execution_order: string[]; tasks: MissionTask[]; status: string; created_at: number; execution_started: boolean };
 type Agent = { id: string; name: string; status: string; adapter?: string };
 type Event = { sequence: number; event_type: string; actor: string; created_at: number; payload?: Record<string, unknown> };
 type Result = { result?: unknown; error?: string | null; attempts?: number; elapsed_ms?: number };
@@ -15,7 +19,7 @@ type StorageDevice = { source: string; filesystem: string; mount_point: string; 
 type StoragePartition = { name: string; filesystem: string | null; mount_points: string[] };
 type PhysicalStorageDevice = { name: string; model: string | null; transport: string | null; size_mib: number | null; partitions: StoragePartition[] };
 type HostProfile = { os: string; architecture: string; distribution: string | null; distribution_version: string | null; kernel_release: string | null; cpu_model: string | null; cpu_physical_cores: number | null; cpu_logical_threads: number | null; cpu_sockets: number | null; cpu_cores_per_socket: number | null; cpu_threads_per_core: number | null; cpu_numa_nodes: number | null; cuda_version: string | null; cuda_toolkit_version: string | null; cuda_toolkits: {version: string; compiler_path: string}[]; cpu_threads: number; memory_total_mib: number | null; memory_available_mib: number | null; root_disk_total_mib: number | null; root_disk_available_mib: number | null; storage_devices: StorageDevice[]; physical_storage_devices: PhysicalStorageDevice[]; gpu_devices: GpuDevice[]; llama_server: string | null; nvidia_smi_available: boolean; rocm_smi_available: boolean; xpu_smi_available: boolean; inference_backend: string };
-type Page = "overview" | "tasks" | "agents" | "capabilities" | "models" | "gpu";
+type Page = "overview" | "missions" | "tasks" | "agents" | "capabilities" | "models" | "gpu";
 
 async function api<T>(path: string, token: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
@@ -44,7 +48,14 @@ function App() {
   const [token,setToken]=useState(""); const [draft,setDraft]=useState(""); const [show,setShow]=useState(false);
   const [connected,setConnected]=useState(false); const [supervisorOnline,setSupervisorConfigured]=useState(false); const [error,setError]=useState(""); const [busy,setBusy]=useState(false);
   const [models,setModels]=useState<Model[]>([]); const [model,setModel]=useState("");
-  const [tasks,setTasks]=useState<Task[]>([]); const [agents,setAgents]=useState<Agent[]>([]); const [capabilities,setCapabilities]=useState<Capability[]>([]); const [services,setServices]=useState<Service[]>([]);
+  const [tasks,setTasks]=useState<Task[]>([]); const [missions,setMissions]=useState<MissionSummary[]>([]); const [agents,setAgents]=useState<Agent[]>([]); const [capabilities,setCapabilities]=useState<Capability[]>([]); const [services,setServices]=useState<Service[]>([]);
+  const [selectedMission,setSelectedMission]=useState("");
+  const [missionDetail,setMissionDetail]=useState<MissionDetail|null>(null);
+  const [missionId,setMissionId]=useState(()=>`mission-${Date.now()}`);
+  const [missionNodes,setMissionNodes]=useState(`[
+  {"id":"discover","depends_on":[],"priority":5,"task_type":"service_discovery","payload":{}},
+  {"id":"summarize","depends_on":["discover"],"priority":1,"task_type":"service_discovery","payload":{}}
+]`);
   const [skillPreview,setSkillPreview]=useState<SkillPreview|null>(null); const [notice,setNotice]=useState(""); const [selectedSkills,setSelectedSkills]=useState<string[]>([]); const [hostProfile,setHostProfile]=useState<HostProfile|null>(null);
   const [prompt,setPrompt]=useState(""); const [active,setActive]=useState("");
   const [events,setEvents]=useState<Event[]>([]); const [result,setResult]=useState<Result|null>(null);
@@ -53,15 +64,30 @@ function App() {
   const refresh=useCallback(async()=>{
     if(!token){setConnected(false);return;}
     try{
-      const [health,gpuHealth,ml,tl,al,cl,sv,hp]=await Promise.all([
+      const [health,gpuHealth,ml,tl,mi,al,cl,sv,hp]=await Promise.all([
         api<{status:string}>("/health",""), api<{supervisor_online?:boolean}>("/api/gpu/health",token), api<{data?:Model[]}>("/api/gpu/models",token),
-        api<{items?:Task[]}>("/api/tasks",token), api<{items?:Agent[]} >("/api/agents",token), api<{items?:Capability[]}>("/api/capabilities",token), api<Service[]>("/api/services",token), api<HostProfile>("/api/system/profile",token)
+        api<{items?:Task[]}>("/api/tasks",token), api<{items?:MissionSummary[]}>("/api/missions",token), api<{items?:Agent[]} >("/api/agents",token), api<{items?:Capability[]}>("/api/capabilities",token), api<Service[]>("/api/services",token), api<HostProfile>("/api/system/profile",token)
       ]);
-      setConnected(health.status==="ok"); setSupervisorConfigured(Boolean(gpuHealth.supervisor_online)); setModels(ml.data??[]); setTasks(tl.items??[]); setAgents(al.items??[]); setCapabilities(cl.items??[]); setServices(sv??[]); setHostProfile(hp); setError(""); setLastRefresh(Date.now());
+      setConnected(health.status==="ok"); setSupervisorConfigured(Boolean(gpuHealth.supervisor_online)); setModels(ml.data??[]); setTasks(tl.items??[]); setMissions(mi.items??[]); setAgents(al.items??[]); setCapabilities(cl.items??[]); setServices(sv??[]); setHostProfile(hp); setError(""); setLastRefresh(Date.now());
     }catch(e){setConnected(false);setError(e instanceof Error?e.message:"API request failed");}
   },[token]);
   useEffect(()=>{void refresh();if(!token)return;const t=window.setInterval(()=>void refresh(),5000);return()=>window.clearInterval(t);},[refresh,token]);
   useEffect(()=>{if(models.length&&!models.some(x=>x.id===model))setModel(models[0].id);},[models,model]);
+  useEffect(()=>{
+    if(!token||!selectedMission){setMissionDetail(null);return;}
+    let dead=false;
+    const load=async()=>{
+      try{
+        const out=await api<{item:MissionDetail}>(`/api/missions/${encodeURIComponent(selectedMission)}`,token);
+        if(!dead)setMissionDetail(out.item);
+      }catch(e){
+        if(!dead)setError(e instanceof Error?e.message:"Mission refresh failed");
+      }
+    };
+    void load();
+    const timer=window.setInterval(()=>void load(),2500);
+    return()=>{dead=true;window.clearInterval(timer);};
+  },[selectedMission,token]);
   useEffect(()=>{
     if(!token||!active){setEvents([]);setResult(null);return;}
     let dead=false;
@@ -84,6 +110,39 @@ function App() {
       const out=await api<{item:Task}>("/api/tasks",token,{method:"POST",body:JSON.stringify({title:type==="gpu_chat"?`Chat · ${model}`:"Local service discovery",task_type:type,payload})});
       setTasks(x=>[out.item,...x]);setActive(out.item.id);setPage("tasks");if(type==="gpu_chat")setPrompt("");
     }catch(e){setError(e instanceof Error?e.message:"Task creation failed");}finally{setBusy(false);}
+  };
+  const planMission=async()=>{
+    if(!token)return;
+    setBusy(true);setError("");setNotice("");
+    try{
+      const nodes=JSON.parse(missionNodes) as unknown;
+      if(!Array.isArray(nodes)||nodes.length===0)throw new Error("Mission nodes must be a non-empty JSON array.");
+      if(!missionId.trim())throw new Error("Enter a mission ID.");
+      const out=await api<{item:{mission_id:string}}>("/api/missions",token,{
+        method:"POST",
+        body:JSON.stringify({mission_id:missionId.trim(),nodes})
+      });
+      setSelectedMission(out.item.mission_id);
+      setNotice("Mission " + out.item.mission_id + " was saved as a plan. No tasks were created or executed.");
+      await refresh();
+    }catch(e){setError(e instanceof Error?e.message:"Mission planning failed");}
+    finally{setBusy(false);}
+  };
+  const instantiateMission=async()=>{
+    if(!token||!selectedMission)return;
+    setBusy(true);setError("");
+    try{
+      const out=await api<{item:{status:string;tasks:unknown[]}}>(
+        `/api/missions/${encodeURIComponent(selectedMission)}/instantiate`,
+        token,
+        {method:"POST"}
+      );
+      setNotice("Mission instantiated with " + out.item.tasks.length + " task node(s). Every task remains approval-gated; no provider task is auto-approved.");
+      const detail=await api<{item:MissionDetail}>(`/api/missions/${encodeURIComponent(selectedMission)}`,token);
+      setMissionDetail(detail.item);
+      await refresh();
+    }catch(e){setError(e instanceof Error?e.message:"Mission instantiation failed");}
+    finally{setBusy(false);}
   };
   const action=async(task:Task,verb:"approve"|"run"|"cancel")=>{
     setBusy(true);setError("");
@@ -138,7 +197,7 @@ function App() {
     }catch(e){setError(e instanceof Error?e.message:"Capability removal failed");}
     finally{setBusy(false);}
   };
-  const disconnect=()=>{setToken("");setDraft("");setPage("overview");setActive("");setEvents([]);setResult(null);setTasks([]);setAgents([]);setCapabilities([]);setModels([]);setServices([]);setModel("");setConnected(false);setSupervisorConfigured(false);};
+  const disconnect=()=>{setToken("");setDraft("");setPage("overview");setActive("");setEvents([]);setResult(null);setTasks([]);setMissions([]);setSelectedMission("");setMissionDetail(null);setAgents([]);setCapabilities([]);setModels([]);setServices([]);setModel("");setConnected(false);setSupervisorConfigured(false);};
   const activeTask=tasks.find(x=>x.id===active);
   const latestWaitEvent=[...events].reverse().find(event=>event.event_type==="agent_waiting_for_confirmation");
   const pendingActionEvent=latestWaitEvent?[...events].reverse().find(event=>event.event_type==="ActionEvent"&&event.sequence<latestWaitEvent.sequence):undefined;
@@ -167,7 +226,7 @@ function App() {
     finally{setBusy(false);}
   };
   const nav:[Page,string,ReactNode,string][]=[
-    ["overview","Command deck",<Activity/>,"01"],["gpu","GPU telemetry",<Gauge/>,"02"],["models","Model arsenal",<Layers3/>,"03"],["agents","Agent network",<Bot/>,"04"],["tasks","Mission queue",<Workflow/>,"05"],["capabilities","Pstack registry",<ShieldCheck/>,"06"]
+    ["overview","Command deck",<Activity/>,"01"],["gpu","GPU telemetry",<Gauge/>,"02"],["models","Model arsenal",<Layers3/>,"03"],["agents","Agent network",<Bot/>,"04"],["missions","Mission DAG",<Workflow/>,"05"],["tasks","Task queue",<Workflow/>,"06"],["capabilities","Pstack registry",<ShieldCheck/>,"07"]
   ];
   return <div className="shell">
     <aside className="sidebar">
@@ -180,7 +239,7 @@ function App() {
       <header className="topbar"><div className="crumb">DREAD SYSTEM <ChevronRight size={13}/> <b>{page.replaceAll("_"," ").toUpperCase()}</b></div><div className="topright"><span className={connected?"online":"offline"}><i/>{connected?"CONTROL LINK ACTIVE":token?"API LINK LOST":"SYSTEM LOCKED"}</span><span className="refresh-time">{lastRefresh?new Date(lastRefresh).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"}):"NO TELEMETRY"}</span><button className="icon" onClick={()=>void refresh()} title="Refresh telemetry"><RefreshCw size={15}/></button>{token&&<button className="icon" title="Disconnect and clear token" onClick={disconnect}><LogOut size={15}/></button>}</div></header>
       <div className="content">
         <div className="eyebrow"><span className="pulse-dot"/> LOCAL AI OPERATIONS / {hostProfile?.gpu_devices.length??0} GPU DEVICE(S) <span className="eyebrow-line"/></div>
-        <div className="heading"><div><h1>{page==="overview"?"Command deck":page==="tasks"?"Mission control":page==="agents"?"Agent network":page==="capabilities"?"Pstack capability registry":page==="models"?"Model arsenal":"GPU telemetry"}</h1><p>Observe, coordinate and operate your local AI stack without crossing its safety boundaries.</p></div><div className="workstation"><span className="workstation-mark"><Cpu size={15}/></span><div><b>{hostProfile?`${hostProfile.gpu_devices.length} GPU DEVICE(S) / ${(hostProfile.distribution??hostProfile.os).toUpperCase()}`:"HOST DISCOVERY PENDING"}</b><small>{hostProfile?`${hostProfile.architecture.toUpperCase()} · ${hostProfile.cpu_physical_cores??"?"} CORES / ${hostProfile.cpu_logical_threads??"?"} LOGICAL THREADS / ${hostProfile.cpu_threads} AVAILABLE`:"LOCAL NODE / LOOPBACK"}</small></div><Pill value={connected?"LINKED":"LOCKED"}/></div></div>
+        <div className="heading"><div><h1>{page==="overview"?"Command deck":page==="missions"?"Mission orchestrator":page==="tasks"?"Task queue":page==="agents"?"Agent network":page==="capabilities"?"Pstack capability registry":page==="models"?"Model arsenal":"GPU telemetry"}</h1><p>Observe, coordinate and operate your local AI stack without crossing its safety boundaries.</p></div><div className="workstation"><span className="workstation-mark"><Cpu size={15}/></span><div><b>{hostProfile?`${hostProfile.gpu_devices.length} GPU DEVICE(S) / ${(hostProfile.distribution??hostProfile.os).toUpperCase()}`:"HOST DISCOVERY PENDING"}</b><small>{hostProfile?`${hostProfile.architecture.toUpperCase()} · ${hostProfile.cpu_physical_cores??"?"} CORES / ${hostProfile.cpu_logical_threads??"?"} LOGICAL THREADS / ${hostProfile.cpu_threads} AVAILABLE`:"LOCAL NODE / LOOPBACK"}</small></div><Pill value={connected?"LINKED":"LOCKED"}/></div></div>
         {!token&&<div className="connect"><LockKeyhole size={21}/><div><b>AUTHENTICATE COMMAND LINK</b><small>Bearer token remains in page memory only. Never persisted to browser storage.</small></div><div className="token"><KeyRound size={15}/><input type={show?"text":"password"} value={draft} onChange={e=>setDraft(e.target.value)} onKeyDown={e=>e.key==="Enter"&&connect()} placeholder="DREAD API ACCESS TOKEN"/><button className="icon" onClick={()=>setShow(!show)}><Search size={14}/></button><button className="primary" onClick={connect}>ESTABLISH LINK</button></div></div>}
         {error&&<div className="error"><AlertCircle size={16}/>{error}<button onClick={()=>setError("")}><X size={14}/></button></div>}
         {hostProfile&&<section className="panel host-panel"><PanelTitle icon={<Cpu/>} title="AUTO-DISCOVERED HOST PROFILE" meta="READ-ONLY / NO HOST MUTATIONS"/><div className="host-grid"><div><small>UBUNTU / DISTRIBUTION</small><b>{hostProfile.distribution??hostProfile.os} {hostProfile.distribution_version??""} · {hostProfile.architecture}</b></div><div><small>KERNEL</small><b>{hostProfile.kernel_release??"NOT REPORTED"}</b></div><div><small>CPU MODEL</small><b>{hostProfile.cpu_model??"NOT REPORTED"}</b></div><div><small>CPU PHYSICAL CORES / LOGICAL THREADS / AVAILABLE</small><b>{hostProfile.cpu_physical_cores??"N/A"} / {hostProfile.cpu_logical_threads??"N/A"} / {hostProfile.cpu_threads}</b></div><div><small>CPU SOCKET / CORE / NUMA TOPOLOGY</small><b>{hostProfile.cpu_sockets??"?"} SOCKET(S) · {hostProfile.cpu_cores_per_socket??"?"} CORE(S)/SOCKET · {hostProfile.cpu_threads_per_core??"?"} THREAD(S)/CORE · {hostProfile.cpu_numa_nodes??"?"} NUMA NODE(S)</b></div><div><small>NVIDIA DRIVER CUDA COMPATIBILITY</small><b>{hostProfile.cuda_version??"NOT REPORTED"}</b></div><div><small>CUDA TOOLKITS / COMPILERS</small><b>{hostProfile.cuda_toolkits.length?hostProfile.cuda_toolkits.map(toolkit=>`${toolkit.version} · ${toolkit.compiler_path}`).join(" | "):hostProfile.cuda_toolkit_version??"NOT FOUND"}</b></div><div><small>RAM TOTAL / AVAILABLE</small><b>{mib(hostProfile.memory_total_mib)} / {mib(hostProfile.memory_available_mib)}</b></div><div><small>ROOT DISK TOTAL / FREE</small><b>{mib(hostProfile.root_disk_total_mib)} / {mib(hostProfile.root_disk_available_mib)}</b></div><div><small>SELECTED INFERENCE BACKEND</small><b>{hostProfile.inference_backend}</b></div><div><small>LLAMA-SERVER EXECUTABLE</small><b>{hostProfile.llama_server??"NOT DISCOVERED (SUPERVISOR MAY LAUNCH ON DEMAND)"}</b></div></div><div className="host-gpus">{hostProfile.gpu_devices.length?hostProfile.gpu_devices.map((gpu,index)=><div className="row" key={`${gpu.vendor}-${index}`}><div><b>{gpu.name}</b><small>{gpu.vendor.toUpperCase()} · {gpu.vram_used_mib===null?"VRAM USE N/A":`${gpu.vram_used_mib.toLocaleString()}/${gpu.vram_mib?.toLocaleString()??"?"} MiB · ${gpu.vram_free_mib?.toLocaleString()??"?"} MiB FREE`} · {gpu.driver_version?`DRIVER ${gpu.driver_version}`:"DRIVER N/A"} · {gpu.compute_capability?`COMPUTE ${gpu.compute_capability}`:"COMPUTE N/A"} · {gpu.pcie_link_gen?`PCIe CURRENT Gen${gpu.pcie_link_gen} x${gpu.pcie_link_width??"?"} / MAX Gen${gpu.pcie_link_gen_max??"?"} x${gpu.pcie_link_width_max??"?"}`:"PCIe N/A"} · {gpu.utilization_percent===null?"LOAD N/A":`${gpu.utilization_percent}% LOAD`} · {gpu.temperature_c===null?"TEMP N/A":`${gpu.temperature_c}°C`} · {gpu.power_draw_mw===null?"POWER N/A":`${(gpu.power_draw_mw/1000).toFixed(1)} W`}</small></div><Pill value="DETECTED"/></div>):<Empty text="No supported GPU utility reported a device. CPU-only host remains discoverable."/>}</div><div className="host-storage"><div className="storage-title"><small>MOUNTED PERSISTENT / NETWORK FILESYSTEMS</small><b>{hostProfile.storage_devices.length} MOUNT(S)</b></div>{hostProfile.storage_devices.length?hostProfile.storage_devices.map((disk,index)=><div className="row" key={`${disk.source}-${disk.mount_point}-${index}`}><div><b>{disk.mount_point}</b><small>{disk.source} · {disk.filesystem.toUpperCase()} · {mib(disk.used_mib)} USED / {mib(disk.total_mib)} TOTAL · {mib(disk.available_mib)} FREE</small></div><Pill value="MOUNTED"/></div>):<Empty text="No persistent or network mounts reported by df."/>}</div><div className="host-storage"><div className="storage-title"><small>PHYSICAL DISKS / PARTITIONS (MOUNTED OR UNMOUNTED)</small><b>{hostProfile.physical_storage_devices.length} DISK(S)</b></div>{hostProfile.physical_storage_devices.length?hostProfile.physical_storage_devices.map((disk,index)=><div className="row" key={`${disk.name}-${index}`}><div><b>{disk.name} · {disk.model??"MODEL N/A"}</b><small>{disk.transport?.toUpperCase()??"TRANSPORT N/A"} · {mib(disk.size_mib)} · {disk.partitions.length?disk.partitions.map(part=>`${part.name} ${part.filesystem??"NO FS"} ${part.mount_points.join(", ")||"UNMOUNTED"}`).join(" | "):"NO PARTITIONS REPORTED"}</small></div><Pill value="PHYSICAL DISK"/></div>):<Empty text="No physical block devices reported by lsblk."/>}</div><div className="host-tools"><span>NVIDIA-SMI {hostProfile.nvidia_smi_available?"FOUND":"MISSING"}</span><span>ROCM-SMI {hostProfile.rocm_smi_available?"FOUND":"MISSING"}</span><span>XPU-SMI {hostProfile.xpu_smi_available?"FOUND":"MISSING"}</span><span>PCIe values are a point-in-time snapshot; idle Gen1 downshift is expected. Validate CURRENT vs MAX only under sustained GPU load.</span></div></section>}
@@ -206,7 +265,44 @@ function App() {
         </div>}
         {page==="gpu"&&<><div className="section-head"><div><label>HARDWARE / RESOURCE DOMAIN</label><h2>GPU telemetry matrix</h2><p>Read-only host samples are displayed independently of inference lease availability.</p></div><Pill value={supervisorOnline?"SUPERVISOR ONLINE":"SUPERVISOR OFFLINE"}/></div><div className="gpu-pair large">{hostProfile?.gpu_devices.length?hostProfile.gpu_devices.map((gpu,index)=><GpuCard key={`${gpu.vendor}-${index}`} index={`GPU ${index}`} gpu={gpu}/>):<Empty text="No supported GPU detected. CPU inference remains available when a local llama.cpp runtime is configured."/>}</div><div className="telemetry-note"><Activity size={13}/> Hardware telemetry is sampled by the host discovery layer. Supervisor status controls inference leases, not whether read-only GPU metrics may be displayed.</div></>}
         {page==="models"&&<section className="panel"><PanelTitle icon={<Layers3/>} title="LOCAL MODEL ARSENAL" meta={`${models.length} DISCOVERED`}/>{models.length?models.map(x=><div className="row" key={x.id}><div><b>{x.id}</b><small>Discovered from local GPU gateway</small></div><Pill value="AVAILABLE"/></div>):<Empty text="No models returned by the local GPU gateway. Confirm gateway and upstream model service status."/>}</section>}
-        {page==="tasks"&&<div className="task-layout"><section className="panel"><PanelTitle icon={<Workflow/>} title="ALL MISSIONS" meta={`${tasks.length} RECORDED`}/><TaskList tasks={tasks} active={active} select={setActive} action={action} busy={busy}/><button className="secondary full" disabled={!token||busy} onClick={()=>void create("service_discovery")}><Plus size={14}/>CREATE SERVICE DISCOVERY</button></section><section className="panel"><PanelTitle icon={<TerminalSquare/>} title="MISSION TRACE" meta={active?active.slice(0,8).toUpperCase():"SELECT MISSION"}/>{activeTask?<><div className="detail"><b>{activeTask.title}</b><small>{activeTask.task_type} · {activeTask.id}</small><Pill value={activeTask.status}/></div>
+        {page==="missions"&&<div className="task-layout">
+          <section className="panel">
+            <PanelTitle icon={<Workflow/>} title="MISSION DAG PLANNER" meta="PLAN FIRST / APPROVAL LATER"/>
+            <p className="muted">Create a dependency graph. Planning persists the graph only; it does not create or run tasks. Review the plan, then instantiate it separately.</p>
+            <label>MISSION ID</label>
+            <textarea rows={1} value={missionId} onChange={e=>setMissionId(e.target.value)} disabled={!token||busy}/>
+            <label>MISSION NODES · JSON ARRAY</label>
+            <textarea rows={12} value={missionNodes} onChange={e=>setMissionNodes(e.target.value)} spellCheck={false} disabled={!token||busy}/>
+            <div className="compose-foot">
+              <small>NODE TYPES: service_discovery · gpu_chat · agent_task</small>
+              <button className="primary" disabled={!token||busy||!missionId.trim()} onClick={()=>void planMission()}><Plus size={14}/>PLAN MISSION</button>
+            </div>
+            <p className="muted">For agent_task nodes, payload must include an approved capability_id and an input object. Supported provider IDs are hermes.run, deerflow.run and openhands.run. All content is validated by the API.</p>
+            {notice&&<div className="approval">{notice}</div>}
+          </section>
+          <section className="panel">
+            <PanelTitle icon={<Layers3/>} title="PERSISTED MISSION REGISTRY" meta={String(missions.length)+" / LATEST 100"}/>
+            {missions.length?missions.map(mission=><div className="row" key={mission.mission_id}>
+              <button className="task-name" onClick={()=>setSelectedMission(mission.mission_id)}>
+                <span><Workflow size={15}/></span>
+                <div><b>{mission.mission_id}</b><small>{mission.node_count} NODE(S) · {clock(mission.created_at)}</small></div>
+              </button>
+              <div className="task-actions"><Pill value={mission.status}/></div>
+            </div>):<Empty text="No persisted mission plans. Create a DAG on the left."/>}
+            {missionDetail&&<div className="skill-preview">
+              <div className="row"><div><b>{missionDetail.mission_id}</b><small>Execution order: {missionDetail.execution_order.join(" → ")}</small></div><Pill value={missionDetail.status}/></div>
+              {missionDetail.status==="planned"&&<div className="compose-foot">
+                <small>Instantiate creates approval-gated task records only.</small>
+                <button className="primary" disabled={busy} onClick={()=>void instantiateMission()}><Play size={14}/>INSTANTIATE FOR APPROVAL</button>
+              </div>}
+              {missionDetail.tasks.length?missionDetail.tasks.map(item=><div className="row" key={item.task_id}>
+                <div><b>{item.node_id}</b><small>{item.depends_on.length?"Depends on: "+item.depends_on.join(", "):"No dependencies"} · {item.attempts} attempt(s)</small></div>
+                <div className="task-actions"><Pill value={item.status}/><button className="link" onClick={()=>{setActive(item.task_id);setPage("tasks");}}>VIEW TASK</button></div>
+              </div>):<Empty text="This graph has no instantiated tasks yet. Planning alone cannot execute work."/>}
+            </div>}
+          </section>
+        </div>}
+        {page==="tasks"&&<div className="task-layout"><section className="panel"><PanelTitle icon={<Workflow/>} title="TASK QUEUE" meta={`${tasks.length} RECORDED`}/><TaskList tasks={tasks} active={active} select={setActive} action={action} busy={busy}/><button className="secondary full" disabled={!token||busy} onClick={()=>void create("service_discovery")}><Plus size={14}/>CREATE SERVICE DISCOVERY</button></section><section className="panel"><PanelTitle icon={<TerminalSquare/>} title="MISSION TRACE" meta={active?active.slice(0,8).toUpperCase():"SELECT MISSION"}/>{activeTask?<><div className="detail"><b>{activeTask.title}</b><small>{activeTask.task_type} · {activeTask.id}</small><Pill value={activeTask.status}/></div>
         {awaitingAgentConfirmation&&<div className="agent-confirmation">
           <div className="agent-confirmation-head"><div><b>OPENHANDS ACTION WAITING FOR APPROVAL</b><small>Review the provider summary. Command arguments and model reasoning are deliberately hidden.</small></div><Pill value="waiting_for_confirmation"/></div>
           <div className="agent-confirmation-grid">
