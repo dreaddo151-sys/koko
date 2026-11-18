@@ -2633,7 +2633,9 @@ async fn execute_agent_task(
                             &task_id,
                             "failed",
                             None,
-                            Some(format!("Could not persist agent confirmation state: {error:?}")),
+                            Some(format!(
+                                "Could not persist agent confirmation state: {error:?}"
+                            )),
                         );
                         return;
                     }
@@ -4167,6 +4169,183 @@ mod tests {
         assert_eq!(starts.len(), 1);
         assert_eq!(starts[0].idempotency_key, "project-dread:agent-worker-test");
         assert_eq!(starts[0].capability_id, "hermes.capability");
+    }
+
+    #[tokio::test]
+    async fn openhands_confirmation_endpoint_binds_decision_to_pending_action_and_rejects_replay() {
+        use axum::{
+            extract::{Path as AxumPath, State},
+            http::HeaderMap,
+            routing::{get, post},
+        };
+
+        #[derive(Clone)]
+        struct ConfirmationState {
+            decision: Arc<Mutex<Option<Value>>>,
+        }
+
+        async fn get_conversation(
+            AxumPath(id): AxumPath<String>,
+            headers: HeaderMap,
+        ) -> Json<Value> {
+            assert_eq!(
+                headers
+                    .get("x-session-api-key")
+                    .and_then(|value| value.to_str().ok()),
+                Some("session-secret")
+            );
+            Json(json!({"id": id, "execution_status": "waiting_for_confirmation"}))
+        }
+
+        async fn respond_confirmation(
+            AxumPath(id): AxumPath<String>,
+            State(state): State<ConfirmationState>,
+            headers: HeaderMap,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            assert_eq!(
+                headers
+                    .get("x-session-api-key")
+                    .and_then(|value| value.to_str().ok()),
+                Some("session-secret")
+            );
+            assert!(!id.is_empty());
+            *state.decision.lock().unwrap() = Some(body);
+            Json(json!({"success": true}))
+        }
+
+        let confirmation_state = ConfirmationState {
+            decision: Arc::new(Mutex::new(None)),
+        };
+        let mock = Router::new()
+            .route("/api/conversations/{id}", get(get_conversation))
+            .route(
+                "/api/conversations/{id}/events/respond_to_confirmation",
+                post(respond_confirmation),
+            )
+            .with_state(confirmation_state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let provider_server = tokio::spawn(async move {
+            axum::serve(listener, mock).await.unwrap();
+        });
+
+        let task_id = "00000000-0000-4000-8000-000000000001";
+        let adapter = OpenHandsAgentServerAdapter::new(
+            &format!("http://{address}"),
+            "session-secret",
+            "test/model",
+            "llm-secret",
+            "http://host.docker.internal:11500/v1",
+            "OpenHands confirmation test",
+        )
+        .unwrap()
+        .attest_docker_runtime(true, true)
+        .unwrap();
+        let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
+        adapters.insert("openhands".into(), Arc::new(adapter));
+
+        let db = Arc::new(Mutex::new(open_database(":memory:").unwrap()));
+        let now = now_epoch();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO tasks (id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, approval_reason, created_at, updated_at, agent_provider, provider_task_id)
+                 VALUES (?1, 'OpenHands confirmation', 'agent_task', 'openhands.run', '{}', 'running', 1, 'test-operator', 'approved', ?2, ?2, 'openhands', ?1)",
+                params![task_id, now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_events (task_id, sequence, event_type, payload_json, actor, created_at)
+                 VALUES (?1, 1, 'ActionEvent', ?2, 'openhands', ?3)",
+                params![
+                    task_id,
+                    json!({
+                        "id": "action-123",
+                        "kind": "ActionEvent",
+                        "tool_name": "terminal",
+                        "summary": "Run the approved unit test command",
+                        "security_risk": "HIGH"
+                    })
+                    .to_string(),
+                    now
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_events (task_id, sequence, event_type, payload_json, actor, created_at)
+                 VALUES (?1, 2, 'agent_waiting_for_confirmation', '{}', 'executor', ?2)",
+                params![task_id, now],
+            )
+            .unwrap();
+        }
+
+        let (events, _) = broadcast::channel(64);
+        let state = AppState {
+            db: db.clone(),
+            gpu: GpuGatewayClient::new("http://127.0.0.1:1").unwrap(),
+            supervisor: None,
+            events,
+            execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
+            agent_adapters: Arc::new(adapters),
+            cancellations: Arc::new(Mutex::new(HashMap::new())),
+            api_token: Some("test-token".into()),
+            operator_id: "test-operator".into(),
+            auth_required: true,
+        };
+        let router = app(state);
+
+        let request = |expected_action_id: &str| {
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/tasks/{task_id}/agent-confirmation"))
+                .header("Authorization", "Bearer test-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "accept": true,
+                        "reason": "Reviewed in DREAD",
+                        "expected_action_id": expected_action_id
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+
+        let stale = router.clone().oneshot(request("stale-action")).await.unwrap();
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        assert!(confirmation_state.decision.lock().unwrap().is_none());
+
+        let accepted = router
+            .clone()
+            .oneshot(request("action-123"))
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::OK);
+        let accepted_body = to_bytes(accepted.into_body(), usize::MAX).await.unwrap();
+        let accepted_json: Value = serde_json::from_slice(&accepted_body).unwrap();
+        assert_eq!(accepted_json["success"], true);
+
+        let provider_decision = confirmation_state.decision.lock().unwrap().clone().unwrap();
+        assert_eq!(provider_decision["accept"], true);
+        assert_eq!(provider_decision["reason"], "Reviewed in DREAD");
+
+        let recorded: String = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT payload_json FROM task_events WHERE task_id = ?1 AND event_type = 'agent_confirmation_response'",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let recorded: Value = serde_json::from_str(&recorded).unwrap();
+        assert_eq!(recorded["accepted"], true);
+        assert_eq!(recorded["approved_by"], "test-operator");
+
+        let replay = router.oneshot(request("action-123")).await.unwrap();
+        assert_eq!(replay.status(), StatusCode::CONFLICT);
+        provider_server.abort();
     }
 
     async fn mock_supervisor_acquire() -> Json<Value> {
