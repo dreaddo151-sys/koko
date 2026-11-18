@@ -747,13 +747,17 @@ mod tests {
         let gate = Arc::new(ExecutionGate::new(config(1, 1)).unwrap());
         let (cancel, receiver) = watch::channel(false);
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let mut started_tx = Some(started_tx);
         let cleanup = Arc::new(AtomicUsize::new(0));
         let cleanup_for_runner = Arc::clone(&cleanup);
         let task = tokio::spawn(async move {
             gate.run("cancel-cleanup", receiver, move |_, mut cancellation| {
                 let cleanup = Arc::clone(&cleanup_for_runner);
+                let started_tx = started_tx.take();
                 async move {
-                    let _ = started_tx.send(());
+                    if let Some(started_tx) = started_tx {
+                        let _ = started_tx.send(());
+                    }
                     let _ = cancellation.changed().await;
                     cleanup.fetch_add(1, Ordering::SeqCst);
                     Err("provider cancellation completed".to_string())
