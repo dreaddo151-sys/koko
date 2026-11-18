@@ -15,7 +15,7 @@ use axum::{
 };
 use dread_agents::{
     AgentAdapter, AgentTaskState, CapabilityKind, CapabilityProvenance, CapabilityRecord,
-    CapabilityStatus, StartTaskRequest, deerflow::DeerFlowApiAdapter, hermes::HermesApiAdapter,
+    CapabilityStatus, StartTaskRequest, deerflow::DeerFlowApiAdapter, hermes::HermesApiAdapter, openhands::OpenHandsAgentServerAdapter,
 };
 use dread_discovery::{
     discover, discover_agents, known_agent_endpoints, load_agents, load_services,
@@ -61,6 +61,7 @@ struct AppState {
 struct AgentAdapterConfig {
     hermes: Option<HermesAdapterConfig>,
     deerflow: Option<DeerFlowAdapterConfig>,
+    openhands: Option<OpenHandsAdapterConfig>,
 }
 
 struct HermesAdapterConfig {
@@ -77,6 +78,17 @@ struct DeerFlowAdapterConfig {
     provider_class: String,
     isolated_workspace_per_task: bool,
     provisioner_url: Option<String>,
+}
+struct OpenHandsAdapterConfig {
+    endpoint: String,
+    session_api_key: String,
+    llm_model: String,
+    llm_api_key: String,
+    llm_base_url: Option<String>,
+    workspace_root: String,
+    container_id: String,
+    isolated_workspace_per_task: bool,
+    secret_store_configured: bool,
 }
 
 fn build_agent_adapters(
@@ -113,6 +125,28 @@ fn build_agent_adapters(
         )
         .map_err(|error| error.to_string())?;
         adapters.insert("deerflow".into(), Arc::new(adapter));
+    }
+    if let Some(openhands) = config.openhands {
+        if !openhands.isolated_workspace_per_task || !openhands.secret_store_configured {
+            return Err("OpenHands requires explicit per-task container workspace isolation and OH_SECRET_KEY storage attestation".into());
+        }
+        let adapter = OpenHandsAgentServerAdapter::new(
+            &openhands.endpoint,
+            openhands.session_api_key,
+            openhands.llm_model,
+            openhands.llm_api_key,
+            openhands.llm_base_url,
+            openhands.workspace_root,
+            "OpenHands",
+        )
+        .map_err(|error| error.to_string())?
+        .attest_container_sandbox(
+            &openhands.container_id,
+            true,
+            true,
+        )
+        .map_err(|error| error.to_string())?;
+        adapters.insert("openhands".into(), Arc::new(adapter));
     }
     Ok(adapters)
 }
@@ -153,6 +187,32 @@ fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn Agen
             isolated_workspace_per_task: env::var("DREAD_DEERFLOW_ISOLATED_WORKSPACE_PER_TASK")
                 .is_ok_and(|value| value == "true"),
             provisioner_url: env::var("DREAD_DEERFLOW_PROVISIONER_URL").ok(),
+        });
+    }
+
+    let openhands_keys = [
+        "DREAD_OPENHANDS_API_URL",
+        "DREAD_OPENHANDS_SESSION_API_KEY",
+        "DREAD_OPENHANDS_LLM_MODEL",
+        "DREAD_OPENHANDS_LLM_API_KEY",
+        "DREAD_OPENHANDS_WORKSPACE_ROOT",
+        "DREAD_OPENHANDS_CONTAINER_ID",
+        "DREAD_OPENHANDS_ISOLATED_WORKSPACE_PER_TASK",
+        "DREAD_OPENHANDS_SECRET_STORE_CONFIGURED",
+    ];
+    if openhands_keys.iter().any(|key| env::var_os(key).is_some()) {
+        config.openhands = Some(OpenHandsAdapterConfig {
+            endpoint: env::var("DREAD_OPENHANDS_API_URL")?,
+            session_api_key: env::var("DREAD_OPENHANDS_SESSION_API_KEY")?,
+            llm_model: env::var("DREAD_OPENHANDS_LLM_MODEL")?,
+            llm_api_key: env::var("DREAD_OPENHANDS_LLM_API_KEY")?,
+            llm_base_url: env::var("DREAD_OPENHANDS_LLM_BASE_URL").ok(),
+            workspace_root: env::var("DREAD_OPENHANDS_WORKSPACE_ROOT")?,
+            container_id: env::var("DREAD_OPENHANDS_CONTAINER_ID")?,
+            isolated_workspace_per_task: env::var("DREAD_OPENHANDS_ISOLATED_WORKSPACE_PER_TASK")
+                .is_ok_and(|value| value == "true"),
+            secret_store_configured: env::var("DREAD_OPENHANDS_SECRET_STORE_CONFIGURED")
+                .is_ok_and(|value| value == "true"),
         });
     }
 
@@ -2139,7 +2199,7 @@ fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), 
                 "Capability provider adapter is disabled",
             ));
         }
-        if !matches!(provider, "hermes" | "deerflow") {
+        if !matches!(provider, "hermes" | "deerflow" | "openhands") {
             return Err(ApiError::conflict(
                 "No reviewed executor exists for this provider adapter",
             ));
