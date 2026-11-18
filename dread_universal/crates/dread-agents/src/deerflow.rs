@@ -131,10 +131,7 @@ impl DeerFlowApiAdapter {
         provider_class: &str,
         isolated_workspace_per_task: bool,
     ) -> Result<Self, AgentAdapterError> {
-        let supported = [
-            "AioSandboxProvider",
-            "BoxliteProvider",
-        ];
+        let supported = ["AioSandboxProvider", "BoxliteProvider"];
         if !supported
             .iter()
             .any(|provider| provider_class.ends_with(provider))
@@ -377,15 +374,20 @@ impl AgentAdapter for DeerFlowApiAdapter {
                         false,
                     )
                 })?;
-            if object.get("assistant_id").is_some_and(|value| !value.is_string())
-                || object.get("model_name").is_some_and(|value| !value.is_string())
+            if object
+                .get("assistant_id")
+                .is_some_and(|value| !value.is_string())
+                || object
+                    .get("model_name")
+                    .is_some_and(|value| !value.is_string())
                 || object
                     .get("thinking_enabled")
                     .is_some_and(|value| !value.is_boolean())
             {
                 return Err(adapter_error(
                     "invalid_input",
-                    "DeerFlow assistant_id/model_name/thinking_enabled fields have invalid types".into(),
+                    "DeerFlow assistant_id/model_name/thinking_enabled fields have invalid types"
+                        .into(),
                     false,
                 ));
             }
@@ -925,13 +927,24 @@ mod tests {
             .route("/api/threads", post(create_thread))
             .route("/api/threads/{thread_id}/runs", post(create_run))
             .route("/api/threads/{thread_id}/runs/{run_id}", get(get_run))
-            .route("/api/threads/{thread_id}/runs/{run_id}/events", get(get_events))
-            .route("/api/threads/{thread_id}/runs/{run_id}/cancel", post(cancel_run))
-            .route("/api/threads/{thread_id}/runs/{run_id}/messages", get(get_messages))
+            .route(
+                "/api/threads/{thread_id}/runs/{run_id}/events",
+                get(get_events),
+            )
+            .route(
+                "/api/threads/{thread_id}/runs/{run_id}/cancel",
+                post(cancel_run),
+            )
+            .route(
+                "/api/threads/{thread_id}/runs/{run_id}/messages",
+                get(get_messages),
+            )
             .with_state(state.clone());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
 
         let adapter = DeerFlowApiAdapter::new(
             &format!("http://{address}"),
@@ -943,7 +956,10 @@ mod tests {
         .attest_container_sandbox("AioSandboxProvider", true)
         .unwrap();
 
-        assert_eq!(adapter.health().await.unwrap().state, AgentHealthState::Online);
+        assert_eq!(
+            adapter.health().await.unwrap().state,
+            AgentHealthState::Online
+        );
         assert_eq!(adapter.capabilities().await.unwrap().len(), 1);
         let started = adapter
             .start_task(StartTaskRequest {
@@ -958,19 +974,37 @@ mod tests {
         assert_eq!(started.state, AgentTaskState::Queued);
         let provider_id = started.provider_task_id.clone().unwrap();
 
-        let status = adapter.task_status("dread-task-123", &provider_id).await.unwrap();
+        let status = adapter
+            .task_status("dread-task-123", &provider_id)
+            .await
+            .unwrap();
         assert_eq!(status.state, AgentTaskState::Succeeded);
-        let events = adapter.events("dread-task-123", &provider_id, 0).await.unwrap();
+        let events = adapter
+            .events("dread-task-123", &provider_id, 0)
+            .await
+            .unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].sequence, 1);
-        let result = adapter.task_result("dread-task-123", &provider_id).await.unwrap();
-        assert_eq!(result.result.unwrap()["messages"][0]["content"], "verified result");
+        let result = adapter
+            .task_result("dread-task-123", &provider_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.result.unwrap()["messages"][0]["content"],
+            "verified result"
+        );
 
-        let cancelled = adapter.cancel_task("dread-task-123", &provider_id).await.unwrap();
+        let cancelled = adapter
+            .cancel_task("dread-task-123", &provider_id)
+            .await
+            .unwrap();
         assert_eq!(cancelled.state, AgentTaskState::Cancelled);
 
         let requests = state.requests.lock().unwrap();
-        let run_request = requests.iter().find(|row| row["path"].as_str().unwrap_or("").ends_with("/runs")).unwrap();
+        let run_request = requests
+            .iter()
+            .find(|row| row["path"].as_str().unwrap_or("").ends_with("/runs"))
+            .unwrap();
         assert_eq!(run_request["authorization"], "Bearer dfp_test-token");
         assert_eq!(run_request["idempotency_key"], "dread-task-123");
         assert_eq!(run_request["body"]["on_disconnect"], "continue");
