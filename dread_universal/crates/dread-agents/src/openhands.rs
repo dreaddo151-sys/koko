@@ -1079,4 +1079,69 @@ mod tests {
             .is_err()
         );
     }
+
+    #[tokio::test]
+    async fn refuses_to_create_a_conversation_when_server_does_not_advertise_docker() {
+        async fn server_info(headers: HeaderMap) -> Json<Value> {
+            assert_eq!(
+                headers
+                    .get("x-session-api-key")
+                    .and_then(|value| value.to_str().ok()),
+                Some("session-secret")
+            );
+            Json(json!({
+                "conversation_runtime": "local",
+                "available_conversation_runtimes": ["local"]
+            }))
+        }
+
+        async fn create_conversation_if_called(
+            headers: HeaderMap,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            assert_eq!(
+                headers
+                    .get("x-session-api-key")
+                    .and_then(|value| value.to_str().ok()),
+                Some("session-secret")
+            );
+            Json(json!({
+                "id": body["conversation_id"],
+                "execution_status": "running"
+            }))
+        }
+
+        let app = Router::new()
+            .route("/server_info", get(server_info))
+            .route("/api/conversations", post(create_conversation_if_called));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let adapter = OpenHandsAgentServerAdapter::new(
+            &format!("http://{address}"),
+            "session-secret",
+            "test/model",
+            "llm-secret",
+            "http://host.docker.internal:11500/v1",
+            "OpenHands test",
+        )
+        .unwrap()
+        .attest_docker_runtime(true, true)
+        .unwrap();
+
+        let task_id = "00000000-0000-4000-8000-000000000001";
+        let error = adapter
+            .start_task(StartTaskRequest {
+                task_id: task_id.into(),
+                capability_id: "openhands.run".into(),
+                input: json!({"objective": "create a file"}),
+                idempotency_key: format!("project-dread:{task_id}"),
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, "docker_runtime_unavailable");
+        server.abort();
+    }
 }
