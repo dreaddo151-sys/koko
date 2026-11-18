@@ -1951,6 +1951,50 @@ async fn instantiate_mission(
     ))
 }
 
+async fn list_missions(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT id, graph_json, status, created_at
+             FROM missions
+             ORDER BY created_at DESC, id ASC
+             LIMIT 100",
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, u64>(3)?,
+            ))
+        })
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+
+    let mut items = Vec::new();
+    for row in rows {
+        let (id, graph_json, status, created_at) =
+            row.map_err(|error| ApiError::internal(error.to_string()))?;
+        let graph: MissionGraph = serde_json::from_str(&graph_json).map_err(|error| {
+            ApiError::internal(format!("Stored mission graph is invalid: {error}"))
+        })?;
+        if graph.mission_id != id {
+            return Err(ApiError::internal(
+                "Stored mission ID does not match its graph identity",
+            ));
+        }
+        items.push(json!({
+            "mission_id": id,
+            "status": status,
+            "created_at": created_at,
+            "node_count": graph.nodes.len()
+        }));
+    }
+
+    Ok(Json(json!({"items": items, "count": items.len(), "limit": 100})))
+}
+
 async fn get_mission(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -4301,7 +4345,10 @@ fn app(state: AppState) -> Router {
         .route("/api/system/profile", get(system_profile))
         .route("/api/gpu/health", get(gpu_health))
         .route("/api/gpu/models", get(gpu_models))
-        .route("/api/missions", axum::routing::post(create_mission))
+        .route(
+            "/api/missions",
+            get(list_missions).post(create_mission),
+        )
         .route(
             "/api/missions/{id}/instantiate",
             axum::routing::post(instantiate_mission),
