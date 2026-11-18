@@ -878,6 +878,34 @@ mod tests {
         Json(json!({"success": true}))
     }
 
+    #[test]
+    fn start_payload_requires_docker_runtime_and_always_confirm() {
+        let adapter = OpenHandsAgentServerAdapter::new(
+            "http://127.0.0.1:18000",
+            "session-secret",
+            "local/model",
+            "local-gateway-key",
+            Some("http://host.docker.internal:11500/v1".into()),
+            "workspace/dread-tasks",
+            "OpenHands test",
+        )
+        .unwrap();
+        let task_id = "00000000-0000-4000-8000-000000000001";
+        let payload = adapter
+            .start_payload(&StartTaskRequest {
+                task_id: task_id.into(),
+                capability_id: "openhands.run".into(),
+                input: json!({"objective": "create a file"}),
+                idempotency_key: format!("project-dread:{task_id}"),
+            })
+            .unwrap();
+
+        assert_eq!(payload["conversation_runtime"], "docker");
+        assert_eq!(payload["workspace"]["working_dir"], "/workspace");
+        assert_eq!(payload["confirmation_policy"]["kind"], "AlwaysConfirm");
+        assert_eq!(payload["agent"]["llm"]["stream"], false);
+    }
+
     #[tokio::test]
     async fn agent_server_lifecycle_is_authenticated_and_task_scoped() {
         let created = Arc::new(AtomicBool::new(false));
