@@ -87,9 +87,10 @@ Never commit API or Supervisor tokens. Store them outside the repository with re
 | GET | `/api/capabilities/discover` | Discover local Pstack skills/profiles |
 | POST | `/api/capabilities/import` | Register discovered profiles disabled from the configured local tree |
 | POST | `/api/capabilities/import-batch` | Atomically import up to 128 disabled capability records; exact matches are idempotent, conflicts roll back the entire batch |
-| GET | `/api/capabilities/{id}/preview` | Preview source |
-| POST | `/api/capabilities/{id}/enable` | Explicit operator approval |
-| POST | `/api/capabilities/{id}/disable` | Disable profile |
+| GET | `/api/capabilities/{id}/preview` | Preview source and verify its SHA-256 fingerprint |
+| POST | `/api/capabilities/{id}/enable` | Explicit operator approval; records the previous state, operator and reason in audit history |
+| POST | `/api/capabilities/{id}/disable` | Revoke an enabled profile's approval with an operator reason and audit event |
+| GET | `/api/capabilities/{id}/history` | Read retained enable/disable/removal audit events, including the actor and reason |
 | POST | `/api/missions` | Validate and persist a dependency-aware mission plan (planning only; no auto-execution) |
 | GET | `/api/missions/{id}` | Retrieve a persisted mission plan and per-node result/error/attempt/timing metadata |
 | GET/POST | `/api/tasks` | List/create tasks |
