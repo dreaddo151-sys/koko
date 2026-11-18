@@ -1627,6 +1627,78 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
     })
 }
 
+/// Resolve a task's provider only from a reviewed, enabled Agent capability.
+/// The task's executor is selected by task_type, never by a caller-supplied capability
+/// attached to an unrelated built-in task. This helper is shared by mission validation
+/// and final queue admission to prevent policy drift.
+fn resolve_agent_provider(
+    state: &AppState,
+    conn: &Connection,
+    capability_id: &str,
+) -> Result<String, ApiError> {
+    let capability_id = capability_id.trim();
+    if capability_id.is_empty() || capability_id.len() > 160 {
+        return Err(ApiError::bad_request(
+            "agent capability_id must contain 1 to 160 characters",
+        ));
+    }
+
+    let encoded: Option<String> = conn
+        .query_row(
+            "SELECT record_json FROM capabilities WHERE id = ?1",
+            params![capability_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let encoded = encoded.ok_or_else(|| {
+        ApiError::conflict("Agent task capability is not registered")
+    })?;
+    let capability: CapabilityRecord = serde_json::from_str(&encoded).map_err(|error| {
+        ApiError::internal(format!("Stored agent capability is invalid: {error}"))
+    })?;
+    capability
+        .validate()
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    if capability.kind != CapabilityKind::Agent
+        || capability.status != CapabilityStatus::Enabled
+    {
+        return Err(ApiError::conflict(
+            "Agent task capability must be an approved, enabled Agent",
+        ));
+    }
+
+    let provider = capability
+        .adapter
+        .as_deref()
+        .ok_or_else(|| ApiError::conflict("Agent capability has no provider adapter"))?;
+    let expected_capability = match provider {
+        "hermes" => "hermes.run",
+        "deerflow" => "deerflow.run",
+        "openhands" => "openhands.run",
+        _ => {
+            return Err(ApiError::conflict(
+                "Agent capability does not use a reviewed provider adapter",
+            ));
+        }
+    };
+    if capability.id != capability_id || capability.id != expected_capability {
+        return Err(ApiError::conflict(
+            "Agent capability ID does not match its reviewed provider",
+        ));
+    }
+
+    let adapter = state.agent_adapters.get(provider).ok_or_else(|| {
+        ApiError::conflict("Agent capability provider adapter is not configured")
+    })?;
+    if !adapter.descriptor().enabled || adapter.descriptor().adapter != provider {
+        return Err(ApiError::conflict(
+            "Agent capability provider adapter is disabled or mismatched",
+        ));
+    }
+    Ok(provider.to_string())
+}
+
 async fn create_mission(
     State(state): State<AppState>,
     Json(graph): Json<MissionGraph>,
@@ -1803,62 +1875,9 @@ async fn instantiate_mission(
                     ));
                 }
 
-                let encoded: Option<String> = tx
-                    .query_row(
-                        "SELECT record_json FROM capabilities WHERE id = ?1",
-                        params![requested_capability],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .map_err(|error| ApiError::internal(error.to_string()))?;
-                let encoded = encoded.ok_or_else(|| {
-                    ApiError::conflict("Agent mission capability is not registered")
-                })?;
-                let capability: CapabilityRecord =
-                    serde_json::from_str(&encoded).map_err(|error| {
-                        ApiError::internal(format!(
-                            "Stored agent mission capability is invalid: {error}"
-                        ))
-                    })?;
-                capability
-                    .validate()
-                    .map_err(|error| ApiError::conflict(error.to_string()))?;
-                if capability.kind != CapabilityKind::Agent
-                    || capability.status != CapabilityStatus::Enabled
-                {
-                    return Err(ApiError::conflict(
-                        "Agent mission capability must be an approved, enabled agent",
-                    ));
-                }
-
-                let provider = capability.adapter.as_deref().ok_or_else(|| {
-                    ApiError::conflict("Agent mission capability has no provider adapter")
-                })?;
-                let expected_capability = match provider {
-                    "hermes" => "hermes.run",
-                    "deerflow" => "deerflow.run",
-                    "openhands" => "openhands.run",
-                    _ => {
-                        return Err(ApiError::conflict(
-                            "Agent mission capability does not use a reviewed provider",
-                        ));
-                    }
-                };
-                if capability.id != requested_capability || capability.id != expected_capability {
-                    return Err(ApiError::conflict(
-                        "Agent mission capability ID does not match its reviewed provider",
-                    ));
-                }
-                let adapter = state.agent_adapters.get(provider).ok_or_else(|| {
-                    ApiError::conflict("Agent mission provider adapter is not configured")
-                })?;
-                if !adapter.descriptor().enabled || adapter.descriptor().adapter != provider {
-                    return Err(ApiError::conflict(
-                        "Agent mission provider adapter is disabled or mismatched",
-                    ));
-                }
-
-                (Some(capability.id), input)
+                let provider =
+                    resolve_agent_provider(&state, &tx, requested_capability)?;
+                (Some(requested_capability.to_string()), input)
             }
             task_type => {
                 return Err(ApiError::conflict(format!(
@@ -2812,46 +2831,21 @@ fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), 
             message: "Task must have a recorded approval before it can be queued".into(),
         });
     }
-    let agent_provider = if let Some(capability_id) = task.capability_id.as_deref() {
-        let encoded: Option<String> = tx
-            .query_row(
-                "SELECT record_json FROM capabilities WHERE id = ?1",
-                params![capability_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| ApiError::internal(error.to_string()))?;
-        let encoded =
-            encoded.ok_or_else(|| ApiError::not_found("Task capability was not found"))?;
-        let capability: CapabilityRecord = serde_json::from_str(&encoded).map_err(|error| {
-            ApiError::internal(format!("Stored capability is invalid: {error}"))
-        })?;
-        if capability.status != CapabilityStatus::Enabled {
+    let agent_provider = match (task.task_type.as_str(), task.capability_id.as_deref()) {
+        ("agent_task", Some(capability_id)) => {
+            Some(resolve_agent_provider(&state, &tx, capability_id)?)
+        }
+        ("agent_task", None) => {
             return Err(ApiError::conflict(
-                "Capability must be explicitly enabled before dispatch",
+                "Agent tasks require a registered, approved agent capability",
             ));
         }
-        let provider = capability
-            .adapter
-            .as_deref()
-            .ok_or_else(|| ApiError::conflict("Enabled capability has no provider adapter"))?;
-        let adapter = state
-            .agent_adapters
-            .get(provider)
-            .ok_or_else(|| ApiError::conflict("Capability provider adapter is not configured"))?;
-        if !adapter.descriptor().enabled {
+        (_, Some(_)) => {
             return Err(ApiError::conflict(
-                "Capability provider adapter is disabled",
+                "Only agent_task tasks may dispatch through an agent capability",
             ));
         }
-        if !matches!(provider, "hermes" | "deerflow" | "openhands") {
-            return Err(ApiError::conflict(
-                "No reviewed executor exists for this provider adapter",
-            ));
-        }
-        Some(provider.to_string())
-    } else {
-        None
+        (_, None) => None,
     };
     if let Some((mission_id, dependencies_json)) = tx
         .query_row(
