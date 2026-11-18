@@ -3720,6 +3720,222 @@ mod tests {
     use serde_json::json;
     use tokio::net::TcpListener;
     use tower::ServiceExt;
+    use dread_agents::{
+        AdapterFuture, AgentCapability, AgentDescriptor, AgentEvent, AgentHealth,
+        AgentHealthState, AgentTask,
+    };
+
+    struct MockAgentAdapter {
+        descriptor: AgentDescriptor,
+        starts: Arc<Mutex<Vec<StartTaskRequest>>>,
+    }
+
+    impl MockAgentAdapter {
+        fn new() -> Self {
+            Self {
+                descriptor: AgentDescriptor {
+                    id: "hermes-test".into(),
+                    display_name: "Hermes test adapter".into(),
+                    adapter: "hermes".into(),
+                    version: Some("test".into()),
+                    endpoint: Some("http://127.0.0.1:1".into()),
+                    enabled: true,
+                },
+                starts: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl AgentAdapter for MockAgentAdapter {
+        fn descriptor(&self) -> &AgentDescriptor {
+            &self.descriptor
+        }
+
+        fn health<'a>(&'a self) -> AdapterFuture<'a, AgentHealth> {
+            Box::pin(async {
+                Ok(AgentHealth {
+                    state: AgentHealthState::Online,
+                    checked_at: 1,
+                    detail: None,
+                })
+            })
+        }
+
+        fn capabilities<'a>(&'a self) -> AdapterFuture<'a, Vec<AgentCapability>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn start_task<'a>(&'a self, request: StartTaskRequest) -> AdapterFuture<'a, AgentTask> {
+            self.starts.lock().unwrap().push(request.clone());
+            Box::pin(async move {
+                Ok(AgentTask {
+                    task_id: request.task_id,
+                    state: AgentTaskState::Running,
+                    provider_task_id: Some("provider-run-123".into()),
+                    result: None,
+                    error: None,
+                    updated_at: 1,
+                })
+            })
+        }
+
+        fn task_status<'a>(
+            &'a self,
+            task_id: &'a str,
+            _provider_task_id: &'a str,
+        ) -> AdapterFuture<'a, AgentTask> {
+            let task_id = task_id.to_string();
+            Box::pin(async move {
+                Ok(AgentTask {
+                    task_id,
+                    state: AgentTaskState::Succeeded,
+                    provider_task_id: Some("provider-run-123".into()),
+                    result: None,
+                    error: None,
+                    updated_at: 2,
+                })
+            })
+        }
+
+        fn events<'a>(
+            &'a self,
+            task_id: &'a str,
+            _provider_task_id: &'a str,
+            after_sequence: u64,
+        ) -> AdapterFuture<'a, Vec<AgentEvent>> {
+            let task_id = task_id.to_string();
+            Box::pin(async move {
+                if after_sequence == 0 {
+                    Ok(vec![AgentEvent {
+                        task_id,
+                        sequence: 1,
+                        event_type: "agent_progress".into(),
+                        payload: json!({"step": "working"}),
+                        occurred_at: 2,
+                    }])
+                } else {
+                    Ok(Vec::new())
+                }
+            })
+        }
+
+        fn cancel_task<'a>(
+            &'a self,
+            task_id: &'a str,
+            _provider_task_id: &'a str,
+        ) -> AdapterFuture<'a, AgentTask> {
+            let task_id = task_id.to_string();
+            Box::pin(async move {
+                Ok(AgentTask {
+                    task_id,
+                    state: AgentTaskState::Cancelled,
+                    provider_task_id: Some("provider-run-123".into()),
+                    result: None,
+                    error: None,
+                    updated_at: 2,
+                })
+            })
+        }
+
+        fn task_result<'a>(
+            &'a self,
+            task_id: &'a str,
+            _provider_task_id: &'a str,
+        ) -> AdapterFuture<'a, AgentTask> {
+            let task_id = task_id.to_string();
+            Box::pin(async move {
+                Ok(AgentTask {
+                    task_id,
+                    state: AgentTaskState::Succeeded,
+                    provider_task_id: Some("provider-run-123".into()),
+                    result: Some(json!({"answer": "completed"})),
+                    error: None,
+                    updated_at: 3,
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_worker_persists_provider_identity_events_and_result() {
+        let db = Arc::new(Mutex::new(open_database(":memory:").unwrap()));
+        let now = now_epoch();
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO tasks (id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, created_at, updated_at, agent_provider)
+                 VALUES ('agent-worker-test', 'Agent worker test', 'agent_task', 'hermes.capability', '{\"objective\":\"test\"}', 'queued', 1, 'test-operator', ?1, ?1, 'hermes')",
+                params![now],
+            )
+            .unwrap();
+
+        let adapter = Arc::new(MockAgentAdapter::new());
+        let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
+        adapters.insert("hermes".into(), adapter.clone());
+        let (events, _) = broadcast::channel(64);
+        let state = AppState {
+            db,
+            gpu: GpuGatewayClient::new("http://127.0.0.1:1").unwrap(),
+            supervisor: None,
+            events,
+            execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
+            agent_adapters: Arc::new(adapters),
+            cancellations: Arc::new(Mutex::new(HashMap::new())),
+            api_token: Some("test-token".into()),
+            operator_id: "test-operator".into(),
+            auth_required: true,
+        };
+        let (_cancel_sender, cancel_receiver) = watch::channel(false);
+
+        execute_agent_task(
+            state.clone(),
+            adapter.clone(),
+            AgentTaskExecution {
+                task_id: "agent-worker-test".into(),
+                provider: "hermes".into(),
+                capability_id: "hermes.capability".into(),
+                payload: json!({"objective": "test"}),
+                initial_event_cursor: 0,
+            },
+            cancel_receiver,
+        )
+        .await;
+
+        let conn = state.db.lock().unwrap();
+        let (status, provider_id, cursor): (String, Option<String>, u64) = conn
+            .query_row(
+                "SELECT status, provider_task_id, provider_event_cursor FROM tasks WHERE id = 'agent-worker-test'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "completed");
+        assert_eq!(provider_id.as_deref(), Some("provider-run-123"));
+        assert_eq!(cursor, 1);
+
+        let result_json: String = conn
+            .query_row(
+                "SELECT result_json FROM task_results WHERE task_id = 'agent-worker-test'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&result_json).unwrap(), json!({"answer": "completed"}));
+
+        let progress_events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_events WHERE task_id = 'agent-worker-test' AND event_type = 'agent_progress'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(progress_events, 1);
+
+        let starts = adapter.starts.lock().unwrap();
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0].idempotency_key, "project-dread:agent-worker-test");
+        assert_eq!(starts[0].capability_id, "hermes.capability");
+    }
 
     async fn mock_supervisor_acquire() -> Json<Value> {
         Json(json!({"id":"test-lease","status":"active","error":null}))
