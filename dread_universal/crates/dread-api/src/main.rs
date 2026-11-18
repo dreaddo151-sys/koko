@@ -14,7 +14,7 @@ use axum::{
     routing::get,
 };
 use dread_agents::{
-    AgentAdapter, CapabilityKind, CapabilityProvenance, CapabilityRecord, CapabilityStatus,
+    AgentAdapter, AgentTaskState, StartTaskRequest, CapabilityKind, CapabilityProvenance, CapabilityRecord, CapabilityStatus,
     deerflow::DeerFlowApiAdapter, hermes::HermesApiAdapter,
 };
 use dread_discovery::{
@@ -356,7 +356,10 @@ fn open_database(path: &str) -> anyhow::Result<Connection> {
              approved_by TEXT,
              approval_reason TEXT,
              created_at INTEGER NOT NULL,
-             updated_at INTEGER NOT NULL
+             updated_at INTEGER NOT NULL,
+             agent_provider TEXT,
+             provider_task_id TEXT,
+             provider_event_cursor INTEGER NOT NULL DEFAULT 0
          );
          CREATE TABLE IF NOT EXISTS task_events (
              id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -399,6 +402,12 @@ fn open_database(path: &str) -> anyhow::Result<Connection> {
          );
          CREATE INDEX IF NOT EXISTS idx_mission_tasks_mission ON mission_tasks(mission_id);",
     )?;
+    for (column, declaration) in [("agent_provider", "TEXT"), ("provider_task_id", "TEXT"), ("provider_event_cursor", "INTEGER NOT NULL DEFAULT 0")] {
+        let columns = conn.prepare("PRAGMA table_info(tasks)")?.query_map([], |row| row.get::<_, String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        if !columns.iter().any(|name| name == column) {
+            conn.execute_batch(&format!("ALTER TABLE tasks ADD COLUMN {column} {declaration};"))?;
+        }
+    }
     Ok(conn)
 }
 
