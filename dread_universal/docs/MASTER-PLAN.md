@@ -565,3 +565,17 @@ This addendum supersedes earlier statements in this document and the work log th
 - **Workstation acceptance not performed in this checkpoint.** No connected SSH or workstation terminal session was available in this chat, so no current process/port/unit/config/secret/sandbox/GPU/media state was read. No workstation command was claimed, and no service, file, database, model or user data was changed. In particular, the Python Master Hub, ComfyUI and Python GPU Supervisor were not stopped, restarted, replaced or deployed.
 - Therefore live OpenHands/Hermes/DeerFlow configuration and per-task tool/sandbox permissions remain **unknown/unverified**, not absent and not accepted. Do not submit a real provider task until endpoint/API versions, credentials handling, container identity, per-task workspace boundaries, tool allowlists and provider cancellation/recovery behavior have been independently checked on the host.
 - Next acceptance action: obtain an authorized read-only workstation terminal session and capture a compact baseline for the existing Python Hub, ComfyUI, Python GPU Supervisor, Rust API, provider processes/endpoints and redacted configuration-presence/permission metadata. Preserve all running services. Then verify provider sandbox/tool policy before a controlled non-destructive provider test. Follow with the already-listed Hub parity, dual-3090/media, resource-aware mission policy, signed extension/updater and physical Ubuntu install/upgrade/reboot/rollback gates.
+
+
+## Recovered Ubuntu workstation test evidence — 2026-11-17 23:33
+
+A saved terminal capture, `Pasted text(20261117-233320).txt`, was recovered from the user's project files and inspected during the 2026-11-18 checkpoint. It records commands executed in the Ubuntu workspace `/mnt/sabrent/dread_workspace/dread_universal_upstream/dread_universal`, on branch `feature/universal-capability-discovery-clean-2026-11-17` tracking its origin branch:
+
+- `cargo fmt --all -- --check`: exit status 0.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit status 0.
+- `cargo test --workspace --locked`: exit status 0; 87 unit tests passed, zero failures (11 agents, 35 API, 11 discovery, 6 GPU, 9 orchestrator, 8 platform, 7 skills).
+- `cargo build --workspace --release --locked`: exit status 0.
+
+This is **actual prior Ubuntu workstation execution**, not GitHub CI. It should be credited and not repeated merely as a generic Rust regression. It predates the final PR #12 head and does not prove that the final provider-adapter changes were installed or that live provider endpoints were contacted. The Hermes HTTP lifecycle in this run is a test; it is not a live Hermes task. This capture does not establish live OpenHands/DeerFlow sandbox isolation, tool allowlists, current service status, dual-GPU concurrency or media artifact acceptance.
+
+Separate previously recorded live evidence remains valid at its own timestamps: 2026-11-16 Rust API health/service discovery and the 2026-11-17 Supervisor-bridged llama.cpp inference returning `DREAD GPU INFERENCE OK`. These are historical live proofs, not a fresh current-candidate integration test. Preserve the Python Master Hub, ComfyUI and Python GPU Supervisor; do not repeat broad checks without a specific candidate-integration reason.
