@@ -130,7 +130,9 @@ fn build_agent_adapters(
             return Err("OpenHands requires Docker conversation runtime selection and stable OH_SECRET_KEY storage".into());
         }
         if openhands.llm_base_url != "http://host.docker.internal:11500/v1" {
-            return Err("OpenHands LLM traffic must use DREAD's Docker-reachable local GPU gateway".into());
+            return Err(
+                "OpenHands LLM traffic must use DREAD's Docker-reachable local GPU gateway".into(),
+            );
         }
         let adapter = OpenHandsAgentServerAdapter::new(
             &openhands.endpoint,
@@ -4312,15 +4314,15 @@ mod tests {
                 .unwrap()
         };
 
-        let stale = router.clone().oneshot(request("stale-action")).await.unwrap();
+        let stale = router
+            .clone()
+            .oneshot(request("stale-action"))
+            .await
+            .unwrap();
         assert_eq!(stale.status(), StatusCode::CONFLICT);
         assert!(confirmation_state.decision.lock().unwrap().is_none());
 
-        let accepted = router
-            .clone()
-            .oneshot(request("action-123"))
-            .await
-            .unwrap();
+        let accepted = router.clone().oneshot(request("action-123")).await.unwrap();
         assert_eq!(accepted.status(), StatusCode::OK);
         let accepted_body = to_bytes(accepted.into_body(), usize::MAX).await.unwrap();
         let accepted_json: Value = serde_json::from_slice(&accepted_body).unwrap();
