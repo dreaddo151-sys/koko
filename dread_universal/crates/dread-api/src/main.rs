@@ -5460,6 +5460,72 @@ mod tests {
         server.abort();
     }
 
+    #[test]
+    fn capability_approval_requires_unchanged_source_and_records_operator_reason() {
+        let mut record = CapabilityRecord {
+            id: "pstack.skill.approval-audit".into(),
+            name: "Approval audit test".into(),
+            kind: CapabilityKind::Skill,
+            description: "Markdown context".into(),
+            version: None,
+            license: Some("MIT".into()),
+            provenance: CapabilityProvenance {
+                source_name: "Pstack local filesystem copy".into(),
+                source_uri: None,
+                source_version: None,
+                source_revision: None,
+                imported_at: 100,
+            },
+            compatibility: "review_required".into(),
+            dependencies: Vec::new(),
+            adapter: Some("local.markdown_context".into()),
+            status: CapabilityStatus::Disabled,
+            manifest: json!({"fingerprint": "sha256:expected"}),
+        };
+
+        let mismatch = approve_capability_record(
+            &mut record,
+            "test-operator",
+            "Reviewed as untrusted context",
+            200,
+            "sha256:changed",
+        )
+        .unwrap_err();
+        assert_eq!(mismatch.status, StatusCode::CONFLICT);
+        assert_eq!(record.status, CapabilityStatus::Disabled);
+        assert!(record.manifest.get("approval").is_none());
+
+        approve_capability_record(
+            &mut record,
+            "test-operator",
+            "Reviewed as untrusted context",
+            201,
+            "sha256:expected",
+        )
+        .unwrap();
+        assert_eq!(record.status, CapabilityStatus::Enabled);
+        assert_eq!(record.manifest["approval"]["approved_by"], "test-operator");
+        assert_eq!(
+            record.manifest["approval"]["reason"],
+            "Reviewed as untrusted context"
+        );
+        assert_eq!(record.manifest["approval"]["approved_at"], 201);
+        assert!(record.validate().is_ok());
+
+        let mut rejected = record.clone();
+        rejected.status = CapabilityStatus::Rejected;
+        let blocked = approve_capability_record(
+            &mut rejected,
+            "test-operator",
+            "Attempt to re-enable rejected item",
+            202,
+            "sha256:expected",
+        )
+        .unwrap_err();
+        assert_eq!(blocked.status, StatusCode::CONFLICT);
+        assert_eq!(rejected.status, CapabilityStatus::Rejected);
+    }
+
     #[tokio::test]
     async fn capability_disable_is_atomic_and_audited_with_operator_reason() {
         let db = Arc::new(Mutex::new(open_database(":memory:").unwrap()));
