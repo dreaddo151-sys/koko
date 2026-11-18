@@ -3193,6 +3193,59 @@ mod tests {
         (router, server)
     }
 
+    #[test]
+    fn agent_adapter_registry_requires_explicit_isolation_attestation() {
+        let empty = build_agent_adapters(AgentAdapterConfig::default()).unwrap();
+        assert!(empty.is_empty());
+
+        let hermes = AgentAdapterConfig {
+            hermes: Some(HermesAdapterConfig {
+                endpoint: "http://127.0.0.1:8642".into(),
+                api_key: "test-api-key".into(),
+                terminal_backend: "docker".into(),
+                isolated_workspace_per_task: false,
+            }),
+            deerflow: None,
+        };
+        assert!(build_agent_adapters(hermes).is_err());
+
+        let deerflow = AgentAdapterConfig {
+            hermes: None,
+            deerflow: Some(DeerFlowAdapterConfig {
+                endpoint: "http://127.0.0.1:2026".into(),
+                api_prefix: "/api/langgraph".into(),
+                pat: "dfp_test-token".into(),
+                provider_class: "AioSandboxProvider".into(),
+                isolated_workspace_per_task: true,
+                provisioner_url: Some("http://provisioner:8002".into()),
+            }),
+        };
+        assert!(build_agent_adapters(deerflow).is_err());
+    }
+
+    #[test]
+    fn agent_adapter_registry_only_exposes_explicitly_attested_providers() {
+        let config = AgentAdapterConfig {
+            hermes: Some(HermesAdapterConfig {
+                endpoint: "http://127.0.0.1:8642".into(),
+                api_key: "test-api-key".into(),
+                terminal_backend: "docker".into(),
+                isolated_workspace_per_task: true,
+            }),
+            deerflow: Some(DeerFlowAdapterConfig {
+                endpoint: "http://127.0.0.1:2026".into(),
+                api_prefix: "/api/langgraph".into(),
+                pat: "dfp_test-token".into(),
+                provider_class: "deerflow.community.boxlite:BoxliteProvider".into(),
+                isolated_workspace_per_task: true,
+                provisioner_url: None,
+            }),
+        };
+        let adapters = build_agent_adapters(config).unwrap();
+        assert_eq!(adapters.len(), 2);
+        assert!(adapters.values().all(|adapter| adapter.descriptor().enabled));
+    }
+
     #[tokio::test]
     async fn system_profile_exposes_read_only_host_discovery() {
         let (router, server) = test_app().await;
