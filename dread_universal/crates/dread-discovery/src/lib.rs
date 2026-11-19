@@ -123,6 +123,26 @@ pub struct AgentProbeResult {
     pub detail: String,
 }
 
+/// Small allowlist of known loopback agent runtimes. This is not a port sweep.
+pub fn known_agent_endpoints() -> Vec<AgentEndpoint> {
+    vec![
+        AgentEndpoint {
+            id: "openhands.agent-server".into(),
+            name: "OpenHands Agent Server".into(),
+            adapter: "openhands.agent_server".into(),
+            health_url: "http://127.0.0.1:8000/health".into(),
+            enabled: true,
+        },
+        AgentEndpoint {
+            id: "langgraph.agent-server".into(),
+            name: "LangGraph Agent Server".into(),
+            adapter: "langgraph.agent_server".into(),
+            health_url: "http://127.0.0.1:2024/ok".into(),
+            enabled: true,
+        },
+    ]
+}
+
 pub fn load_agents(path: &str) -> Result<Vec<AgentEndpoint>, String> {
     let contents = fs::read_to_string(path).map_err(|e| format!("Cannot read {path}: {e}"))?;
     let config: AgentConfig =
@@ -428,10 +448,22 @@ mod tests {
     use super::{classify_agent_http_status, classify_http_status, validate_local_service_url};
 
     #[test]
+    fn known_agent_catalog_is_loopback_only_and_bounded() {
+        let agents = super::known_agent_endpoints();
+        assert_eq!(agents.len(), 2);
+        assert!(agents.iter().all(|agent| agent.enabled));
+        assert!(
+            agents
+                .iter()
+                .all(|agent| { agent.health_url.starts_with("http://127.0.0.1:") })
+        );
+    }
+
+    #[test]
     fn service_config_rejects_duplicate_ids_and_too_many_endpoints() {
         let service = super::Service {
-            id: "ollama".into(),
-            name: "Ollama".into(),
+            id: "llama-cpp".into(),
+            name: "llama.cpp".into(),
             url: "http://127.0.0.1:11434/api/tags".into(),
             role: "local-inference".into(),
         };
@@ -448,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn ollama_adapter_summarizes_model_metadata_without_returning_raw_payload() {
+    fn local_inference_adapter_summarizes_model_metadata_without_returning_raw_payload() {
         let body = br#"{"models":[{"name":"qwen3.8:27b"},{"name":"llama3:8b"}]}"#;
         assert_eq!(
             super::service_summary("local-inference", body).as_deref(),

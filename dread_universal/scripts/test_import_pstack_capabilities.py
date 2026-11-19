@@ -1,7 +1,9 @@
 import json
+import shutil
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -10,52 +12,22 @@ import import_pstack_capabilities as importer
 
 class PstackCapabilityImportTests(unittest.TestCase):
     def make_fixture(self, root: Path) -> Path:
-        integration = root / "integrations" / "pstack"
-        upstream = integration / "upstream"
-        (upstream / "skills" / "example-skill").mkdir(parents=True)
-        (upstream / "agents").mkdir(parents=True)
-        (upstream / "plugin.json").write_text(json.dumps({"name": "pstack", "version": "1.0.0", "license": "MIT"}))
-        (upstream / "LICENSE").write_text("MIT")
-        (upstream / "skills" / "example-skill" / "SKILL.md").write_text("# Example Skill\nSafe metadata only")
-        (upstream / "agents" / "reviewer.md").write_text("# Reviewer Agent\nPrompt text")
-        import hashlib
-        file_hashes = {
-            "skills/example-skill/SKILL.md": hashlib.sha256((upstream / "skills/example-skill/SKILL.md").read_bytes()).hexdigest(),
-            "agents/reviewer.md": hashlib.sha256((upstream / "agents/reviewer.md").read_bytes()).hexdigest(),
-        }
-        (upstream / ".dread-import.json").write_text(json.dumps({
-            "schema_version": 1,
-            "repository": "https://github.com/cursor/plugins",
-            "commit_sha": "a" * 40,
-            "tree_sha": "b" * 40,
-            "manifest_version": "1.0.0",
-            "license": "MIT",
-            "verified_by": "scripts/import-pstack.sh",
-            "files_sha256": file_hashes,
-        }))
-        catalog = {
-            "schema_version": 1,
-            "name": "pstack",
-            "repository": "https://github.com/cursor/plugins",
-            "upstream_manifest_version": "1.0.0",
-            "upstream_commit_sha": "a" * 40,
-            "upstream_tree_sha": "b" * 40,
-            "license": "MIT",
-            "inventory_count": 1,
-            "skills": [{"id": "example-skill", "path": "skills/example-skill/SKILL.md", "initial_compatibility": "requires_review"}],
-            "agents": [{"id": "reviewer", "path": "agents/reviewer.md", "initial_compatibility": "adapter_needed"}],
-        }
-        (integration / "catalog.json").write_text(json.dumps(catalog))
+        project_root = Path(__file__).resolve().parents[1]
+        source = project_root / "integrations" / "pstack"
+        destination = root / "integrations" / "pstack"
+        shutil.copytree(source, destination)
         return root
 
     def test_builds_disabled_metadata_records_for_skills_and_agents(self):
         with tempfile.TemporaryDirectory() as tmp:
             records = importer.load_import_records(self.make_fixture(Path(tmp)))
-        self.assertEqual(len(records), 2)
+        self.assertEqual(len(records), 60)
+        self.assertEqual(sum(item["kind"] == "skill" for item in records), 58)
+        self.assertEqual(sum(item["kind"] == "agent" for item in records), 2)
         self.assertEqual({item["kind"] for item in records}, {"skill", "agent"})
         self.assertTrue(all("status" not in item for item in records))
         self.assertTrue(all(item["manifest"]["execution_performed"] is False for item in records))
-        self.assertEqual(records[0]["provenance"]["source_revision"], "a" * 40)
+        self.assertEqual(records[0]["provenance"]["source_revision"], importer.PINNED_COMMIT)
 
     def test_refuses_unverified_source_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -74,20 +46,40 @@ class PstackCapabilityImportTests(unittest.TestCase):
             with self.assertRaises(importer.ImportErrorSafe):
                 importer.load_import_records(root)
 
-    def test_rejects_path_traversal(self):
+    def test_rejects_tampered_catalog_even_when_revision_fields_are_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.make_fixture(Path(tmp))
             catalog_path = root / "integrations/pstack/catalog.json"
             data = json.loads(catalog_path.read_text())
             data["skills"][0]["path"] = "skills/../../outside/SKILL.md"
             catalog_path.write_text(json.dumps(data))
-            with self.assertRaises(importer.ImportErrorSafe):
+            with self.assertRaisesRegex(importer.ImportErrorSafe, "catalog hash"):
                 importer.load_import_records(root)
+
+    def test_safe_source_file_rejects_symlink_escape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_root = root / "upstream"
+            source_root.mkdir()
+            outside = root / "outside.md"
+            outside.write_text("# outside")
+            (source_root / "escape.md").symlink_to(outside)
+            with self.assertRaises(importer.ImportErrorSafe):
+                importer._safe_source_file(source_root, "escape.md")
+
+    def test_rejects_path_traversal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source_root = Path(tmp) / "upstream"
+            source_root.mkdir()
+            outside = Path(tmp) / "outside.md"
+            outside.write_text("# outside")
+            with self.assertRaises(importer.ImportErrorSafe):
+                importer._safe_source_file(source_root, "skills/../../outside.md")
 
     def test_rejects_source_file_changed_after_pinned_import(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.make_fixture(Path(tmp))
-            source = root / "integrations/pstack/upstream/skills/example-skill/SKILL.md"
+            source = root / "integrations/pstack/upstream/skills/architect/SKILL.md"
             source.write_text("# Tampered after import")
             with self.assertRaises(importer.ImportErrorSafe):
                 importer.load_import_records(root)
@@ -107,16 +99,28 @@ class PstackCapabilityImportTests(unittest.TestCase):
         with self.assertRaises(importer.ImportErrorSafe):
             importer.validate_loopback_api_url("http://127.0.0.1/api")
 
-    def test_existing_capability_must_be_disabled_and_match_provenance(self):
-        record = {"id": "pstack.skill.example", "provenance": {"source_name": "Pstack", "source_revision": "a" * 40}}
-        existing = {"item": {"status": "disabled", "provenance": {"source_name": "Pstack", "source_revision": "a" * 40}}}
-        importer._require_disabled_existing(existing, record)
-        enabled = {"item": {"status": "enabled", "provenance": existing["item"]["provenance"]}}
-        with self.assertRaises(importer.ImportErrorSafe):
-            importer._require_disabled_existing(enabled, record)
-        stale = {"item": {"status": "disabled", "provenance": {"source_name": "Pstack", "source_revision": "b" * 40}}}
-        with self.assertRaises(importer.ImportErrorSafe):
-            importer._require_disabled_existing(stale, record)
+    def test_apply_records_uses_one_atomic_authenticated_batch_request(self):
+        records = [{"id": "pstack.skill.one"}, {"id": "pstack.agent.two"}]
+        response = {"created": 1, "already_present": 1, "execution_started": False}
+        with patch.object(importer, "_request", return_value=(201, response)) as request:
+            self.assertEqual(
+                importer.apply_records(records, "http://127.0.0.1:8765", "x" * 32),
+                (1, 1),
+            )
+        args = request.call_args.args
+        self.assertEqual(args[1], "http://127.0.0.1:8765/api/capabilities/import-batch")
+        self.assertEqual(args[2], "POST")
+        self.assertEqual(args[4], {"records": records})
+
+    def test_apply_records_rejects_partial_or_execution_started_response(self):
+        records = [{"id": "pstack.skill.one"}, {"id": "pstack.agent.two"}]
+        with patch.object(
+            importer,
+            "_request",
+            return_value=(201, {"created": 1, "already_present": 0, "execution_started": False}),
+        ):
+            with self.assertRaises(importer.ImportErrorSafe):
+                importer.apply_records(records, "http://127.0.0.1:8765", "x" * 32)
 
     def test_api_requests_require_bearer_token_of_minimum_length(self):
         with self.assertRaises(importer.ImportErrorSafe):

@@ -13,7 +13,7 @@ import threading
 import urllib.error
 import urllib.request
 from contextlib import AbstractContextManager
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 
 MAX_BODY_BYTES = 1_048_576
@@ -199,7 +199,7 @@ def main():
     host, port = validate_bind(bind)
     source = os.environ.get("DREAD_GPU_SUPERVISOR_SOURCE", "")
     bridge = SupervisorBridge(load_gpu_lease(source))
-    server = HTTPServer((host, port), make_handler(bridge, token))
+    server = ThreadingHTTPServer((host, port), make_handler(bridge, token))
 
     def request_shutdown(_signum, _frame):
         threading.Thread(target=server.shutdown, daemon=True).start()

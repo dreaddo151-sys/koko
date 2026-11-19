@@ -1,10 +1,15 @@
 import json
+import threading
 import unittest
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from http.server import ThreadingHTTPServer
 from contextlib import contextmanager
 
 from dread_gpu_supervisor_bridge import (
     TENSOR_UPSTREAM_URL,
     SupervisorBridge,
+    make_handler,
     validate_bind,
     validate_payload,
 )
@@ -88,6 +93,61 @@ class SupervisorBridgeTests(unittest.TestCase):
         self.assertEqual(status, 503)
         self.assertIn("mock tensor upstream offline", result["error"])
         self.assertEqual(events, ["enter", "exit"])
+
+    def test_health_remains_responsive_during_long_inference(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class FakeResponse:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            def read(self, _limit):
+                return json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
+
+        def fake_open(_request, timeout):
+            started.set()
+            if not release.wait(timeout=3):
+                raise TimeoutError("test inference release timed out")
+            return FakeResponse()
+
+        token = "bridge-test-token-that-is-at-least-32-characters"
+        bridge = SupervisorBridge(lambda _mode: __import__("contextlib").nullcontext(), fake_open)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(bridge, token))
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+
+        def submit_inference():
+            payload = json.dumps({
+                "model": "local-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            }).encode()
+            request = urllib.request.Request(
+                f"{base}/v1/chat/completions",
+                data=payload,
+                method="POST",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return response.status, json.loads(response.read())
+
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(submit_inference)
+                self.assertTrue(started.wait(timeout=2), "inference request did not reach upstream")
+                with urllib.request.urlopen(f"{base}/health", timeout=1) as health:
+                    self.assertEqual(health.status, 200)
+                    self.assertEqual(json.loads(health.read())["status"], "ok")
+                release.set()
+                status, result = future.result(timeout=3)
+                self.assertEqual(status, 200)
+                self.assertEqual(result["choices"][0]["message"]["content"], "ok")
+        finally:
+            release.set()
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
 
     def test_bind_is_loopback_only(self):
         self.assertEqual(validate_bind("127.0.0.1:11502"), ("127.0.0.1", 11502))

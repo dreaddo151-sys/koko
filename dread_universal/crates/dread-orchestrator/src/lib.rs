@@ -16,12 +16,18 @@ use std::{
 use serde_json::Value;
 use tokio::sync::{Semaphore, watch};
 
+const CANCELLATION_CLEANUP_GRACE: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Clone, Copy)]
 pub struct ExecutionConfig {
     pub max_concurrency: usize,
     pub max_admitted: usize,
     pub max_attempts: u8,
     pub attempt_timeout: Duration,
+    /// Initial delay before a retry; zero disables retry waiting.
+    pub retry_backoff: Duration,
+    /// Upper bound for exponential retry delay.
+    pub max_retry_backoff: Duration,
 }
 
 impl Default for ExecutionConfig {
@@ -31,6 +37,8 @@ impl Default for ExecutionConfig {
             max_admitted: 8,
             max_attempts: 1,
             attempt_timeout: Duration::from_secs(1805),
+            retry_backoff: Duration::from_millis(250),
+            max_retry_backoff: Duration::from_secs(5),
         }
     }
 }
@@ -41,6 +49,29 @@ pub enum ConfigError {
     AdmissionBelowConcurrency,
     ZeroAttempts,
     ZeroTimeout,
+    MaxRetryBackoffBelowInitial,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerError {
+    pub message: String,
+    pub retryable: bool,
+}
+
+impl RunnerError {
+    pub fn permanent(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: false,
+        }
+    }
+
+    pub fn retryable(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +123,9 @@ impl ExecutionGate {
         if config.attempt_timeout.is_zero() {
             return Err(ConfigError::ZeroTimeout);
         }
+        if config.max_retry_backoff < config.retry_backoff {
+            return Err(ConfigError::MaxRetryBackoffBelowInitial);
+        }
         Ok(Self {
             semaphore: Arc::new(Semaphore::new(config.max_concurrency)),
             admitted: Arc::new(AtomicUsize::new(0)),
@@ -101,6 +135,42 @@ impl ExecutionGate {
 
     pub fn admitted_count(&self) -> usize {
         self.admitted.load(Ordering::Acquire)
+    }
+
+    async fn wait_before_retry(
+        &self,
+        attempts: u8,
+        cancellation: &mut watch::Receiver<bool>,
+    ) -> Result<(), ExecutionError> {
+        if *cancellation.borrow() {
+            return Err(ExecutionError::Cancelled { attempts });
+        }
+        if self.config.retry_backoff.is_zero() {
+            return Ok(());
+        }
+
+        let shift = u32::from(attempts.saturating_sub(1)).min(31);
+        let multiplier = 1u32 << shift;
+        let delay = self
+            .config
+            .retry_backoff
+            .checked_mul(multiplier)
+            .unwrap_or(self.config.max_retry_backoff)
+            .min(self.config.max_retry_backoff);
+
+        loop {
+            if *cancellation.borrow() {
+                return Err(ExecutionError::Cancelled { attempts });
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => return Ok(()),
+                changed = cancellation.changed() => {
+                    if changed.is_err() || *cancellation.borrow() {
+                        return Err(ExecutionError::Cancelled { attempts });
+                    }
+                }
+            }
+        }
     }
 
     fn try_admit(&self) -> Result<AdmissionGuard, ExecutionError> {
@@ -123,12 +193,44 @@ impl ExecutionGate {
     pub async fn run<F, Fut>(
         &self,
         task_id: impl Into<String>,
-        mut cancellation: watch::Receiver<bool>,
+        cancellation: watch::Receiver<bool>,
         mut operation: F,
     ) -> Result<ExecutionResult, ExecutionError>
     where
         F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
         Fut: Future<Output = Result<Value, String>> + Send,
+    {
+        self.run_inner(task_id, cancellation, move |attempt, cancellation| {
+            let operation_future = operation(attempt, cancellation);
+            async move { operation_future.await.map_err(RunnerError::permanent) }
+        })
+        .await
+    }
+
+    /// Run an operation that explicitly classifies failures as retryable or permanent.
+    /// Unclassified string errors passed to run are always permanent.
+    pub async fn run_with_retryable_errors<F, Fut>(
+        &self,
+        task_id: impl Into<String>,
+        cancellation: watch::Receiver<bool>,
+        operation: F,
+    ) -> Result<ExecutionResult, ExecutionError>
+    where
+        F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
+        Fut: Future<Output = Result<Value, RunnerError>> + Send,
+    {
+        self.run_inner(task_id, cancellation, operation).await
+    }
+
+    async fn run_inner<F, Fut>(
+        &self,
+        task_id: impl Into<String>,
+        mut cancellation: watch::Receiver<bool>,
+        mut operation: F,
+    ) -> Result<ExecutionResult, ExecutionError>
+    where
+        F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
+        Fut: Future<Output = Result<Value, RunnerError>> + Send,
     {
         let task_id = task_id.into();
         if task_id.trim().is_empty() {
@@ -161,10 +263,22 @@ impl ExecutionGate {
             let attempt_result = loop {
                 tokio::select! {
                     result = tokio::time::timeout(self.config.attempt_timeout, &mut operation_future) => {
+                        let cancellation_requested = *cancellation.borrow()
+                            || matches!(cancellation.has_changed(), Ok(true) | Err(_));
+                        if cancellation_requested {
+                            return Err(ExecutionError::Cancelled { attempts });
+                        }
                         break result.ok();
                     }
                     changed = cancellation.changed() => {
                         if changed.is_err() || *cancellation.borrow() {
+                            // Give cooperative runners a bounded window to cancel
+                            // provider-side work and release their resources.
+                            let _ = tokio::time::timeout(
+                                CANCELLATION_CLEANUP_GRACE,
+                                &mut operation_future,
+                            )
+                            .await;
                             return Err(ExecutionError::Cancelled { attempts });
                         }
                     }
@@ -180,18 +294,139 @@ impl ExecutionGate {
                         elapsed_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
                     });
                 }
-                Some(Err(message)) if attempts == self.config.max_attempts => {
-                    return Err(ExecutionError::RunnerFailed { attempts, message });
+                Some(Err(error)) if error.retryable && attempts < self.config.max_attempts => {
+                    self.wait_before_retry(attempts, &mut cancellation).await?;
+                    continue;
                 }
-                Some(Err(_)) | None if attempts < self.config.max_attempts => continue,
+                Some(Err(error)) => {
+                    return Err(ExecutionError::RunnerFailed {
+                        attempts,
+                        message: error.message,
+                    });
+                }
+                // A timeout has an unknown side-effect outcome. Never replay it automatically.
                 None => return Err(ExecutionError::TimedOut { attempts }),
-                Some(Err(message)) => {
-                    return Err(ExecutionError::RunnerFailed { attempts, message });
-                }
             }
         }
 
         Err(ExecutionError::SchedulerClosed)
+    }
+}
+
+/// A dependency-aware mission plan. This model validates and orders work only;
+/// execution and external side effects remain the responsibility of reviewed runners.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MissionNode {
+    pub id: String,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    /// Higher values are scheduled first when multiple nodes are ready.
+    #[serde(default)]
+    pub priority: u8,
+    pub task_type: String,
+    /// JSON payload passed to the reviewed task runner after operator approval.
+    #[serde(default)]
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MissionGraph {
+    pub mission_id: String,
+    pub nodes: Vec<MissionNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MissionGraphError {
+    EmptyMissionId,
+    EmptyNodeId,
+    DuplicateNodeId(String),
+    EmptyTaskType(String),
+    MissingDependency { node: String, dependency: String },
+    SelfDependency(String),
+    DependencyCycle(Vec<String>),
+}
+
+impl MissionGraph {
+    /// Validate dependencies and return a deterministic priority-aware execution order.
+    pub fn execution_order(&self) -> Result<Vec<String>, MissionGraphError> {
+        use std::cmp::Reverse;
+        use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+
+        if self.mission_id.trim().is_empty() {
+            return Err(MissionGraphError::EmptyMissionId);
+        }
+
+        let mut nodes = BTreeMap::new();
+        for node in &self.nodes {
+            if node.id.trim().is_empty() {
+                return Err(MissionGraphError::EmptyNodeId);
+            }
+            if node.task_type.trim().is_empty() {
+                return Err(MissionGraphError::EmptyTaskType(node.id.clone()));
+            }
+            if nodes.insert(node.id.as_str(), node).is_some() {
+                return Err(MissionGraphError::DuplicateNodeId(node.id.clone()));
+            }
+        }
+
+        let mut indegree = BTreeMap::<&str, usize>::new();
+        let mut dependents = BTreeMap::<&str, Vec<&str>>::new();
+        for node in &self.nodes {
+            let mut unique = BTreeSet::new();
+            for dependency in &node.depends_on {
+                if dependency == &node.id {
+                    return Err(MissionGraphError::SelfDependency(node.id.clone()));
+                }
+                if !nodes.contains_key(dependency.as_str()) {
+                    return Err(MissionGraphError::MissingDependency {
+                        node: node.id.clone(),
+                        dependency: dependency.clone(),
+                    });
+                }
+                if unique.insert(dependency.as_str()) {
+                    *indegree.entry(node.id.as_str()).or_default() += 1;
+                    dependents
+                        .entry(dependency.as_str())
+                        .or_default()
+                        .push(node.id.as_str());
+                }
+            }
+            indegree.entry(node.id.as_str()).or_default();
+        }
+
+        // Reverse ordering makes BinaryHeap pop highest priority, then lexical ID.
+        let mut ready = BinaryHeap::new();
+        for node in &self.nodes {
+            if indegree[node.id.as_str()] == 0 {
+                ready.push((node.priority, Reverse(node.id.as_str())));
+            }
+        }
+
+        let mut ordered = Vec::with_capacity(self.nodes.len());
+        while let Some((_priority, Reverse(id))) = ready.pop() {
+            ordered.push(id.to_string());
+            if let Some(children) = dependents.get(id) {
+                for child in children {
+                    let remaining = indegree.get_mut(child).expect("known dependent");
+                    *remaining -= 1;
+                    if *remaining == 0 {
+                        let node = nodes[child];
+                        ready.push((node.priority, Reverse(node.id.as_str())));
+                    }
+                }
+            }
+        }
+
+        if ordered.len() != self.nodes.len() {
+            let mut cycle_nodes = indegree
+                .into_iter()
+                .filter(|(_, degree)| *degree > 0)
+                .map(|(id, _)| id.to_string())
+                .collect::<Vec<_>>();
+            cycle_nodes.sort();
+            return Err(MissionGraphError::DependencyCycle(cycle_nodes));
+        }
+        Ok(ordered)
     }
 }
 
@@ -202,12 +437,96 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::{Notify, oneshot};
 
+    #[test]
+    fn mission_graph_orders_dependencies_before_priority() {
+        let graph = MissionGraph {
+            mission_id: "mission-1".into(),
+            nodes: vec![
+                MissionNode {
+                    id: "report".into(),
+                    depends_on: vec!["build".into()],
+                    priority: 250,
+                    task_type: "report".into(),
+                    payload: Value::Null,
+                },
+                MissionNode {
+                    id: "audit".into(),
+                    depends_on: vec![],
+                    priority: 20,
+                    task_type: "audit".into(),
+                    payload: Value::Null,
+                },
+                MissionNode {
+                    id: "build".into(),
+                    depends_on: vec![],
+                    priority: 1,
+                    task_type: "build".into(),
+                    payload: Value::Null,
+                },
+            ],
+        };
+        assert_eq!(
+            graph.execution_order().unwrap(),
+            vec!["audit", "build", "report"]
+        );
+    }
+
+    #[test]
+    fn mission_graph_rejects_missing_dependencies_and_cycles() {
+        let missing = MissionGraph {
+            mission_id: "m".into(),
+            nodes: vec![MissionNode {
+                id: "a".into(),
+                depends_on: vec!["absent".into()],
+                priority: 0,
+                task_type: "x".into(),
+                payload: Value::Null,
+            }],
+        };
+        assert_eq!(
+            missing.execution_order(),
+            Err(MissionGraphError::MissingDependency {
+                node: "a".into(),
+                dependency: "absent".into()
+            })
+        );
+
+        let cycle = MissionGraph {
+            mission_id: "m".into(),
+            nodes: vec![
+                MissionNode {
+                    id: "a".into(),
+                    depends_on: vec!["b".into()],
+                    priority: 0,
+                    task_type: "x".into(),
+                    payload: Value::Null,
+                },
+                MissionNode {
+                    id: "b".into(),
+                    depends_on: vec!["a".into()],
+                    priority: 0,
+                    task_type: "x".into(),
+                    payload: Value::Null,
+                },
+            ],
+        };
+        assert_eq!(
+            cycle.execution_order(),
+            Err(MissionGraphError::DependencyCycle(vec![
+                "a".into(),
+                "b".into()
+            ]))
+        );
+    }
+
     fn config(max_concurrency: usize, max_admitted: usize) -> ExecutionConfig {
         ExecutionConfig {
             max_concurrency,
             max_admitted,
             max_attempts: 1,
             attempt_timeout: Duration::from_secs(2),
+            retry_backoff: Duration::ZERO,
+            max_retry_backoff: Duration::ZERO,
         }
     }
 
@@ -228,6 +547,13 @@ mod tests {
         assert_eq!(
             ExecutionGate::new(config(2, 1)).err(),
             Some(ConfigError::AdmissionBelowConcurrency)
+        );
+        let mut invalid_backoff = config(1, 1);
+        invalid_backoff.retry_backoff = Duration::from_secs(2);
+        invalid_backoff.max_retry_backoff = Duration::from_secs(1);
+        assert_eq!(
+            ExecutionGate::new(invalid_backoff).err(),
+            Some(ConfigError::MaxRetryBackoffBelowInitial)
         );
     }
 
@@ -330,11 +656,11 @@ mod tests {
         let (_cancel, receiver) = watch::channel(false);
 
         let result = gate
-            .run("retry", receiver, move |_, _| {
+            .run_with_retryable_errors("retry", receiver, move |_, _| {
                 let calls = Arc::clone(&calls_for_runner);
                 async move {
                     if calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                        Err("temporary failure".to_string())
+                        Err(RunnerError::retryable("temporary transport failure"))
                     } else {
                         Ok(json!({"ok": true}))
                     }
@@ -345,6 +671,70 @@ mod tests {
 
         assert_eq!(result.attempts, 2);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_wait_is_cancellable_before_next_attempt() {
+        let mut retry_config = config(1, 1);
+        retry_config.max_attempts = 3;
+        retry_config.retry_backoff = Duration::from_secs(5);
+        retry_config.max_retry_backoff = Duration::from_secs(10);
+        let gate = ExecutionGate::new(retry_config).unwrap();
+        let (cancel, receiver) = watch::channel(false);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_runner = Arc::clone(&calls);
+
+        let task = tokio::spawn(async move {
+            gate.run_with_retryable_errors("cancel-during-backoff", receiver, move |_, _| {
+                let calls = Arc::clone(&calls_for_runner);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(RunnerError::retryable("temporary transport failure"))
+                }
+            })
+            .await
+        });
+        for _ in 0..50 {
+            if calls.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        cancel.send(true).unwrap();
+        assert_eq!(
+            task.await.unwrap(),
+            Err(ExecutionError::Cancelled { attempts: 1 })
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn permanent_runner_errors_are_not_retried() {
+        let mut retry_config = config(1, 1);
+        retry_config.max_attempts = 3;
+        let gate = ExecutionGate::new(retry_config).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_runner = Arc::clone(&calls);
+        let (_cancel, receiver) = watch::channel(false);
+
+        let result = gate
+            .run("permanent-error", receiver, move |_, _| {
+                let calls = Arc::clone(&calls_for_runner);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err("invalid task input".to_string())
+                }
+            })
+            .await;
+
+        assert_eq!(
+            result,
+            Err(ExecutionError::RunnerFailed {
+                attempts: 1,
+                message: "invalid task input".into()
+            })
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -367,17 +757,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancellation_gives_active_runner_a_bounded_cleanup_window() {
+        let gate = Arc::new(ExecutionGate::new(config(1, 1)).unwrap());
+        let (cancel, receiver) = watch::channel(false);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let mut started_tx = Some(started_tx);
+        let cleanup = Arc::new(AtomicUsize::new(0));
+        let cleanup_for_runner = Arc::clone(&cleanup);
+        let task = tokio::spawn(async move {
+            gate.run("cancel-cleanup", receiver, move |_, mut cancellation| {
+                let cleanup = Arc::clone(&cleanup_for_runner);
+                let started_tx = started_tx.take();
+                async move {
+                    if let Some(started_tx) = started_tx {
+                        let _ = started_tx.send(());
+                    }
+                    let _ = cancellation.changed().await;
+                    cleanup.fetch_add(1, Ordering::SeqCst);
+                    Err("provider cancellation completed".to_string())
+                }
+            })
+            .await
+        });
+        started_rx.await.unwrap();
+        cancel.send(true).unwrap();
+
+        assert_eq!(
+            task.await.unwrap(),
+            Err(ExecutionError::Cancelled { attempts: 1 })
+        );
+        assert_eq!(cleanup.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn times_out_an_attempt_without_exceeding_retry_limit() {
         let mut timeout_config = config(1, 1);
+        timeout_config.max_attempts = 3;
         timeout_config.attempt_timeout = Duration::from_millis(10);
         let gate = ExecutionGate::new(timeout_config).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_runner = Arc::clone(&calls);
         let (_cancel, receiver) = watch::channel(false);
         let result = gate
-            .run("timeout", receiver, |_, _| async {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                Ok(Value::Null)
+            .run("timeout", receiver, move |_, _| {
+                let calls = Arc::clone(&calls_for_runner);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    Ok(Value::Null)
+                }
             })
             .await;
         assert_eq!(result, Err(ExecutionError::TimedOut { attempts: 1 }));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

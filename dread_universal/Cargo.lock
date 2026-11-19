@@ -221,9 +221,12 @@ dependencies = [
 name = "dread-agents"
 version = "0.4.0"
 dependencies = [
+ "axum",
  "futures",
+ "reqwest",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -236,6 +239,8 @@ dependencies = [
  "dread-discovery",
  "dread-gpu",
  "dread-orchestrator",
+ "dread-platform",
+ "dread-skills",
  "futures",
  "reqwest",
  "rusqlite",
@@ -276,8 +281,24 @@ dependencies = [
 name = "dread-orchestrator"
 version = "0.4.0"
 dependencies = [
+ "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "dread-platform"
+version = "0.4.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dread-skills"
+version = "0.4.0"
+dependencies = [
+ "ring",
 ]
 
 [[package]]

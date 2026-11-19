@@ -1,8 +1,12 @@
 //! Provider-neutral contracts for PROJECT DREAD agent adapters and capabilities.
 //!
-//! This crate deliberately contains no provider-specific HTTP clients and performs
-//! no discovery or execution. Concrete adapters must be reviewed and registered
-//! separately; imported capabilities start disabled.
+//! Provider adapters are explicit, loopback-restricted clients and are not
+//! auto-discovered or registered by this crate. Callers must enforce DREAD
+//! approval before task submission; imported capabilities start disabled.
+
+pub mod deerflow;
+pub mod hermes;
+pub mod openhands;
 
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -57,6 +61,7 @@ pub struct StartTaskRequest {
 pub enum AgentTaskState {
     Queued,
     Running,
+    WaitingForConfirmation,
     Succeeded,
     Failed,
     Cancelled,
@@ -109,14 +114,48 @@ pub trait AgentAdapter: Send + Sync {
     fn health<'a>(&'a self) -> AdapterFuture<'a, AgentHealth>;
     fn capabilities<'a>(&'a self) -> AdapterFuture<'a, Vec<AgentCapability>>;
     fn start_task<'a>(&'a self, request: StartTaskRequest) -> AdapterFuture<'a, AgentTask>;
-    fn task_status<'a>(&'a self, task_id: &'a str) -> AdapterFuture<'a, AgentTask>;
+    /// Provider lifecycle methods receive both stable identities. The local
+    /// task ID is returned to DREAD callers; the provider ID is used only for
+    /// the remote API path and must never be substituted for the local ID.
+    fn task_status<'a>(
+        &'a self,
+        task_id: &'a str,
+        provider_task_id: &'a str,
+    ) -> AdapterFuture<'a, AgentTask>;
     fn events<'a>(
         &'a self,
         task_id: &'a str,
+        provider_task_id: &'a str,
         after_sequence: u64,
     ) -> AdapterFuture<'a, Vec<AgentEvent>>;
-    fn cancel_task<'a>(&'a self, task_id: &'a str) -> AdapterFuture<'a, AgentTask>;
-    fn task_result<'a>(&'a self, task_id: &'a str) -> AdapterFuture<'a, AgentTask>;
+    fn cancel_task<'a>(
+        &'a self,
+        task_id: &'a str,
+        provider_task_id: &'a str,
+    ) -> AdapterFuture<'a, AgentTask>;
+    /// Accept or reject a provider action that is currently waiting for
+    /// operator confirmation. Providers without interactive approval support
+    /// fail closed by default.
+    fn respond_to_confirmation<'a>(
+        &'a self,
+        _task_id: &'a str,
+        _provider_task_id: &'a str,
+        _accept: bool,
+        _reason: &'a str,
+    ) -> AdapterFuture<'a, ()> {
+        Box::pin(async {
+            Err(AgentAdapterError {
+                code: "unsupported_confirmation".into(),
+                message: "This provider does not support interactive confirmations".into(),
+                retryable: false,
+            })
+        })
+    }
+    fn task_result<'a>(
+        &'a self,
+        task_id: &'a str,
+        provider_task_id: &'a str,
+    ) -> AdapterFuture<'a, AgentTask>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
