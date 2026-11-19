@@ -153,8 +153,7 @@ impl OpenHandsAgentServerAdapter {
         if !docker_runtime_enabled {
             return Err(adapter_error(
                 "docker_runtime_required",
-                "OpenHands requires Docker execution runtime selection on the Agent Server"
-                    .into(),
+                "OpenHands requires Docker execution runtime selection on the Agent Server".into(),
                 false,
             ));
         }
@@ -805,10 +804,7 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
 }
 
 fn server_supports_docker_runtime(server_info: &Value) -> bool {
-    server_info
-        .get("execution_runtime")
-        .and_then(Value::as_str)
-        == Some("docker")
+    server_info.get("execution_runtime").and_then(Value::as_str) == Some("docker")
 }
 
 fn server_has_required_tools(server_info: &Value) -> bool {
@@ -983,8 +979,12 @@ mod tests {
 
     #[test]
     fn server_runtime_metadata_must_prove_docker_execution_and_required_tools() {
-        assert!(server_supports_docker_runtime(&json!({"execution_runtime": "docker"})));
-        assert!(!server_supports_docker_runtime(&json!({"execution_runtime": "local"})));
+        assert!(server_supports_docker_runtime(
+            &json!({"execution_runtime": "docker"})
+        ));
+        assert!(!server_supports_docker_runtime(
+            &json!({"execution_runtime": "local"})
+        ));
         assert!(!server_supports_docker_runtime(&json!({
             "conversation_runtime": "docker",
             "available_conversation_runtimes": ["docker"]
