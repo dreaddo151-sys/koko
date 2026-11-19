@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd -- "$(dirname -- "\${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 VERIFY="$ROOT/verify-release.sh"
 if [[ ! -f "$VERIFY" ]]; then
   printf 'Release verifier is missing: %s\n' "$VERIFY" >&2
@@ -16,7 +16,7 @@ FAKE_COSIGN="$TMP/bin/cosign"
 cat > "$FAKE_COSIGN" <<'COSIGN'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "\${1:-}" == verify-blob ]] || exit 41
+[[ "${1:-}" == verify-blob ]] || exit 41
 shift
 
 bundle=""
@@ -49,7 +49,7 @@ done
 [[ "$issuer" == "https://token.actions.githubusercontent.com" ]] || exit 44
 expected_identity_regex='^https://github\.com/dreaddo151-sys/koko/\.github/workflows/dread-universal-release\.yml@refs/(tags/v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?|heads/main)$'
 [[ "$identity_regex" == "$expected_identity_regex" ]] || exit 45
-[[ "\${FAKE_COSIGN_FAIL:-0}" != 1 ]] || exit 49
+[[ "${FAKE_COSIGN_FAIL:-0}" != 1 ]] || exit 49
 COSIGN
 chmod 0755 "$FAKE_COSIGN"
 
