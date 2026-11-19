@@ -5618,6 +5618,7 @@ mod tests {
                 api_key: "test-api-key".into(),
                 terminal_backend: "modal".into(),
                 isolated_workspace_per_task: true,
+                sandbox_policy_verified: true,
             }),
             deerflow: Some(DeerFlowAdapterConfig {
                 endpoint: "http://127.0.0.1:2026".into(),
@@ -5625,6 +5626,7 @@ mod tests {
                 pat: "dfp_test-token".into(),
                 provider_class: "deerflow.community.boxlite:BoxliteProvider".into(),
                 isolated_workspace_per_task: true,
+                sandbox_policy_verified: true,
                 provisioner_url: None,
             }),
             openhands: Some(OpenHandsAdapterConfig {
