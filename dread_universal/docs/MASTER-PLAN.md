@@ -596,3 +596,47 @@ This is not completion of Phase 5. Signed catalog/publisher verification, contro
 - **Physical workstation acceptance remains blocked/not refreshed.** No SSH/workstation terminal was available. Latest evidence is still the 2026-11-18 10:30 UTC user-supplied baseline (ComfyUI :8188, Rust API :8765, Supervisor gateway :11500, authenticated bridge :11502 HTTP 200; Python Hub :8080 HTTP 000; \`dread-tensor.service\` inactive). Do not represent it as current.
 - No provider task, package install, service stop/restart, deployment, GPU/media workload, merge or data mutation was performed. Preserve Python Master Hub, ComfyUI, Python GPU Supervisor, models, databases and existing worktrees.
 - Acceptance priority: (1) read-only workstation baseline plus real provider config/version/sandbox/tool checks; (2) confirm CI on the repaired current head; (3) live Python Hub route/payload/auth/stream/cancel/upload/output parity; (4) resource-class mission policies, timeout/cancel propagation, idempotency/retry and result aggregation; (5) signed Pstack catalog and transactional executable extension lifecycle; (6) dual-3090 contention and valid image/H3/FlashVSR artifacts; (7) signed updater, SBOM/license review and physical Ubuntu install/upgrade/reboot/rollback.
+
+
+## Current acceptance checkpoint — 2026-11-19 09:28 Bahrain
+
+### Repository and CI evidence
+
+- PR #12 remains open/unmerged on `feature/universal-capability-discovery-clean-2026-11-17`. The last fully tested implementation head is `8d8863c7393176432d04def410639514414b6d2c`; PR run #885 (`44473460017`) and push run #884 (`44473452327`) both passed all three Ubuntu 24.04 jobs. The Rust job passed formatting, strict Clippy, 124 workspace tests, release build, installer/release verifier tests, portable migration/rollback, Python bridge/importer tests and the GPU single-owner guard. Web production build and disposable Ubuntu package/API/UI/auth smoke tests passed. The earlier #699/#698 results belong to the older `573627c...` checkpoint.
+- Current code fixes in the passing head corrected two Rust formatting errors, completed the new provider policy fields in positive registry fixtures, and staged `verify-release.sh` beside `SHA256SUMS` so package assembly can complete. Later commits in this checkpoint only update this plan and work log.
+
+### Live workstation and provider acceptance
+
+- No authorized SSH/workstation shell was available in this run. The live workstation was not inspected or modified. The latest dated physical baseline remains 2026-11-18 10:30 UTC: ComfyUI `:8188`, Rust API `:8765`, Supervisor gateway `:11500` and authenticated bridge `:11502` returned HTTP 200; Python Master Hub `:8080` returned HTTP 000; `dread-tensor.service` was inactive. This is historical evidence only, not current status. Preserve the Python Master Hub, ComfyUI and Python GPU Supervisor.
+- `config/agents.toml` is empty (`agents = []`) and `.env.example` leaves provider groups commented. Task adapters are enabled from the running Rust API process environment, not from `agents.toml`. Actual environment/configuration and credentials-presence metadata remain unknown because the running service environment could not be read.
+- OpenHands source requires authenticated `/server_info.execution_runtime == "docker"`, the `terminal`, `file_editor` and `task_tracker` tools, a `DockerExecutionWorkspace` at `/workspace`, `worktree=false` and `AlwaysConfirm`. This is still not proof of per-conversation container creation, safe mounts, restricted egress or a command allowlist; the terminal tool is powerful.
+- Hermes source currently accepts `modal`, `daytona`, `vercel_sandbox` and `singularity`; stock Docker is rejected. Upstream Hermes documentation describes `container_persistent: false` for per-session Docker isolation, but DREAD does not yet model or verify that configuration. DeerFlow source permits AIO or BoxLite and rejects local/remote provisioners; upstream AIO's compatibility network default is `open`, while `isolated` and `allowlist` provide stricter egress. BoxLite scopes by `(user_id, thread_id)` and can reuse a warm VM for the same thread. Actual versions, mounts, network settings and secret handling must be checked on the host.
+- Every `DREAD_*_SANDBOX_POLICY_VERIFIED` value is an operator attestation, not runtime proof. Provider lifecycle and recovery tests are mock-based. Do not submit a real provider task until live versions, sandbox/workspace isolation, mount policy, egress, tool permissions, secrets, cancellation and restart recovery have been verified.
+
+### Updated phase ledger
+
+| Phase | Current state | Remaining acceptance |
+|---|---|---|
+| 0 Preservation baseline | Historical baseline exists | Fresh read-only host/service/GPU/storage capture; preserve all existing services |
+| 1 Hub continuity/parity | Rust API and React console exist; legacy compatibility audit exists | Hash exact installed Python Hub; route/payload/auth/stream/cancel/upload/output parity; side-by-side and rollback |
+| 2 Discovery | CPU/RAM/storage/GPU/driver/CUDA discovery and tests exist | Compare authenticated live API profile and full physical inventory on workstation |
+| 3 Tasks/missions | Durable approval-gated DAG, priority dispatch, bounded global admission, retry/cancel/recovery primitives | Resource-class admission, per-node policies, provider idempotency/retry, mission aggregation and interrupted recovery |
+| 4 Agent adapters | Hermes, DeerFlow and OpenHands registered and wired; mock lifecycle/recovery tests pass | Live provider version/config, real sandbox/tool/mount/egress/secret verification, cancellation and restart drills |
+| 5 Extensions | Pinned Pstack metadata import/preview/enable/disable/refresh and audited registry removal | Signed catalog/publisher, source acquisition, executable tool/MCP permission review, transactional install/update/remove and atomic rollback |
+| 6 GPU runtime | Rust uses authenticated Python Supervisor bridge; single-owner CI guard passes | Physical dual-3090 contention/fairness/lease recovery with ComfyUI and video; preserve Supervisor as sole GPU owner |
+| 7 Media | ComfyUI present historically; media integration not accepted | Valid image, playable MiniMax H3 MP4 and FlashVSR outputs; progress, cancel, download, hashes and concurrency evidence |
+| 8 Security/repair | Loopback/auth, approvals, audit and provider gates exist | Full PASS/DENY/ASK, least privilege, safe repair simulation/postconditions/rollback and restore drills |
+| 9 Unified UI | Production React console and mission/capability controls exist | Full Master Hub workflow parity, sessions/checkpoints, telemetry, media and browser acceptance |
+| 10 Installer/updater | `.deb`/portable package, checksum manifest, verifier and disposable package smoke tests pass in CI | Actual cosign signing/bundle publication; physical install/upgrade/reboot/service-preservation/failed-upgrade rollback |
+| 11 Release | Not accepted | Signed release, SBOM/license review, live provider/GPU/media acceptance and physical Ubuntu recovery evidence |
+
+### Next acceptance order
+
+1. Obtain a read-only workstation baseline and inspect live provider config without exposing secret values or changing services.
+2. Complete exact legacy Hub route parity and safe side-by-side tests.
+3. Implement resource-class mission admission, per-node timeout/cancel, provider-specific idempotency/retry and mission aggregation.
+4. Complete signed Pstack publisher/catalog and transactional executable extension lifecycle; add cosign signing and Sigstore bundle publication to the release workflow.
+5. Run approved dual-3090/ComfyUI contention and validate image, MiniMax H3 MP4 and FlashVSR artifacts.
+6. Complete physical Ubuntu install/upgrade/reboot/rollback, SBOM/license review and release acceptance.
+
+CI success is not live provider, workstation, GPU/media or release acceptance. Keep PR #12 open and unmerged until every remaining gate has direct evidence.
