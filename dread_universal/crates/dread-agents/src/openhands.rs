@@ -1,9 +1,9 @@
 //! OpenHands Agent Server adapter.
 //!
-//! Every DREAD conversation explicitly requests the Agent Server Docker runtime,
-//! which provisions a conversation-scoped container and workspace. The adapter
-//! remains disabled unless Docker runtime selection and stable OH_SECRET_KEY
-//! storage are configured on the Agent Server.
+//! Every DREAD conversation requests DockerExecutionWorkspace. The adapter only
+//! enables execution when authenticated /server_info advertises execution_runtime
+//! = "docker" and exposes the exact tools requested by DREAD. AlwaysConfirm is
+//! retained. These server claims still require live host/container validation.
 
 use crate::{
     AdapterFuture, AgentAdapter, AgentAdapterError, AgentCapability, AgentDescriptor, AgentEvent,
@@ -39,9 +39,9 @@ pub struct OpenHandsAgentServerAdapter {
 impl OpenHandsAgentServerAdapter {
     /// Construct a disabled, loopback-only adapter.
     ///
-    /// The server's LocalWorkspace runs inside the Agent Server process. DREAD
-    /// therefore requires the Agent Server itself to be isolated in a container
-    /// and creates one deterministic working directory per task.
+    /// DockerExecutionWorkspace selects the Agent Server's per-conversation
+    /// execution workspace. Never substitute LocalWorkspace: it may execute in
+    /// the Agent Server process. /server_info must advertise execution_runtime=docker.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         base_url: &str,
@@ -142,10 +142,9 @@ impl OpenHandsAgentServerAdapter {
         })
     }
 
-    /// Enable only after Agent Server Docker runtime selection, Docker daemon
-    /// availability, and stable OH_SECRET_KEY storage have been configured.
-    /// Conversation creation still explicitly requests the Docker runtime;
-    /// the server must reject the request rather than falling back to Local.
+    /// Enable only after Docker execution and stable OH_SECRET_KEY storage have
+    /// been configured on the Agent Server. Before advertising or starting a task,
+    /// DREAD reads authoritative /server_info execution_runtime and usable_tools.
     pub fn attest_docker_runtime(
         mut self,
         docker_runtime_enabled: bool,
@@ -154,7 +153,7 @@ impl OpenHandsAgentServerAdapter {
         if !docker_runtime_enabled {
             return Err(adapter_error(
                 "docker_runtime_required",
-                "OpenHands requires Docker conversation runtime selection on the Agent Server"
+                "OpenHands requires Docker execution runtime selection on the Agent Server"
                     .into(),
                 false,
             ));
@@ -182,7 +181,7 @@ impl OpenHandsAgentServerAdapter {
         } else {
             Err(adapter_error(
                 "sandbox_not_attested",
-                "OpenHands execution is disabled until Docker conversation runtime selection and stable OH_SECRET_KEY storage are configured".into(),
+                "OpenHands execution is disabled until Docker execution runtime and stable OH_SECRET_KEY storage are configured".into(),
                 false,
             ))
         }
@@ -204,15 +203,21 @@ impl OpenHandsAgentServerAdapter {
             Err(error) => return Err(error),
         };
 
-        if server_supports_docker_runtime(&server_info) {
-            Ok(())
-        } else {
-            Err(adapter_error(
+        if !server_supports_docker_runtime(&server_info) {
+            return Err(adapter_error(
                 "docker_runtime_unavailable",
-                "OpenHands Agent Server reports no selectable or active Docker conversation runtime".into(),
+                "OpenHands /server_info does not advertise execution_runtime=docker".into(),
                 false,
-            ))
+            ));
         }
+        if !server_has_required_tools(&server_info) {
+            return Err(adapter_error(
+                "required_tools_unavailable",
+                "OpenHands /server_info does not expose all DREAD-required tools: terminal, file_editor, task_tracker".into(),
+                false,
+            ));
+        }
+        Ok(())
     }
 
     async fn json_request(
@@ -431,7 +436,6 @@ impl OpenHandsAgentServerAdapter {
         });
         Ok(json!({
             "conversation_id": request.task_id,
-            "conversation_runtime": "docker",
             "agent": {
                 "kind": "Agent",
                 "llm": llm,
@@ -442,9 +446,10 @@ impl OpenHandsAgentServerAdapter {
                 ]
             },
             "workspace": {
-                "kind": "LocalWorkspace",
+                "kind": "DockerExecutionWorkspace",
                 "working_dir": "/workspace"
             },
+            "worktree": false,
             "confirmation_policy": {"kind": "AlwaysConfirm"},
             "initial_message": {
                 "role": "user",
@@ -800,21 +805,22 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
 }
 
 fn server_supports_docker_runtime(server_info: &Value) -> bool {
-    if server_info
-        .get("conversation_runtime")
+    server_info
+        .get("execution_runtime")
         .and_then(Value::as_str)
         == Some("docker")
-    {
-        return true;
-    }
-    server_info
-        .get("available_conversation_runtimes")
-        .and_then(Value::as_array)
-        .is_some_and(|runtimes| {
-            runtimes
-                .iter()
-                .any(|runtime| runtime.as_str() == Some("docker"))
-        })
+}
+
+fn server_has_required_tools(server_info: &Value) -> bool {
+    const REQUIRED_TOOLS: [&str; 3] = ["terminal", "file_editor", "task_tracker"];
+    let Some(usable_tools) = server_info.get("usable_tools").and_then(Value::as_array) else {
+        return false;
+    };
+    REQUIRED_TOOLS.iter().all(|required| {
+        usable_tools
+            .iter()
+            .any(|tool| tool.as_str() == Some(required))
+    })
 }
 
 fn validate_task_id(task_id: &str) -> Result<(), AgentAdapterError> {
@@ -898,8 +904,8 @@ mod tests {
             Some("session-secret")
         );
         Json(json!({
-            "conversation_runtime": "local",
-            "available_conversation_runtimes": ["local", "docker"]
+            "execution_runtime": "docker",
+            "usable_tools": ["terminal", "file_editor", "task_tracker"]
         }))
     }
 
@@ -917,14 +923,15 @@ mod tests {
             .to_string();
         assert_eq!(
             body.pointer("/workspace/kind").and_then(Value::as_str),
-            Some("LocalWorkspace")
+            Some("DockerExecutionWorkspace")
         );
         assert_eq!(
             body.pointer("/workspace/working_dir")
                 .and_then(Value::as_str),
             Some("/workspace")
         );
-        assert_eq!(body["conversation_runtime"], "docker");
+        assert_eq!(body["worktree"], false);
+        assert!(body.get("conversation_runtime").is_none());
         assert_eq!(body["confirmation_policy"]["kind"], "AlwaysConfirm");
         assert_eq!(body["agent"]["llm"]["stream"], false);
         assert!(
@@ -975,22 +982,22 @@ mod tests {
     }
 
     #[test]
-    fn server_runtime_metadata_must_prove_docker_availability() {
-        assert!(server_supports_docker_runtime(&json!({
+    fn server_runtime_metadata_must_prove_docker_execution_and_required_tools() {
+        assert!(server_supports_docker_runtime(&json!({"execution_runtime": "docker"})));
+        assert!(!server_supports_docker_runtime(&json!({"execution_runtime": "local"})));
+        assert!(!server_supports_docker_runtime(&json!({
             "conversation_runtime": "docker",
-            "available_conversation_runtimes": []
+            "available_conversation_runtimes": ["docker"]
         })));
-        assert!(server_supports_docker_runtime(&json!({
-            "conversation_runtime": "local",
-            "available_conversation_runtimes": ["local", "docker"]
+        assert!(!server_supports_docker_runtime(&json!({})));
+
+        assert!(server_has_required_tools(&json!({
+            "usable_tools": ["terminal", "file_editor", "task_tracker", "browser"]
         })));
-        assert!(!server_supports_docker_runtime(&json!({
-            "conversation_runtime": "local",
-            "available_conversation_runtimes": ["local"]
+        assert!(!server_has_required_tools(&json!({
+            "usable_tools": ["terminal", "file_editor"]
         })));
-        assert!(!server_supports_docker_runtime(&json!({
-            "available_conversation_runtimes": ["local"]
-        })));
+        assert!(!server_has_required_tools(&json!({})));
     }
 
     #[test]
@@ -1014,9 +1021,19 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(payload["conversation_runtime"], "docker");
+        assert!(payload.get("conversation_runtime").is_none());
+        assert_eq!(payload["workspace"]["kind"], "DockerExecutionWorkspace");
         assert_eq!(payload["workspace"]["working_dir"], "/workspace");
+        assert_eq!(payload["worktree"], false);
         assert_eq!(payload["confirmation_policy"]["kind"], "AlwaysConfirm");
+        assert_eq!(
+            payload["agent"]["tools"],
+            json!([
+                {"name": "terminal"},
+                {"name": "file_editor"},
+                {"name": "task_tracker"}
+            ])
+        );
         assert_eq!(payload["agent"]["llm"]["stream"], false);
     }
 
