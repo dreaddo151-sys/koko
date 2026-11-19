@@ -5564,7 +5564,7 @@ mod tests {
             hermes: Some(HermesAdapterConfig {
                 endpoint: "http://127.0.0.1:8642".into(),
                 api_key: "test-api-key".into(),
-                terminal_backend: "docker".into(),
+                terminal_backend: "modal".into(),
                 isolated_workspace_per_task: false,
             }),
             deerflow: None,
@@ -5593,7 +5593,7 @@ mod tests {
             hermes: Some(HermesAdapterConfig {
                 endpoint: "http://127.0.0.1:8642".into(),
                 api_key: "test-api-key".into(),
-                terminal_backend: "docker".into(),
+                terminal_backend: "modal".into(),
                 isolated_workspace_per_task: true,
             }),
             deerflow: Some(DeerFlowAdapterConfig {
