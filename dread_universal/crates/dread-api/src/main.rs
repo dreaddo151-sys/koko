@@ -70,6 +70,7 @@ struct HermesAdapterConfig {
     api_key: String,
     terminal_backend: String,
     isolated_workspace_per_task: bool,
+    sandbox_policy_verified: bool,
 }
 
 struct DeerFlowAdapterConfig {
@@ -78,6 +79,7 @@ struct DeerFlowAdapterConfig {
     pat: String,
     provider_class: String,
     isolated_workspace_per_task: bool,
+    sandbox_policy_verified: bool,
     provisioner_url: Option<String>,
 }
 struct OpenHandsAdapterConfig {
@@ -88,6 +90,7 @@ struct OpenHandsAdapterConfig {
     llm_base_url: String,
     docker_runtime_enabled: bool,
     secret_store_configured: bool,
+    sandbox_policy_verified: bool,
 }
 
 fn build_agent_adapters(
@@ -95,6 +98,9 @@ fn build_agent_adapters(
 ) -> Result<HashMap<String, Arc<dyn AgentAdapter>>, String> {
     let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
     if let Some(hermes) = config.hermes {
+        if !hermes.sandbox_policy_verified {
+            return Err("Hermes requires explicit sandbox policy verification for per-task isolation, network egress, mounts and forwarded secrets".into());
+        }
         if !hermes.isolated_workspace_per_task {
             return Err("Hermes requires explicit per-task workspace isolation attestation".into());
         }
@@ -105,6 +111,9 @@ fn build_agent_adapters(
         adapters.insert("hermes".into(), Arc::new(adapter));
     }
     if let Some(deerflow) = config.deerflow {
+        if !deerflow.sandbox_policy_verified {
+            return Err("DeerFlow requires explicit sandbox policy verification for per-task isolation, network mode and mounts".into());
+        }
         if !deerflow.isolated_workspace_per_task {
             return Err(
                 "DeerFlow requires explicit per-task workspace isolation attestation".into(),
@@ -127,7 +136,10 @@ fn build_agent_adapters(
     }
     if let Some(openhands) = config.openhands {
         if !openhands.docker_runtime_enabled || !openhands.secret_store_configured {
-            return Err("OpenHands requires Docker conversation runtime selection and stable OH_SECRET_KEY storage".into());
+            return Err("OpenHands requires Docker execution runtime selection and stable OH_SECRET_KEY storage".into());
+        }
+        if !openhands.sandbox_policy_verified {
+            return Err("OpenHands requires explicit sandbox policy verification for per-conversation workspace, mounts, network egress and tool permissions".into());
         }
         if openhands.llm_base_url != "http://host.docker.internal:11500/v1" {
             return Err(
@@ -157,6 +169,7 @@ fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn Agen
         "DREAD_HERMES_API_KEY",
         "DREAD_HERMES_SANDBOX_BACKEND",
         "DREAD_HERMES_ISOLATED_WORKSPACE_PER_TASK",
+        "DREAD_HERMES_SANDBOX_POLICY_VERIFIED",
     ];
     if hermes_keys.iter().any(|key| env::var_os(key).is_some()) {
         config.hermes = Some(HermesAdapterConfig {
@@ -164,6 +177,8 @@ fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn Agen
             api_key: env::var("DREAD_HERMES_API_KEY")?,
             terminal_backend: env::var("DREAD_HERMES_SANDBOX_BACKEND")?,
             isolated_workspace_per_task: env::var("DREAD_HERMES_ISOLATED_WORKSPACE_PER_TASK")
+                .is_ok_and(|value| value == "true"),
+            sandbox_policy_verified: env::var("DREAD_HERMES_SANDBOX_POLICY_VERIFIED")
                 .is_ok_and(|value| value == "true"),
         });
     }
@@ -173,6 +188,7 @@ fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn Agen
         "DREAD_DEERFLOW_PAT",
         "DREAD_DEERFLOW_SANDBOX_PROVIDER",
         "DREAD_DEERFLOW_ISOLATED_WORKSPACE_PER_TASK",
+        "DREAD_DEERFLOW_SANDBOX_POLICY_VERIFIED",
         "DREAD_DEERFLOW_API_PREFIX",
         "DREAD_DEERFLOW_PROVISIONER_URL",
     ];
@@ -184,6 +200,8 @@ fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn Agen
             pat: env::var("DREAD_DEERFLOW_PAT")?,
             provider_class: env::var("DREAD_DEERFLOW_SANDBOX_PROVIDER")?,
             isolated_workspace_per_task: env::var("DREAD_DEERFLOW_ISOLATED_WORKSPACE_PER_TASK")
+                .is_ok_and(|value| value == "true"),
+            sandbox_policy_verified: env::var("DREAD_DEERFLOW_SANDBOX_POLICY_VERIFIED")
                 .is_ok_and(|value| value == "true"),
             provisioner_url: env::var("DREAD_DEERFLOW_PROVISIONER_URL").ok(),
         });
@@ -197,6 +215,7 @@ fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn Agen
         "DREAD_OPENHANDS_LLM_BASE_URL",
         "DREAD_OPENHANDS_DOCKER_RUNTIME_ENABLED",
         "DREAD_OPENHANDS_SECRET_STORE_CONFIGURED",
+        "DREAD_OPENHANDS_SANDBOX_POLICY_VERIFIED",
     ];
     if openhands_keys.iter().any(|key| env::var_os(key).is_some()) {
         config.openhands = Some(OpenHandsAdapterConfig {
@@ -208,6 +227,8 @@ fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn Agen
             docker_runtime_enabled: env::var("DREAD_OPENHANDS_DOCKER_RUNTIME_ENABLED")
                 .is_ok_and(|value| value == "true"),
             secret_store_configured: env::var("DREAD_OPENHANDS_SECRET_STORE_CONFIGURED")
+                .is_ok_and(|value| value == "true"),
+            sandbox_policy_verified: env::var("DREAD_OPENHANDS_SANDBOX_POLICY_VERIFIED")
                 .is_ok_and(|value| value == "true"),
         });
     }
@@ -5565,7 +5586,8 @@ mod tests {
                 endpoint: "http://127.0.0.1:8642".into(),
                 api_key: "test-api-key".into(),
                 terminal_backend: "modal".into(),
-                isolated_workspace_per_task: false,
+                sandbox_policy_verified: true,
+            isolated_workspace_per_task: false,
             }),
             deerflow: None,
             openhands: None,
@@ -5579,7 +5601,8 @@ mod tests {
                 api_prefix: "/api/langgraph".into(),
                 pat: "dfp_test-token".into(),
                 provider_class: "AioSandboxProvider".into(),
-                isolated_workspace_per_task: true,
+                sandbox_policy_verified: true,
+            isolated_workspace_per_task: true,
                 provisioner_url: Some("http://provisioner:8002".into()),
             }),
             openhands: None,
@@ -5612,6 +5635,7 @@ mod tests {
                 llm_base_url: "http://host.docker.internal:11500/v1".into(),
                 docker_runtime_enabled: true,
                 secret_store_configured: true,
+                sandbox_policy_verified: true,
             }),
         };
         let adapters = build_agent_adapters(config).unwrap();
