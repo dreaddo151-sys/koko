@@ -92,6 +92,8 @@ EOF
 DEB_PATH="$OUT_DIR/dread-universal_${VERSION}_${ARCH}.deb"
 dpkg-deb --build --root-owner-group "$DEB" "$DEB_PATH" >/dev/null
 dpkg-deb --contents "$DEB_PATH" >/dev/null
+# Ship the verifier beside the manifest so users can verify the release before installing it.
+install -m 0755 scripts/verify-release.sh "$OUT_DIR/verify-release.sh"
 (
   cd "$OUT_DIR"
   sha256sum "$(basename "$TAR_PATH")" "$(basename "$DEB_PATH")" verify-release.sh > SHA256SUMS
