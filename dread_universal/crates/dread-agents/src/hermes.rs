@@ -115,11 +115,11 @@ impl HermesApiAdapter {
     ) -> Result<Self, AgentAdapterError> {
         if !matches!(
             terminal_backend,
-            "docker" | "modal" | "daytona" | "vercel_sandbox" | "singularity"
+            "modal" | "daytona" | "vercel_sandbox" | "singularity"
         ) {
             return Err(adapter_error(
                 "unsafe_sandbox_backend",
-                "Hermes requires a container or isolated VM terminal backend; local and SSH backends are not accepted".into(),
+                "Hermes requires an attested per-task sandbox backend; the stock Docker backend shares one container across the Hermes process, and local/SSH backends are not accepted".into(),
                 false,
             ));
         }
@@ -704,9 +704,10 @@ mod tests {
         assert!(adapter.clone().attest_sandbox("local", true).is_err());
         assert!(adapter.clone().attest_sandbox("ssh", true).is_err());
         assert!(adapter.clone().attest_sandbox("docker", false).is_err());
+        assert!(adapter.clone().attest_sandbox("docker", true).is_err());
         assert!(
             adapter
-                .attest_sandbox("docker", true)
+                .attest_sandbox("modal", true)
                 .unwrap()
                 .descriptor()
                 .enabled
@@ -717,7 +718,7 @@ mod tests {
     async fn rejects_caller_selected_hermes_sessions_before_network_access() {
         let adapter = HermesApiAdapter::new("http://127.0.0.1:8642", "test-api-key", "Hermes")
             .unwrap()
-            .attest_sandbox("docker", true)
+            .attest_sandbox("modal", true)
             .unwrap();
         let result = adapter
             .start_task(StartTaskRequest {
@@ -734,7 +735,7 @@ mod tests {
     fn rejects_unsupported_run_input_fields_before_network_access() {
         let adapter = HermesApiAdapter::new("http://127.0.0.1:8642", "test-api-key", "Hermes")
             .unwrap()
-            .attest_sandbox("docker", true)
+            .attest_sandbox("modal", true)
             .unwrap();
         let request = StartTaskRequest {
             task_id: "dread-task-1".into(),
@@ -869,7 +870,7 @@ mod tests {
             "Hermes test",
         )
         .unwrap()
-        .attest_sandbox("docker", true)
+        .attest_sandbox("modal", true)
         .unwrap();
         let capabilities = adapter.capabilities().await.unwrap();
         assert_eq!(capabilities.len(), 1);
