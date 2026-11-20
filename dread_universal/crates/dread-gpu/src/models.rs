@@ -728,7 +728,10 @@ mod tests {
 
     #[test]
     fn model_kind_inference_uses_root_relative_and_nested_path_components() {
-        assert_eq!(infer_kind_from_path("vae/video.safetensors", "model_weight"), "vae");
+        assert_eq!(
+            infer_kind_from_path("vae/video.safetensors", "model_weight"),
+            "vae"
+        );
         assert_eq!(
             infer_kind_from_path("models/text_encoders/encoder.gguf", "model_weight"),
             "text_encoder"
