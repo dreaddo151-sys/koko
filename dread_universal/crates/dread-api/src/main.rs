@@ -1008,27 +1008,58 @@ fn pstack_skills_root() -> Result<PathBuf, ApiError> {
             path
         } else {
             env::current_dir()
-                .map_err(|e| ApiError::internal(e.to_string()))?
+                .map_err(|error| ApiError::internal(error.to_string()))?
                 .join(path)
         });
     }
 
-    let cwd = env::current_dir().map_err(|e| ApiError::internal(e.to_string()))?;
-    for candidate in [
-        cwd.join("integrations/cursor-plugins/pstack"),
-        cwd.join("integrations/pstack/upstream"),
-        cwd.join("../integrations/cursor-plugins/pstack"),
-        cwd.join("../integrations/pstack/upstream"),
-    ] {
-        if candidate.join("skills").is_dir() {
+    let mut search_roots = Vec::new();
+    if let Ok(current) = env::current_dir() {
+        search_roots.push(current.clone());
+        if let Some(parent) = current.parent() {
+            search_roots.push(parent.to_path_buf());
+        }
+    }
+    if let Ok(executable) = env::current_exe()
+        && let Some(directory) = executable.parent()
+    {
+        search_roots.push(directory.to_path_buf());
+        if let Some(parent) = directory.parent() {
+            search_roots.push(parent.to_path_buf());
+        }
+    }
+    if let Some(home) = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+    {
+        search_roots.push(home.join("pstack"));
+        search_roots.push(home.join(".local/share/pstack"));
+        search_roots.push(home.join("integrations/pstack/upstream"));
+        search_roots.push(home.join(".cursor/plugins/pstack"));
+    }
+
+    let mut candidates = Vec::new();
+    for root in search_roots {
+        candidates.extend([
+            root.join("integrations/cursor-plugins/pstack"),
+            root.join("integrations/pstack/upstream"),
+            root.join("integrations/cursor-plugins-full/pstack"),
+            root.join("pstack"),
+        ]);
+    }
+    let mut seen = HashSet::new();
+    for candidate in candidates {
+        if !seen.insert(candidate.clone()) {
+            continue;
+        }
+        if candidate.join("skills").is_dir() && candidate.join("agents").is_dir() {
             return Ok(candidate);
         }
     }
 
     Err(ApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
-        message: "Pstack skill catalog not found; set DREAD_SKILLS_ROOT to its root directory"
-            .into(),
+        message: "Pstack skill catalog not found in configured, application, workspace or user data roots; set DREAD_SKILLS_ROOT to its root directory".into(),
     })
 }
 
