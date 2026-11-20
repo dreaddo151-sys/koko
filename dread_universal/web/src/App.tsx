@@ -4,10 +4,22 @@ import { Activity, AlertCircle, Bot, Check, ChevronRight, Cpu, Gauge, KeyRound, 
 
 type Model = { id: string };
 type Task = { id: string; title: string; task_type: string; status: string; created_at: number };
-type MissionNode = { id: string; depends_on?: string[]; priority?: number; task_type: string; payload?: unknown };
+type MissionNode = { id: string; depends_on?: string[]; priority?: number; task_type: string; payload?: unknown; execution_policy?: { timeout_ms?: number } };
 type MissionSummary = { mission_id: string; status: string; created_at: number; node_count: number };
 type MissionTask = { node_id: string; task_id: string; depends_on: string[]; status: string; result?: unknown; error?: string | null; attempts: number; elapsed_ms: number };
-type MissionDetail = { mission_id: string; graph: { mission_id: string; nodes: MissionNode[] }; execution_order: string[]; tasks: MissionTask[]; status: string; created_at: number; execution_started: boolean };
+type MissionAggregateNode = { node_id: string; task_id: string | null; status?: string; error?: unknown };
+type MissionResultSummary = {
+  state: string;
+  terminal: boolean;
+  successful: boolean;
+  fully_resolved: boolean;
+  counts: { total: number; instantiated: number; by_status: Record<string, number> };
+  metrics: { total_attempts: number; total_elapsed_ms: number };
+  failed_nodes: MissionAggregateNode[];
+  cancelled_nodes: MissionAggregateNode[];
+  unresolved_nodes: MissionAggregateNode[];
+};
+type MissionDetail = { mission_id: string; graph: { mission_id: string; nodes: MissionNode[] }; execution_order: string[]; tasks: MissionTask[]; result?: MissionResultSummary; status: string; created_at: number; execution_started: boolean };
 type Agent = { id: string; name: string; status: string; adapter?: string };
 type Event = { sequence: number; event_type: string; actor: string; created_at: number; payload?: Record<string, unknown> };
 type Result = { result?: unknown; error?: string | null; attempts?: number; elapsed_ms?: number };
@@ -281,7 +293,7 @@ function App() {
               <small>NODE TYPES: service_discovery · gpu_chat · agent_task</small>
               <button className="primary" disabled={!token||busy||!missionId.trim()} onClick={()=>void planMission()}><Plus size={14}/>PLAN MISSION</button>
             </div>
-            <p className="muted">For agent_task nodes, payload must include an approved capability_id and an input object. Supported provider IDs are hermes.run, deerflow.run and openhands.run. All content is validated by the API.</p>
+            <p className="muted">For agent_task nodes, payload must include an approved capability_id and an input object. Supported provider IDs are hermes.run, deerflow.run and openhands.run. Optional built-in runner deadlines use execution_policy.timeout_ms (1,000–1,805,000 ms); provider-agent timeout overrides are currently rejected. All content is validated by the API.</p>
             {notice&&<div className="approval">{notice}</div>}
           </section>
           <section className="panel">
@@ -295,6 +307,28 @@ function App() {
             </div>):<Empty text="No persisted mission plans. Create a DAG on the left."/>}
             {missionDetail&&<div className="skill-preview">
               <div className="row"><div><b>{missionDetail.mission_id}</b><small>Execution order: {missionDetail.execution_order.join(" → ")}</small></div><Pill value={missionDetail.status}/></div>
+              {missionDetail.result&&<div className="skill-preview">
+                <div className="row">
+                  <div>
+                    <b>MISSION OUTCOME · {missionDetail.result.successful?"SUCCESS":missionDetail.result.terminal?missionDetail.result.state.toUpperCase():"IN PROGRESS"}</b>
+                    <small>{missionDetail.result.counts.by_status.completed??0} / {missionDetail.result.counts.total} completed · {missionDetail.result.counts.instantiated} instantiated · {missionDetail.result.metrics.total_attempts} attempt(s) · {missionDetail.result.metrics.total_elapsed_ms} ms aggregate</small>
+                    <small>{Object.entries(missionDetail.result.counts.by_status).map(([status,count])=>status.replaceAll("_"," ")+": "+count).join(" · ")||"No task rows yet"}</small>
+                  </div>
+                  <Pill value={missionDetail.result.successful?"completed":missionDetail.result.terminal?missionDetail.result.state:"running"}/>
+                </div>
+                {!!missionDetail.result.failed_nodes.length&&<div className="approval">
+                  <b>FAILED NODES</b>
+                  {missionDetail.result.failed_nodes.map(node=><div className="row" key={node.node_id}><div><b>{node.node_id}</b><small>{typeof node.error==="string"?node.error:node.error?JSON.stringify(node.error):"No error details recorded"}</small></div><Pill value="failed"/></div>)}
+                </div>}
+                {!!missionDetail.result.cancelled_nodes.length&&<div className="approval">
+                  <b>CANCELLED NODES</b>
+                  {missionDetail.result.cancelled_nodes.map(node=><div className="row" key={node.node_id}><div><b>{node.node_id}</b><small>{typeof node.error==="string"?node.error:node.error?JSON.stringify(node.error):"No error details recorded"}</small></div><Pill value="cancelled"/></div>)}
+                </div>}
+                {!!missionDetail.result.unresolved_nodes.length&&<div className="approval">
+                  <b>UNRESOLVED NODES</b>
+                  {missionDetail.result.unresolved_nodes.map(node=><div className="row" key={node.node_id}><div><b>{node.node_id}</b><small>{node.task_id?"Task "+node.task_id:"Task not instantiated yet"}</small></div><Pill value={node.status??"unresolved"}/></div>)}
+                </div>}
+              </div>}
               {missionDetail.status==="planned"&&<div className="compose-foot">
                 <small>Instantiate creates approval-gated task records only.</small>
                 <button className="primary" disabled={busy} onClick={()=>void instantiateMission()}><Play size={14}/>INSTANTIATE FOR APPROVAL</button>
