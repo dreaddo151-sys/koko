@@ -283,7 +283,6 @@ name = "dread-media"
 version = "0.4.0"
 dependencies = [
  "anyhow",
- "axum",
  "reqwest",
  "serde",
  "serde_json",
