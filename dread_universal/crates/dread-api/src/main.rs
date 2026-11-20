@@ -4590,9 +4590,6 @@ async fn gpu_inference(
     Ok(Json(result))
 }
 
-
-
-
 async fn repair_plan(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     use dread_agents::AgentHealthState;
     use dread_platform::repair::{ComponentObservation, build_repair_plan};
@@ -4691,35 +4688,44 @@ async fn repair_plan(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
     let plan = build_repair_plan(&observations);
     serde_json::to_value(plan)
         .map(Json)
-        .map_err(|error| ApiError::internal(format!("Could not serialize diagnostic repair plan: {error}")))
+        .map_err(|error| {
+            ApiError::internal(format!("Could not serialize diagnostic repair plan: {error}"))
+        })
 }
 
-async fn local_model_inventory(
-) -> Result<Json<dread_gpu::models::LocalModelInventory>, ApiError> {
+async fn local_model_inventory() -> Result<Json<dread_gpu::models::LocalModelInventory>, ApiError> {
     let inventory = tokio::task::spawn_blocking(dread_gpu::models::discover_local_models)
         .await
-        .map_err(|error| ApiError::internal(format!("Local model discovery worker failed: {error}")))?;
+        .map_err(|error| {
+            ApiError::internal(format!("Local model discovery worker failed: {error}"))
+        })?;
     Ok(Json(inventory))
 }
 
 async fn comfyui_monitor() -> Result<Json<dread_media::ComfyUiMonitor>, ApiError> {
     let client = dread_media::ComfyUiClient::from_env()
-        .map_err(|error| ApiError::internal(format!("Invalid ComfyUI configuration: {error}")))?;
+        .map_err(|error| {
+            ApiError::internal(format!("Invalid ComfyUI configuration: {error}"))
+        })?;
     Ok(Json(client.monitor().await))
 }
 
 async fn workflow_discovery() -> Result<Json<dread_media::WorkflowInventory>, ApiError> {
     let inventory = tokio::task::spawn_blocking(dread_media::discover_local_workflows)
         .await
-        .map_err(|error| ApiError::internal(format!("Workflow discovery worker failed: {error}")))?;
+        .map_err(|error| {
+            ApiError::internal(format!("Workflow discovery worker failed: {error}"))
+        })?;
     Ok(Json(inventory))
 }
 
-async fn extension_discovery(
-) -> Result<Json<dread_agents::extensions::PluginInventory>, ApiError> {
+async fn extension_discovery() -> Result<Json<dread_agents::extensions::PluginInventory>, ApiError>
+{
     let inventory = tokio::task::spawn_blocking(dread_agents::extensions::discover_local_plugins)
         .await
-        .map_err(|error| ApiError::internal(format!("Plugin discovery worker failed: {error}")))?;
+        .map_err(|error| {
+            ApiError::internal(format!("Plugin discovery worker failed: {error}"))
+        })?;
     Ok(Json(inventory))
 }
 
@@ -8238,12 +8244,7 @@ mod tests {
         for uri in protected_routes {
             let response = router
                 .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri(uri)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
