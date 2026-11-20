@@ -126,6 +126,7 @@ impl RunnerError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionError {
     InvalidTaskId,
+    InvalidTimeout,
     AdmissionFull { limit: usize },
     Cancelled { attempts: u8 },
     TimedOut { attempts: u8 },
@@ -327,6 +328,25 @@ impl ExecutionGate {
         task_id: impl Into<String>,
         class: ExecutionResourceClass,
         cancellation: watch::Receiver<bool>,
+        operation: F,
+    ) -> Result<ExecutionResult, ExecutionError>
+    where
+        F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
+        Fut: Future<Output = Result<Value, String>> + Send,
+    {
+        self.run_with_resource_class_and_timeout(task_id, class, None, cancellation, operation)
+            .await
+    }
+
+    /// Run with an optional per-node timeout override. None uses the workspace default.
+    /// Timed-out work is not replayed automatically because its side-effect outcome may
+    /// be unknown; retries remain limited to explicitly retryable runner failures.
+    pub async fn run_with_resource_class_and_timeout<F, Fut>(
+        &self,
+        task_id: impl Into<String>,
+        class: ExecutionResourceClass,
+        attempt_timeout: Option<Duration>,
+        cancellation: watch::Receiver<bool>,
         mut operation: F,
     ) -> Result<ExecutionResult, ExecutionError>
     where
@@ -336,6 +356,7 @@ impl ExecutionGate {
         self.run_inner(
             task_id,
             class,
+            attempt_timeout,
             cancellation,
             move |attempt, cancellation| {
                 let operation_future = operation(attempt, cancellation);
@@ -378,7 +399,7 @@ impl ExecutionGate {
         F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
         Fut: Future<Output = Result<Value, RunnerError>> + Send,
     {
-        self.run_inner(task_id, class, cancellation, operation)
+        self.run_inner(task_id, class, None, cancellation, operation)
             .await
     }
 
@@ -386,6 +407,7 @@ impl ExecutionGate {
         &self,
         task_id: impl Into<String>,
         class: ExecutionResourceClass,
+        attempt_timeout_override: Option<Duration>,
         mut cancellation: watch::Receiver<bool>,
         mut operation: F,
     ) -> Result<ExecutionResult, ExecutionError>
@@ -397,6 +419,10 @@ impl ExecutionGate {
         if task_id.trim().is_empty() {
             return Err(ExecutionError::InvalidTaskId);
         }
+        let attempt_timeout = attempt_timeout_override.unwrap_or(self.config.attempt_timeout);
+        if attempt_timeout.is_zero() {
+            return Err(ExecutionError::InvalidTimeout);
+        }
         let _permit = self.acquire_resource(class, &mut cancellation).await?;
         let started = Instant::now();
         let mut attempts = 0;
@@ -406,7 +432,7 @@ impl ExecutionGate {
             tokio::pin!(operation_future);
             let attempt_result = loop {
                 tokio::select! {
-                    result = tokio::time::timeout(self.config.attempt_timeout, &mut operation_future) => {
+                    result = tokio::time::timeout(attempt_timeout, &mut operation_future) => {
                         let cancellation_requested = *cancellation.borrow()
                             || matches!(cancellation.has_changed(), Ok(true) | Err(_));
                         if cancellation_requested {
@@ -478,6 +504,22 @@ async fn acquire_cancellable(
     }
 }
 
+/// Per-node override for the maximum duration of one reviewed runner attempt.
+/// Automatic retries are intentionally not user-configurable because they require
+/// runner-specific idempotency and explicit retryable error classification.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MissionExecutionPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+
+impl MissionExecutionPolicy {
+    fn is_default(policy: &Self) -> bool {
+        policy.timeout_ms.is_none()
+    }
+}
+
 /// A dependency-aware mission plan. This model validates and orders work only;
 /// execution and external side effects remain the responsibility of reviewed runners.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -492,6 +534,9 @@ pub struct MissionNode {
     /// JSON payload passed to the reviewed task runner after operator approval.
     #[serde(default)]
     pub payload: Value,
+    /// Bounded node-level execution controls; absent values inherit workspace defaults.
+    #[serde(default, skip_serializing_if = "MissionExecutionPolicy::is_default")]
+    pub execution_policy: MissionExecutionPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -613,6 +658,7 @@ mod tests {
                     priority: 250,
                     task_type: "report".into(),
                     payload: Value::Null,
+                    execution_policy: MissionExecutionPolicy::default(),
                 },
                 MissionNode {
                     id: "audit".into(),
@@ -620,6 +666,7 @@ mod tests {
                     priority: 20,
                     task_type: "audit".into(),
                     payload: Value::Null,
+                    execution_policy: MissionExecutionPolicy::default(),
                 },
                 MissionNode {
                     id: "build".into(),
@@ -627,6 +674,7 @@ mod tests {
                     priority: 1,
                     task_type: "build".into(),
                     payload: Value::Null,
+                    execution_policy: MissionExecutionPolicy::default(),
                 },
             ],
         };
@@ -646,6 +694,7 @@ mod tests {
                 priority: 0,
                 task_type: "x".into(),
                 payload: Value::Null,
+                execution_policy: MissionExecutionPolicy::default(),
             }],
         };
         assert_eq!(
@@ -665,6 +714,7 @@ mod tests {
                     priority: 0,
                     task_type: "x".into(),
                     payload: Value::Null,
+                    execution_policy: MissionExecutionPolicy::default(),
                 },
                 MissionNode {
                     id: "b".into(),
@@ -858,6 +908,63 @@ mod tests {
             first.await.unwrap(),
             Err(ExecutionError::Cancelled { attempts: 1 })
         );
+    }
+
+    #[test]
+    fn mission_execution_policy_is_backward_compatible_and_round_trips() {
+        let legacy = serde_json::from_value::<MissionNode>(json!({
+            "id": "node",
+            "task_type": "service_discovery"
+        }))
+        .unwrap();
+        assert_eq!(legacy.execution_policy, MissionExecutionPolicy::default());
+
+        let configured = serde_json::from_value::<MissionNode>(json!({
+            "id": "node",
+            "task_type": "gpu_chat",
+            "execution_policy": {"timeout_ms": 15000}
+        }))
+        .unwrap();
+        assert_eq!(configured.execution_policy.timeout_ms, Some(15000));
+        let encoded = serde_json::to_value(configured).unwrap();
+        assert_eq!(encoded["execution_policy"]["timeout_ms"], 15000);
+    }
+
+    #[tokio::test]
+    async fn per_node_timeout_override_is_enforced_without_replaying_work() {
+        let gate = ExecutionGate::new(config(1, 2)).unwrap();
+        let (_cancel, receiver) = watch::channel(false);
+        let result = gate
+            .run_with_resource_class_and_timeout(
+                "mission-node-timeout",
+                ExecutionResourceClass::GpuInference,
+                Some(Duration::from_millis(10)),
+                receiver,
+                |_, _| async {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    Ok(Value::Null)
+                },
+            )
+            .await;
+        assert_eq!(result, Err(ExecutionError::TimedOut { attempts: 1 }));
+        assert_eq!(gate.admitted_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn rejects_zero_per_node_timeout_before_admission() {
+        let gate = ExecutionGate::new(config(1, 2)).unwrap();
+        let (_cancel, receiver) = watch::channel(false);
+        let result = gate
+            .run_with_resource_class_and_timeout(
+                "zero-timeout",
+                ExecutionResourceClass::General,
+                Some(Duration::ZERO),
+                receiver,
+                |_, _| async { Ok(Value::Null) },
+            )
+            .await;
+        assert_eq!(result, Err(ExecutionError::InvalidTimeout));
+        assert_eq!(gate.admitted_count(), 0);
     }
 
     #[test]
