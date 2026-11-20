@@ -124,10 +124,7 @@ impl ComfyUiClient {
                     .ok()
             })
             .is_some_and(|ip| ip.is_loopback());
-        ensure!(
-            loopback,
-            "ComfyUI endpoint must use a loopback IP address"
-        );
+        ensure!(loopback, "ComfyUI endpoint must use a loopback IP address");
 
         let http = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -305,7 +302,8 @@ fn parse_history(value: &Value) -> Vec<HistoryJob> {
                             if outputs.len() >= MAX_OUTPUT_ITEMS_PER_JOB {
                                 break 'nodes;
                             }
-                            let Some(filename) = file.get("filename").and_then(Value::as_str) else {
+                            let Some(filename) = file.get("filename").and_then(Value::as_str)
+                            else {
                                 continue;
                             };
                             if filename.is_empty() || filename.len() > 512 {
@@ -340,7 +338,8 @@ fn parse_history(value: &Value) -> Vec<HistoryJob> {
                         .get(1)
                         .and_then(Value::as_object)
                         .and_then(|data| {
-                            data.get("exception_message").or_else(|| data.get("message"))
+                            data.get("exception_message")
+                                .or_else(|| data.get("message"))
                         })
                         .and_then(Value::as_str)
                         .map(|text| {
@@ -387,7 +386,8 @@ mod tests {
         let queue = parse_queue(&json!({
             "queue_running": [[1, "prompt-running", {}, {}]],
             "queue_pending": [[2, "prompt-pending", {}, {}]]
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(queue.running_count, 1);
         assert_eq!(queue.running[0].prompt_id, "prompt-running");
 
