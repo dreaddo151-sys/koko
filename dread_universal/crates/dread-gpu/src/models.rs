@@ -573,20 +573,21 @@ fn classify_file(path: &Path) -> Option<(&'static str, &'static str)> {
 }
 
 fn infer_kind_from_path<'a>(path: &str, fallback: &'a str) -> &'a str {
-    let lower = path.to_ascii_lowercase();
-    if lower.contains("/text_encoders/") || lower.contains("/clip/") {
+    let lower = path.to_ascii_lowercase().replace('\\', "/");
+    let components = lower.split('/').collect::<BTreeSet<_>>();
+    if components.contains("text_encoders") || components.contains("clip") {
         "text_encoder"
-    } else if lower.contains("/vae/") {
+    } else if components.contains("vae") {
         "vae"
-    } else if lower.contains("/loras/") || lower.contains("/lora/") {
+    } else if components.contains("loras") || components.contains("lora") {
         "lora"
-    } else if lower.contains("/controlnet/") || lower.contains("/control_net/") {
+    } else if components.contains("controlnet") || components.contains("control_net") {
         "controlnet"
-    } else if lower.contains("/upscale_models/") || lower.contains("/upscalers/") {
+    } else if components.contains("upscale_models") || components.contains("upscalers") {
         "upscaler"
-    } else if lower.contains("/diffusion_models/")
-        || lower.contains("/checkpoints/")
-        || lower.contains("/unet/")
+    } else if components.contains("diffusion_models")
+        || components.contains("checkpoints")
+        || components.contains("unet")
     {
         "diffusion_model"
     } else {
@@ -723,6 +724,27 @@ mod tests {
         assert!(model.metadata_error.is_none());
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn model_kind_inference_uses_root_relative_and_nested_path_components() {
+        assert_eq!(infer_kind_from_path("vae/video.safetensors", "model_weight"), "vae");
+        assert_eq!(
+            infer_kind_from_path("models/text_encoders/encoder.gguf", "model_weight"),
+            "text_encoder"
+        );
+        assert_eq!(
+            infer_kind_from_path("ComfyUI/models/diffusion_models/model.gguf", "model_weight"),
+            "diffusion_model"
+        );
+        assert_eq!(
+            infer_kind_from_path("C:/models/loras/style.safetensors", "model_weight"),
+            "lora"
+        );
+        assert_eq!(
+            infer_kind_from_path("misc/weights.bin", "model_weight"),
+            "model_weight"
+        );
     }
 
     #[test]
