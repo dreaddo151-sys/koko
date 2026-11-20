@@ -18,6 +18,7 @@ dread-skills = { path = "../dread-skills" }
 dread-platform = { path = "../dread-platform" }
 dread-gpu = { path = "../dread-gpu" }
 dread-orchestrator = { path = "../dread-orchestrator" }
+dread-media = { path = "../dread-media" }
 futures.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true
