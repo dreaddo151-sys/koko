@@ -78,7 +78,10 @@ fn configured_roots() -> Vec<PathBuf> {
     }
 
     let mut unique = BTreeSet::new();
-    roots.into_iter().filter(|path| unique.insert(path.clone())).collect()
+    roots
+        .into_iter()
+        .filter(|path| unique.insert(path.clone()))
+        .collect()
 }
 
 pub fn discover_local_workflows_in(roots: &[PathBuf]) -> WorkflowInventory {
