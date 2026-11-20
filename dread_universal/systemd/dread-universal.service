@@ -11,7 +11,6 @@ Environment=DREAD_DB_PATH=%h/.local/share/dread-universal/data/dread_registry.sq
 Environment=DREAD_WEB_ROOT=/usr/share/dread-universal/web/dist
 Environment=DREAD_SERVICES_CONFIG=%h/.config/dread-universal/services.toml
 Environment=DREAD_AGENTS_CONFIG=%h/.config/dread-universal/agents.toml
-Environment=DREAD_GPU_GATEWAY_URL=http://127.0.0.1:11500
 WorkingDirectory=%h/.local/share/dread-universal
 ExecStart=/usr/bin/dread-universal
 Restart=on-failure
