@@ -34,7 +34,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     env, fs,
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
@@ -2401,17 +2401,97 @@ async fn get_mission(
         }));
     }
     let execution_started = matches!(stored.2.as_str(), "running" | "completed" | "blocked");
+    let result = aggregate_mission_result(&stored.2, &tasks);
     Ok(Json(json!({
         "item": {
             "mission_id": graph.mission_id,
             "graph": graph,
             "execution_order": execution_order,
             "tasks": tasks,
+            "result": result,
             "status": stored.2,
             "created_at": stored.3,
             "execution_started": execution_started
         }
     })))
+}
+
+/// Build a deterministic mission-level summary from the durable per-task results.
+/// Child results remain available in the tasks array; this summary exposes aggregate
+/// progress, terminal outcome, failure lists, and execution metrics without duplicating payloads.
+fn aggregate_mission_result(mission_status: &str, tasks: &[Value]) -> Value {
+    let mut counts = BTreeMap::<String, u64>::new();
+    let mut total_attempts = 0_u64;
+    let mut total_elapsed_ms = 0_u64;
+    let mut failed_nodes = Vec::new();
+    let mut cancelled_nodes = Vec::new();
+    let mut unresolved_nodes = Vec::new();
+
+    for task in tasks {
+        let node_id = task
+            .get("node_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let task_id = task
+            .get("task_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let status = task
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        *counts.entry(status.to_string()).or_default() += 1;
+        total_attempts = total_attempts.saturating_add(
+            task.get("attempts").and_then(Value::as_u64).unwrap_or(0),
+        );
+        total_elapsed_ms = total_elapsed_ms.saturating_add(
+            task.get("elapsed_ms").and_then(Value::as_u64).unwrap_or(0),
+        );
+
+        match status {
+            "failed" => failed_nodes.push(json!({
+                "node_id": node_id,
+                "task_id": task_id,
+                "error": task.get("error").cloned().unwrap_or(Value::Null)
+            })),
+            "cancelled" => cancelled_nodes.push(json!({
+                "node_id": node_id,
+                "task_id": task_id,
+                "error": task.get("error").cloned().unwrap_or(Value::Null)
+            })),
+            "completed" => {}
+            _ => unresolved_nodes.push(json!({
+                "node_id": node_id,
+                "task_id": task_id,
+                "status": status
+            })),
+        }
+    }
+
+    let total_nodes = tasks.len() as u64;
+    let completed_nodes = counts.get("completed").copied().unwrap_or(0);
+    let terminal_nodes = completed_nodes
+        .saturating_add(counts.get("failed").copied().unwrap_or(0))
+        .saturating_add(counts.get("cancelled").copied().unwrap_or(0));
+    let terminal = matches!(mission_status, "completed" | "blocked");
+
+    json!({
+        "state": mission_status,
+        "terminal": terminal,
+        "successful": mission_status == "completed" && completed_nodes == total_nodes,
+        "fully_resolved": terminal_nodes == total_nodes,
+        "counts": {
+            "total": total_nodes,
+            "by_status": counts
+        },
+        "metrics": {
+            "total_attempts": total_attempts,
+            "total_elapsed_ms": total_elapsed_ms
+        },
+        "failed_nodes": failed_nodes,
+        "cancelled_nodes": cancelled_nodes,
+        "unresolved_nodes": unresolved_nodes
+    })
 }
 
 async fn create_task(
