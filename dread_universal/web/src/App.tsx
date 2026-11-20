@@ -282,7 +282,7 @@ function App() {
     }catch(e){setError(e instanceof Error?e.message:"Capability removal failed");}
     finally{setBusy(false);}
   };
-  const disconnect=()=>{setToken("");setDraft("");setPage("overview");setActive("");setEvents([]);setResult(null);setTasks([]);setMissions([]);setSelectedMission("");setMissionDetail(null);setAgents([]);setCapabilities([]);setModels([]);setServices([]);setModel("");setLocalModels([]);setLocalWorkflows([]);setLocalPlugins([]);setAgentManifests([]);setComfyMonitor(null);setRepairPlan(null);setInventoryUpdated(null);setInventoryBusy(false);inventoryScanInFlight.current=false;setConnected(false);setSupervisorConfigured(false);};
+  const disconnect=()=>{setToken("");setDraft("");setPage("overview");setActive("");setEvents([]);setResult(null);setTasks([]);setMissions([]);setSelectedMission("");setMissionDetail(null);setAgents([]);setCapabilities([]);setModels([]);setServices([]);setModel("");setPrompt("");setEnhancedPrompt("");setTokenUsage(null);setEnhancing(false);setLocalModels([]);setLocalWorkflows([]);setLocalPlugins([]);setAgentManifests([]);setComfyMonitor(null);setRepairPlan(null);setInventoryUpdated(null);setInventoryBusy(false);inventoryScanInFlight.current=false;setConnected(false);setSupervisorConfigured(false);};
   const activeTask=tasks.find(x=>x.id===active);
   const latestWaitEvent=[...events].reverse().find(event=>event.event_type==="agent_waiting_for_confirmation");
   const pendingActionEvent=latestWaitEvent?[...events].reverse().find(event=>event.event_type==="ActionEvent"&&event.sequence<latestWaitEvent.sequence):undefined;
