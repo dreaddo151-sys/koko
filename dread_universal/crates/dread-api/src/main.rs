@@ -2401,7 +2401,12 @@ async fn get_mission(
         }));
     }
     let execution_started = matches!(stored.2.as_str(), "running" | "completed" | "blocked");
-    let result = aggregate_mission_result(&stored.2, &tasks);
+    let graph_node_ids = graph
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<Vec<_>>();
+    let result = aggregate_mission_result(&stored.2, &graph_node_ids, &tasks);
     Ok(Json(json!({
         "item": {
             "mission_id": graph.mission_id,
@@ -2419,8 +2424,13 @@ async fn get_mission(
 /// Build a deterministic mission-level summary from the durable per-task results.
 /// Child results remain available in the tasks array; this summary exposes aggregate
 /// progress, terminal outcome, failure lists, and execution metrics without duplicating payloads.
-fn aggregate_mission_result(mission_status: &str, tasks: &[Value]) -> Value {
+fn aggregate_mission_result(
+    mission_status: &str,
+    graph_node_ids: &[&str],
+    tasks: &[Value],
+) -> Value {
     let mut counts = BTreeMap::<String, u64>::new();
+    let mut instantiated_node_ids = HashSet::with_capacity(tasks.len());
     let mut total_attempts = 0_u64;
     let mut total_elapsed_ms = 0_u64;
     let mut failed_nodes = Vec::new();
@@ -2436,6 +2446,7 @@ fn aggregate_mission_result(mission_status: &str, tasks: &[Value]) -> Value {
             .get("task_id")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        instantiated_node_ids.insert(node_id);
         let status = task
             .get("status")
             .and_then(Value::as_str)
@@ -2466,7 +2477,18 @@ fn aggregate_mission_result(mission_status: &str, tasks: &[Value]) -> Value {
         }
     }
 
-    let total_nodes = tasks.len() as u64;
+    for node_id in graph_node_ids {
+        if !instantiated_node_ids.contains(node_id) {
+            unresolved_nodes.push(json!({
+                "node_id": node_id,
+                "task_id": Value::Null,
+                "status": "not_instantiated"
+            }));
+        }
+    }
+
+    let total_nodes = graph_node_ids.len() as u64;
+    let instantiated_nodes = tasks.len() as u64;
     let completed_nodes = counts.get("completed").copied().unwrap_or(0);
     let terminal_nodes = completed_nodes
         .saturating_add(counts.get("failed").copied().unwrap_or(0))
@@ -2480,6 +2502,7 @@ fn aggregate_mission_result(mission_status: &str, tasks: &[Value]) -> Value {
         "fully_resolved": terminal && terminal_nodes == total_nodes,
         "counts": {
             "total": total_nodes,
+            "instantiated": instantiated_nodes,
             "by_status": counts
         },
         "metrics": {
@@ -7634,7 +7657,8 @@ mod tests {
             }),
         ];
 
-        let summary = aggregate_mission_result("blocked", &tasks);
+        let graph_node_ids = ["success-node", "failed-node", "waiting-node"];
+        let summary = aggregate_mission_result("blocked", &graph_node_ids, &tasks);
         assert_eq!(summary["terminal"], true);
         assert_eq!(summary["successful"], false);
         assert_eq!(summary["fully_resolved"], false);
@@ -7668,7 +7692,8 @@ mod tests {
             }),
         ];
 
-        let summary = aggregate_mission_result("completed", &tasks);
+        let graph_node_ids = ["first", "second"];
+        let summary = aggregate_mission_result("completed", &graph_node_ids, &tasks);
         assert_eq!(summary["terminal"], true);
         assert_eq!(summary["successful"], true);
         assert_eq!(summary["fully_resolved"], true);
@@ -7682,11 +7707,15 @@ mod tests {
 
     #[test]
     fn mission_result_summary_is_not_terminal_before_mission_start() {
-        let summary = aggregate_mission_result("planned", &[]);
+        let graph_node_ids = ["not-created-a", "not-created-b"];
+        let summary = aggregate_mission_result("planned", &graph_node_ids, &[]);
         assert_eq!(summary["terminal"], false);
         assert_eq!(summary["successful"], false);
         assert_eq!(summary["fully_resolved"], false);
-        assert_eq!(summary["counts"]["total"], 0);
+        assert_eq!(summary["counts"]["total"], 2);
+        assert_eq!(summary["counts"]["instantiated"], 0);
+        assert_eq!(summary["unresolved_nodes"].as_array().unwrap().len(), 2);
+        assert_eq!(summary["unresolved_nodes"][0]["status"], "not_instantiated");
     }
 
     #[tokio::test]
