@@ -6,7 +6,7 @@ use axum::{
         ws::{Message, WebSocket},
     },
     http::{
-        StatusCode, Uri,
+        HeaderMap, StatusCode, Uri,
         header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE},
     },
     middleware::{self, Next},
@@ -4618,6 +4618,18 @@ async fn gpu_health(State(state): State<AppState>) -> Result<Json<Value>, ApiErr
     Ok(Json(value))
 }
 
+async fn gpu_telemetry(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let supervisor = state.supervisor.as_ref().ok_or_else(|| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        message: "GPU telemetry is unavailable until the authenticated Python Supervisor bridge is configured".into(),
+    })?;
+    let telemetry = supervisor.telemetry().await.map_err(|error| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        message: format!("Python GPU Supervisor telemetry failed: {error}"),
+    })?;
+    Ok(Json(telemetry))
+}
+
 async fn gpu_models(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let models = state.gpu.models().await.map_err(|e| ApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
@@ -4961,6 +4973,7 @@ fn app(state: AppState) -> Router {
     let protected = Router::new()
         .route("/api/system/profile", get(system_profile))
         .route("/api/gpu/health", get(gpu_health))
+        .route("/api/gpu/telemetry", get(gpu_telemetry))
         .route("/api/gpu/models", get(gpu_models))
         .route("/api/usage/tokens", get(token_usage))
         .route("/api/prompt/enhance", axum::routing::post(enhance_prompt))
@@ -5829,6 +5842,23 @@ mod tests {
         Json(json!({"status": "ok", "gpu": "on-demand", "supervisor": "configured"}))
     }
 
+    async fn mock_telemetry(headers: HeaderMap) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer test-supervisor-token-that-is-long-enough")
+        );
+        Json(json!({
+            "read_only": true,
+            "devices": [{
+                "index": 0,
+                "name": "NVIDIA GeForce RTX 3090",
+                "utilization_percent": 12.0
+            }]
+        }))
+    }
+
     async fn mock_models() -> Json<Value> {
         Json(json!({
             "object": "list",
@@ -5897,6 +5927,7 @@ mod tests {
         let mock = Router::new()
             .route("/health", get(mock_health))
             .route("/v1/models", get(mock_models))
+            .route("/v1/telemetry", get(mock_telemetry))
             .route("/v1/chat/completions", post(mock_completion))
             .route("/v1/leases", post(mock_supervisor_acquire))
             .route(
@@ -7747,6 +7778,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gpu_telemetry_route_uses_authenticated_read_only_supervisor_bridge() {
+        let (router, server) = test_app().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/gpu/telemetry")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["read_only"], true);
+        assert_eq!(value["devices"][0]["utilization_percent"], 12.0);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn gpu_models_route_returns_gateway_models() {
         let (router, server) = test_app().await;
 
@@ -8553,6 +8604,7 @@ mod tests {
         let protected_routes = [
             "/api/models/local",
             "/api/repair/plan",
+            "/api/gpu/telemetry",
             "/api/usage/tokens",
             "/api/prompt/enhance",
             "/api/agents/manifests/discover",
