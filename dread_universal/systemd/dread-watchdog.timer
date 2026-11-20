@@ -1,0 +1,11 @@
+[Unit]
+Description=Run PROJECT DREAD bounded API health watchdog
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=60s
+AccuracySec=5s
+Unit=dread-watchdog.service
+
+[Install]
+WantedBy=timers.target
