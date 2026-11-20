@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 concurrency:
   group: dread-ubuntu-release
@@ -25,6 +26,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
+      - name: Install Cosign for keyless release signing
+        uses: sigstore/cosign-installer@v4.1.0
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with:
@@ -55,6 +58,14 @@ jobs:
           tar -tzf dist/release/dread-universal-ubuntu-*.tar.gz > "$archive_listing"
           grep -Fqx 'bundle/bin/dread-universal' "$archive_listing"
           grep -Fqx 'bundle/web/dist/index.html' "$archive_listing"
+      - name: Sign and verify release checksum manifest
+        working-directory: dread_universal
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes \
+            --bundle dist/release/SHA256SUMS.sigstore.json \
+            dist/release/SHA256SUMS
+          bash scripts/verify-release.sh dist/release/SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag_name || github.ref_name }}
@@ -64,3 +75,4 @@ jobs:
             dread_universal/dist/release/dread-universal-ubuntu-*.tar.gz
             dread_universal/dist/release/dread-universal_*.deb
             dread_universal/dist/release/SHA256SUMS
+            dread_universal/dist/release/SHA256SUMS.sigstore.json
