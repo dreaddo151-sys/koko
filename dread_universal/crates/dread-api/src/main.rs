@@ -352,6 +352,12 @@ struct CreateTask {
 }
 
 #[derive(Debug, Deserialize)]
+struct EnhancePrompt {
+    model: String,
+    prompt: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ApproveTask {
     reason: String,
 }
@@ -4591,6 +4597,124 @@ async fn gpu_models(State(state): State<AppState>) -> Result<Json<Value>, ApiErr
         .map_err(|e| ApiError::internal(e.to_string()))
 }
 
+async fn token_usage(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT r.result_json FROM task_results r
+             INNER JOIN tasks t ON t.id = r.task_id
+             WHERE t.task_type = 'gpu_chat' AND t.status = 'completed'
+             AND r.result_json IS NOT NULL
+             ORDER BY r.completed_at DESC LIMIT 10000",
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+
+    let mut prompt_tokens = 0_u64;
+    let mut completion_tokens = 0_u64;
+    let mut total_tokens = 0_u64;
+    let mut measured_responses = 0_u64;
+    let mut responses_without_usage = 0_u64;
+
+    for row in rows {
+        let encoded = row.map_err(|error| ApiError::internal(error.to_string()))?;
+        let value: Value = serde_json::from_str(&encoded).unwrap_or(Value::Null);
+        let usage = value.get("usage");
+        let prompt = usage.and_then(|item| item.get("prompt_tokens")).and_then(Value::as_u64);
+        let completion = usage.and_then(|item| item.get("completion_tokens")).and_then(Value::as_u64);
+        let total = usage.and_then(|item| item.get("total_tokens")).and_then(Value::as_u64);
+        if let (Some(prompt), Some(completion), Some(total)) = (prompt, completion, total) {
+            prompt_tokens = prompt_tokens.saturating_add(prompt);
+            completion_tokens = completion_tokens.saturating_add(completion);
+            total_tokens = total_tokens.saturating_add(total);
+            measured_responses = measured_responses.saturating_add(1);
+        } else {
+            responses_without_usage = responses_without_usage.saturating_add(1);
+        }
+    }
+
+    Ok(Json(json!({
+        "provider": "llama.cpp-compatible local gateway",
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "measured_responses": measured_responses,
+        "responses_without_usage": responses_without_usage,
+        "scan_limit": 10000,
+        "note": "Only provider-reported usage from completed gpu_chat tasks is counted. Missing usage is reported separately; no token estimates are generated."
+    })))
+}
+
+async fn enhance_prompt(
+    State(state): State<AppState>,
+    Json(input): Json<EnhancePrompt>,
+) -> Result<Json<Value>, ApiError> {
+    let prompt = input.prompt.trim();
+    if prompt.is_empty() || prompt.len() > 32_768 {
+        return Err(ApiError::bad_request(
+            "prompt must contain 1 to 32768 bytes",
+        ));
+    }
+    let model = input.model.trim();
+    if model.is_empty() || model.len() > 200 {
+        return Err(ApiError::bad_request(
+            "model must contain 1 to 200 characters",
+        ));
+    }
+
+    let supervisor = state.supervisor.as_ref().ok_or_else(|| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        message: "Prompt enhancement requires the authenticated Python GPU Supervisor bridge"
+            .into(),
+    })?;
+    let available = state.gpu.models().await.map_err(|error| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        message: format!("llama.cpp model discovery failed: {error}"),
+    })?;
+    if !available.data.iter().any(|item| item.id == model) {
+        return Err(ApiError::bad_request(
+            "Requested model is not exposed by the local llama.cpp gateway",
+        ));
+    }
+
+    let request = json!({
+        "model": model,
+        "stream": false,
+        "temperature": 0.2,
+        "max_tokens": 2048,
+        "messages": [
+            {
+                "role": "system",
+                "content": "Improve the user's prompt for clarity, specificity, useful constraints, and measurable output. Preserve the user's intent. Do not answer the prompt. Return only the improved prompt, with no preamble or commentary."
+            },
+            {"role": "user", "content": prompt}
+        ]
+    });
+    let response = supervisor
+        .chat_completion(&request)
+        .await
+        .map_err(|error| ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: format!("Local prompt enhancement failed: {error}"),
+        })?;
+    let enhanced = response
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 65_536)
+        .ok_or_else(|| ApiError::internal("llama.cpp returned no usable enhanced prompt"))?;
+
+    Ok(Json(json!({
+        "model": model,
+        "enhanced_prompt": enhanced,
+        "requires_operator_review": true,
+        "submitted": false,
+        "note": "This is a preview only. It is not submitted as a task or executed; review it and explicitly apply it to the composer."
+    })))
+}
+
 async fn gpu_inference(
     State(state): State<AppState>,
     Path(path): Path<String>,
@@ -4822,6 +4946,8 @@ fn app(state: AppState) -> Router {
         .route("/api/system/profile", get(system_profile))
         .route("/api/gpu/health", get(gpu_health))
         .route("/api/gpu/models", get(gpu_models))
+        .route("/api/usage/tokens", get(token_usage))
+        .route("/api/prompt/enhance", axum::routing::post(enhance_prompt))
         .route("/api/models/local", get(local_model_inventory))
         .route("/api/repair/plan", get(repair_plan))
         .route("/api/media/comfyui/monitor", get(comfyui_monitor))
@@ -7478,6 +7604,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn token_usage_route_reports_measured_provider_counters_without_estimates() {
+        let (router, server) = test_app().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/usage/tokens")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["provider"], "llama.cpp-compatible local gateway");
+        assert_eq!(value["total_tokens"], 0);
+        assert_eq!(value["measured_responses"], 0);
+        assert_eq!(value["responses_without_usage"], 0);
+        assert_eq!(value["scan_limit"], 10000);
+        assert!(value["note"].as_str().unwrap().contains("no token estimates"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn prompt_enhancement_uses_supervisor_and_returns_review_only_suggestion() {
+        let (router, server) = test_app().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/prompt/enhance")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "qwen3.8:27b",
+                            "prompt": "write a test plan"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["enhanced_prompt"], "hello");
+        assert_eq!(value["requires_operator_review"], true);
+        assert_eq!(value["submitted"], false);
+
+        let tasks = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tasks.status(), StatusCode::OK);
+        let body = to_bytes(tasks.into_body(), usize::MAX).await.unwrap();
+        let tasks: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(tasks["items"].as_array().unwrap().len(), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn prompt_enhancement_rejects_invalid_prompt_and_unadvertised_model() {
+        let (router, server) = test_app().await;
+        let empty_prompt = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/prompt/enhance")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"model":"qwen3.8:27b","prompt":"  "}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(empty_prompt.status(), StatusCode::BAD_REQUEST);
+
+        let unknown_model = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/prompt/enhance")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"model":"not-in-gateway","prompt":"improve this"}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unknown_model.status(), StatusCode::BAD_REQUEST);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn gpu_models_route_returns_gateway_models() {
         let (router, server) = test_app().await;
 
@@ -8284,6 +8509,8 @@ mod tests {
         let protected_routes = [
             "/api/models/local",
             "/api/repair/plan",
+            "/api/usage/tokens",
+            "/api/prompt/enhance",
             "/api/agents/manifests/discover",
             "/api/media/comfyui/monitor",
             "/api/media/workflows/discover",
