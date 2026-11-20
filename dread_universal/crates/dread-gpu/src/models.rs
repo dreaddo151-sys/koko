@@ -168,7 +168,7 @@ impl GgufHeaderReader {
                 self.ensure_span(1)?;
                 let mut value = [0u8; 1];
                 self.file.read_exact(&mut value).map_err(|error| error.to_string())?;
-                Ok((value[0] as i8).try_into().ok())
+                Ok(i8::from_le_bytes(value).try_into().ok())
             }
             2 => {
                 self.ensure_span(2)?;
@@ -183,11 +183,15 @@ impl GgufHeaderReader {
                 Ok(i16::from_le_bytes(value).try_into().ok())
             }
             4 => Ok(Some(u64::from(self.read_u32()?))),
-            5 => Ok(self.read_u32()?.cast_signed().try_into().ok()),
+            5 => {
+                let value = i32::from_le_bytes(self.read_u32()?.to_le_bytes());
+                Ok(value.try_into().ok())
+            }
             10 => Ok(Some(self.read_u64()?)),
-            11 => Ok(i64::from_le_bytes(
-                self.read_u64()?.to_le_bytes(),
-            ).try_into().ok()),
+            11 => {
+                let value = i64::from_le_bytes(self.read_u64()?.to_le_bytes());
+                Ok(value.try_into().ok())
+            }
             _ => {
                 self.skip_value(value_type)?;
                 Ok(None)
@@ -580,6 +584,102 @@ mod tests {
         let root = env::temp_dir().join(format!("dread-models-{label}-{nonce}"));
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    fn append_u32(buffer: &mut Vec<u8>, value: u32) {
+        buffer.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn append_u64(buffer: &mut Vec<u8>, value: u64) {
+        buffer.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn append_gguf_string(buffer: &mut Vec<u8>, value: &str) {
+        append_u64(buffer, value.len() as u64);
+        buffer.extend_from_slice(value.as_bytes());
+    }
+
+    fn synthetic_gguf() -> Vec<u8> {
+        let mut bytes = b"GGUF".to_vec();
+        append_u32(&mut bytes, 3);
+        append_u64(&mut bytes, 12_345);
+        append_u64(&mut bytes, 6);
+
+        // A tokenizer string array appears before some general model fields.
+        append_gguf_string(&mut bytes, "tokenizer.ggml.tokens");
+        append_u32(&mut bytes, 9); // ARRAY
+        append_u32(&mut bytes, 8); // STRING element type
+        append_u64(&mut bytes, 3);
+        append_gguf_string(&mut bytes, "alpha");
+        append_gguf_string(&mut bytes, "beta");
+        append_gguf_string(&mut bytes, "gamma");
+
+        append_gguf_string(&mut bytes, "general.architecture");
+        append_u32(&mut bytes, 8); // STRING
+        append_gguf_string(&mut bytes, "llama");
+
+        append_gguf_string(&mut bytes, "general.name");
+        append_u32(&mut bytes, 8); // STRING
+        append_gguf_string(&mut bytes, "DREAD test model");
+
+        append_gguf_string(&mut bytes, "general.file_type");
+        append_u32(&mut bytes, 4); // UINT32
+        append_u32(&mut bytes, 2);
+
+        append_gguf_string(&mut bytes, "general.quantization_version");
+        append_u32(&mut bytes, 4); // UINT32
+        append_u32(&mut bytes, 2);
+
+        append_gguf_string(&mut bytes, "llama.context_length");
+        append_u32(&mut bytes, 4); // UINT32
+        append_u32(&mut bytes, 8_192);
+        bytes
+    }
+
+    #[test]
+    fn parses_gguf_metadata_header_and_skips_string_arrays_without_loading_weights() {
+        let root = temporary_directory("gguf-header");
+        let path = root.join("fixture.gguf");
+        fs::write(&path, synthetic_gguf()).unwrap();
+
+        let metadata = read_gguf_metadata(&path).unwrap();
+        assert_eq!(metadata.version, 3);
+        assert_eq!(metadata.tensor_count, 12_345);
+        assert_eq!(metadata.metadata_count, 6);
+        assert_eq!(metadata.architecture.as_deref(), Some("llama"));
+        assert_eq!(metadata.model_name.as_deref(), Some("DREAD test model"));
+        assert_eq!(metadata.context_length, Some(8_192));
+        assert_eq!(metadata.file_type_code, Some(2));
+        assert_eq!(metadata.quantization_version, Some(2));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_malformed_or_unsupported_gguf_headers() {
+        let root = temporary_directory("bad-gguf");
+        let bad_magic = root.join("bad-magic.gguf");
+        fs::write(&bad_magic, b"NOPE").unwrap();
+        assert!(read_gguf_metadata(&bad_magic).is_err());
+
+        let unsupported = root.join("unsupported-version.gguf");
+        let mut bytes = b"GGUF".to_vec();
+        append_u32(&mut bytes, 99);
+        append_u64(&mut bytes, 0);
+        append_u64(&mut bytes, 0);
+        fs::write(&unsupported, bytes).unwrap();
+        assert!(read_gguf_metadata(&unsupported).is_err());
+
+        let truncated = root.join("truncated.gguf");
+        let mut bytes = b"GGUF".to_vec();
+        append_u32(&mut bytes, 3);
+        append_u64(&mut bytes, 1);
+        append_u64(&mut bytes, 1);
+        append_u64(&mut bytes, 24);
+        fs::write(&truncated, bytes).unwrap();
+        assert!(read_gguf_metadata(&truncated).is_err());
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
