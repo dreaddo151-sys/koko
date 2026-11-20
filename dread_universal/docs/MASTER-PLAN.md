@@ -665,3 +665,37 @@ CI success is not live provider, workstation, GPU/media or release acceptance. K
 - **DeerFlow:** AIO DooD may mount the host Docker socket into the Gateway; the socket is root-equivalent. AIO network defaults to `open`; strict mode is `isolated` or a reviewed `allowlist`, and the current AIO image retains compatibility capabilities and defaults to `seccomp=unconfined`. The Kubernetes provisioner avoids the host socket but is currently rejected by DREAD's non-empty-provisioner gate. BoxLite is scoped by `(user_id, thread_id)` and can reuse a warm VM. Verify socket, bind host, mounts, egress, image, seccomp, capabilities and resource limits before use. [Upstream configuration](https://github.com/bytedance/deer-flow/blob/main/backend/docs/CONFIGURATION.md).
 - **OpenHands:** inspect authenticated `/server_info`, `X-Session-API-Key`, stable `OH_SECRET_KEY`, loopback binding, actual per-conversation Docker containers, mounts, egress and requested tools. A tool-confirmation policy is not a command allowlist. [Agent Server security/API guide](https://github.com/OpenHands/docs/blob/main/sdk/arch/agent-server.mdx).
 - These are source-level requirements only. No live provider config, container, mount, key or permission was inspected in this checkpoint; no provider task is approved.
+
+
+## 2026-11-21 — Universal continuation and capability-discovery reconciliation
+
+The 20 November offline continuation archive is treated as a feature source derived from Run 81, not as a replacement for the later Phase 6/PR #13 source. Its safe, additive capabilities have been selectively integrated on stacked draft PR #14. PR #12 and #13 remain separate and unmerged.
+
+Implemented in this continuation:
+- Reframed “Universal” as hardware-/capability-adaptive dual-/multi-GPU PCs rather than a DREAD installation tailored to the original RTX 3090 workstation or its /mnt/sabrent path. Ubuntu 24.04 remains the current validated CI/package target. Other OS/accelerator combinations are not advertised as supported until their adapters and acceptance tests pass.
+- Added configurable and portable discovery roots for local model files, ComfyUI workflow exports, plugin manifests and agent adapter manifests. Environment/config, install/current-relative and per-user data roots replace the original fixed workstation path as defaults.
+- Added local model-file inventory, separate from gateway-advertised models; discovered files are never reported as loaded or executable.
+- Added bounded read-only ComfyUI monitor and workflow metadata discovery. It reports queue/history/output metadata without synthetic progress, does not submit/cancel jobs, and never echoes workflow widget values or payloads.
+- Added Cursor/Claude/generic plugin manifest catalogue. Results remain untrusted and disabled; no hooks, scripts, commands or MCP servers are started.
+- Added local agent adapter manifest catalogue. It validates loopback health URL declarations but does not probe those URLs, start agents, activate adapters or trust declared capabilities.
+- Added proposal-only repair diagnostics: every finding is proposed_not_applied, operator approval is required and auto-apply is ineligible. This is a first diagnostic layer, not the complete self-repair lifecycle.
+- Added authenticated API routes and a separate operator inventory workspace. Disk inventories are not run on the five-second general dashboard polling loop.
+- Added bounded scan, symlink refusal, malformed manifest, loopback validation, disabled-default and route-auth regression tests.
+- Added docs/IMPLEMENTATION-GAP-MATRIX.md and updated this controlling plan/README to require every future change to be checked against the master-plan rows.
+
+New protected routes:
+- GET /api/models/local
+- GET /api/media/comfyui/monitor
+- GET /api/media/workflows/discover
+- GET /api/extensions/discover
+- GET /api/agents/manifests/discover
+- GET /api/repair/plan
+
+Safety and release boundary:
+- No live workstation was accessed, and no local package was installed.
+- No service was stopped/restarted; no ComfyUI prompt, provider task or GPU workload was submitted.
+- No model was loaded/unloaded and no GPU lease was acquired.
+- The Python Master Hub, ComfyUI and Python GPU Supervisor were not changed.
+- Rust CI run #972 passed the Web console build but failed the Rust formatting gate, so Clippy, Rust tests, release build and package smoke test were skipped. The reported rustfmt changes and a crate-level doc-comment ordering compile issue were corrected in subsequent commits. Those corrections have not yet been validated by a fresh green current-head CI run.
+- Latest inspected PR #14 source head at this log entry: 30dba903ac2b4e588a96f3778cfb92b74b6fa15b. PR #14 remains a draft stacked continuation, not merged. Do not claim its new Rust code compiled or passed tests until a later CI run confirms it.
+- Still incomplete: full GPU stable identity/heterogeneous scheduling, GGUF/projector/context metadata, live agent adapter enablement/verification, executable extension transaction/signatures, WebSocket media progress and artifact pipelines, resource-aware mission scheduling, repair simulation/apply/postcondition/backup/rollback, Python Hub route parity, signed updater and physical host acceptance.
