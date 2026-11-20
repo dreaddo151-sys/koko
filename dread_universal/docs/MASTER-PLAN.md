@@ -71,7 +71,7 @@ Detect and report, without changing the host:
 - Pstack, Cursor/Claude and other extension catalogs; local agent manifests, known runtime health endpoints, tools and MCP declarations.
 - Dependency versions, health, compatibility, provenance, permissions and resource limits.
 
-Discovery roots come from explicit environment/config, installation-relative paths, standard per-user data locations and platform adapters. Never embed a developer's home directory, mount point, workspace name or device ID as a universal default. Scan budgets and symlink/path boundaries apply on every platform.
+Discovery roots come from explicit environment/config, installation-relative paths, standard per-user data locations (including HOME/XDG and USERPROFILE/LOCALAPPDATA where present) and platform adapters. Never embed a developer's home directory, mount point, workspace name or device ID as a universal default. Scan budgets and symlink/path boundaries apply on every platform. For model caches, internal symlinks may be followed only after canonical resolution proves the target remains under the configured model root; outside-root targets and cycles are rejected.
 
 Distinguish **detected**, **configured**, **healthy**, **usable**, **approved** and **unknown**. Never infer that a service is executable merely because its port responds. No arbitrary port sweep, LAN scan or unapproved executable launch.
 
@@ -715,3 +715,11 @@ Safety and release boundary:
 - Local `.gguf` files are now inspected through a bounded metadata-only parser that validates GGUF magic/version and reads the selected metadata keys. It does not read tensor records or weight payloads and does not load the model.
 - Header parsing has a 1 MiB per-file scan cap, 16,384 metadata-entry cap, 1,000,000 array-element cap, 64 KiB string-value cap and 64 GGUF files per inventory scan. Oversized, malformed or truncated headers remain visible as local candidates with `metadata_status=unavailable` and a bounded error rather than being represented as usable models.
 - Exposed metadata includes the raw GGUF file-type code and quantization version; the file-type code is deliberately not translated into an inferred quantization label. Compatibility, tokenizer/projector dependency checks, VRAM fit, residency and gateway-load acceptance remain separate requirements.
+
+
+### Host-root and model-cache portability slice — 2026-11-21
+
+- Model, workflow and plugin root discovery now consults `USERPROFILE` in addition to `HOME`; Windows-style per-user data roots (`LOCALAPPDATA`/`APPDATA`) are included where present. Explicit `DREAD_*_ROOTS` configuration remains authoritative. These discovery conventions do not constitute Windows runtime/installer support.
+- Local model inventory now resolves symlink targets and follows only canonical targets that remain under the configured model root. Canonical directories/files are deduplicated, so symlink cycles/duplicate snapshot aliases do not cause repeated scans. External symlink targets and broken links are ignored.
+- Added a Hugging Face cache regression test for `snapshots/<revision>/model.safetensors` pointing to an in-root `blobs/<hash>` file. The scanner preserves the visible snapshot filename for format classification and API display while using the canonical file for containment, size and metadata.
+- The existing external-link rejection test remains in place. Workflow/plugin manifest scanners continue to reject symlinks entirely because their manifests are not needed through cache-style aliases.
