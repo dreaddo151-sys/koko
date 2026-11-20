@@ -1,19 +1,22 @@
 # PROJECT DREAD UNIVERSAL — Master Architecture, Workstation Knowledge & Verified Build Plan
 
-**Specification:** v2.0  
+**Specification:** v2.1  
 **Status:** Controlling specification; implementation in progress, not complete  
-**Target:** Ubuntu 24.04 LTS and later Ubuntu releases only  
-**Primary acceptance host:** Ubuntu dual-NVIDIA RTX 3090 workstation  
-**Workspace:** `/mnt/sabrent/dread_workspace`  
+**Target:** Host-agnostic dual-/multi-GPU PCs, with explicit OS and accelerator adapters  
+**Current CI baseline:** Ubuntu 24.04 x86_64  
+**Primary acceptance fixture:** Known dual-NVIDIA RTX 3090 workstation; not the only supported hardware profile  
+**Workspace:** Discovered from installation/configuration/environment; no workstation-specific default  
 **Master Hub:** `dread_web_hub.py`  
 **Rust workspace:** `dread_universal/`  
 **Repository:** https://github.com/dreaddo151-sys/koko
 
-This is the single controlling product specification. It supersedes earlier cross-platform/portable-OS wording. The companion `WORK-LOG.md` records dated implementation evidence and handoff state.
+This is the controlling product specification. The 20 November 2026 user clarification restores the universal product requirement: support other dual-/multi-GPU PCs through host, OS, vendor, runtime and capability adapters. The companion `WORK-LOG.md` records dated implementation evidence and handoff state.
 
 ## 1. Mission
 
-Build PROJECT DREAD into one local-first autonomous AI engineering Master Hub for Ubuntu 24.04+. "Universal" means hardware- and capability-adaptive across supported Ubuntu machines, not Windows/macOS portability.
+Build PROJECT DREAD into one local-first autonomous AI engineering Master Hub for dual-/multi-GPU PCs. "Universal" means the same hub can inventory and adapt to different host machines, GPU vendors, GPU counts, model layouts, installed agent ecosystems, Pstack/plugin sources and runtime capabilities without source edits or assumptions about one user's disk layout.
+
+Ubuntu 24.04 is the current validated CI and packaging baseline, not the product boundary. Windows and macOS, additional Linux distributions, and non-NVIDIA accelerator paths require platform adapters and their own CI/acceptance evidence before they can be advertised as supported. Core domain models, discovery manifests, registry, orchestration and policy must remain portable and must not contain workstation-specific paths or device assumptions.
 
 DREAD must discover what a host can actually do, register its models, agents, skills, tools and services, plan and execute engineering work, coordinate inference and media workloads, observe its own operation, diagnose faults, propose safe repairs, verify outcomes and recover from failed changes.
 
@@ -32,14 +35,15 @@ The finished operator experience must provide:
 
 ## 2. Platform and non-negotiable constraints
 
-1. **Ubuntu only:** Ubuntu 24.04 LTS and later Ubuntu releases. CI, packaging, installer and acceptance are Ubuntu-focused. Windows/macOS deliverables are out of scope.
-2. **Master Hub continuity:** `dread_web_hub.py` remains the existing Master Hub during migration. Do not replace it with a disconnected second product. Add Rust capabilities behind/alongside it, then migrate workflows only after parity and acceptance tests.
-3. **Preservation:** Preserve ComfyUI, Python GPU Supervisor, authenticated bridge, models, user data, databases, configs and working Hub features. Do not stop or reconfigure them merely to simplify development.
-4. **Single GPU authority:** `dread_gpu_supervisor.py` remains the sole owner of GPU leases, VRAM handoff and inference process lifecycle. Never start a competing llama-server or take a second GPU lock.
-5. **Inference:** llama.cpp is the active backend. Do not start or depend on Ollama. Legacy Ollama blob storage may be read as a source of model files only where verified; that does not make Ollama an active server.
-6. **Additive and reversible:** Back up before changes, use narrow patches, preserve rollback points and verify after each change. No destructive reset or blind replacement.
-7. **Approval and security:** Imported content is untrusted; discovery is read-only by default; execution is allowlisted and auditable; consequential changes require operator approval.
-8. **Evidence-based completion:** A compile, mocked response, health endpoint or green unit test alone does not prove end-to-end functionality. Label exactly what was tested.
+1. **Universal host contract:** The product must adapt to a host with one or more supported accelerators and explicitly support dual-/multi-GPU PC configurations without assuming NVIDIA, RTX 3090, a fixed GPU count, a specific PCI bus layout or fixed ComfyUI/model directories. Platform and accelerator support belongs behind adapters. A platform is not called supported until its host discovery, service management, packaging, upgrade and rollback paths pass CI and real acceptance.
+2. **Current validation baseline:** Ubuntu 24.04 x86_64 remains the first fully exercised target. This is the present validation boundary, not a permanent product restriction. Add Windows, macOS and additional Linux distribution CI/runtime adapters without changing the portable Rust control-plane contracts.
+3. **Master Hub continuity:** `dread_web_hub.py` remains the existing Master Hub during migration. Do not replace it with a disconnected second product. Add Rust capabilities behind/alongside it, then migrate workflows only after parity and acceptance tests.
+4. **Preservation:** Preserve ComfyUI, Python GPU Supervisor, authenticated bridge, models, user data, databases, configs and working Hub features. Do not stop or reconfigure them merely to simplify development.
+5. **Single GPU authority:** `dread_gpu_supervisor.py` remains the sole owner of GPU leases, VRAM handoff and inference process lifecycle. Never start a competing llama-server or take a second GPU lock.
+6. **Inference:** llama.cpp is the active backend. Do not start or depend on Ollama. Legacy Ollama blob storage may be read as a source of model files only where verified; that does not make Ollama an active server.
+7. **Additive and reversible:** Back up before changes, use narrow patches, preserve rollback points and verify after each change. No destructive reset or blind replacement.
+8. **Approval and security:** Imported content is untrusted; discovery is read-only by default; execution is allowlisted and auditable; consequential changes require operator approval.
+9. **Evidence-based completion:** A compile, mocked response, health endpoint or green unit test alone does not prove end-to-end functionality. Label exactly what was tested.
 
 ## 3. Target architecture
 
@@ -52,25 +56,30 @@ The finished operator experience must provide:
 
 ### 3.2 Rust control plane and persistence
 - Rust owns typed domain models, API boundaries, capability registry, task state machine, policy checks, orchestration and durable records.
+- Keep the core host-neutral. Move OS commands, filesystem conventions, GPU telemetry providers, process/service management and package operations behind typed platform adapters.
 - SQLite stores capabilities, config references, missions, tasks, events, approvals, provenance, versions, checkpoints and audit records.
 - Validate inputs at boundaries; use explicit adapters for external services.
 - Authenticated loopback APIs and reconnectable event streams; no LAN/public binding by default.
 
 ### 3.3 Automatic host and capability discovery
 Detect and report, without changing the host:
-- Ubuntu release, kernel, architecture, CPU model/thread count.
-- RAM total/available, disks and workspace capacity.
-- GPU vendor/model/count, VRAM, driver and CUDA/ROCm/oneAPI capability where available.
-- Installed llama.cpp binaries, gateway state and model inventory.
-- ComfyUI, GPU Supervisor, bridge, legacy Hub and configured local services.
-- Known local agent endpoints, tools, MCP servers and skill catalogs.
-- Dependency versions, health, compatibility and provenance.
+- OS, distribution/release, kernel, architecture, CPU model/topology/thread count and memory.
+- Physical disks, filesystems, workspace capacity and installation roots.
+- Every visible GPU with stable device identity, vendor/model/count, VRAM, PCI location/link, driver and available CUDA/ROCm/oneAPI/Metal capabilities.
+- llama.cpp binaries, gateway state, model files, model metadata and gateway-advertised model inventory.
+- ComfyUI, GPU Supervisor, bridge, existing Hub and configured local services.
+- Pstack, Cursor/Claude and other extension catalogs; local agent manifests, known runtime health endpoints, tools and MCP declarations.
+- Dependency versions, health, compatibility, provenance, permissions and resource limits.
+
+Discovery roots come from explicit environment/config, installation-relative paths, standard per-user data locations and platform adapters. Never embed a developer's home directory, mount point, workspace name or device ID as a universal default. Scan budgets and symlink/path boundaries apply on every platform.
 
 Distinguish **detected**, **configured**, **healthy**, **usable**, **approved** and **unknown**. Never infer that a service is executable merely because its port responds. No arbitrary port sweep, LAN scan or unapproved executable launch.
 
 ### 3.4 Models and GPU runtime
 - llama.cpp is the only active model serving backend.
-- Discover GGUF and explicitly supported model formats, metadata, quantization, context limits and projector dependencies.
+- Discover GGUF and explicitly supported model formats, metadata, quantization, context limits, projector/dependency files and model-specific hardware requirements.
+- Support arbitrary GPU counts, including heterogeneous devices where the selected runtime supports them; scheduling must use discovered device identities and measured free resources rather than assuming exactly two identical cards.
+- Distinguish a model file discovered on disk, a model advertised by the gateway, a model loadable on this host and a model currently resident. These are separate states.
 - Discover models advertised by the managed gateway; report unavailable models accurately.
 - Route inference through the existing authenticated Supervisor bridge and lease path.
 - Respect VRAM, context, batch, tensor split and concurrent workload limits.
@@ -79,10 +88,12 @@ Distinguish **detected**, **configured**, **healthy**, **usable**, **approved** 
 
 ### 3.5 Agent ecosystem and orchestration
 Desired provider integrations behind reviewed adapters:
-- Hermes
-- OpenHands
-- DeerFlow
-- Additional locally installed agents discovered through explicit manifests/configuration.
+- Hermes, OpenHands and DeerFlow.
+- Pstack prompt profiles and supported agent manifests.
+- Additional local and remote agent runtimes discovered through signed or operator-trusted manifests and explicit loopback/configured endpoints.
+- A plugin provider must be addable through a versioned adapter/manifest contract without editing the core scheduler.
+
+Discovery must not sweep arbitrary ports, scan LAN ranges, execute an agent binary or treat a prompt profile as a running agent. It should automatically find installed manifests and known registrations, then health-check only endpoints authorized by those manifests/configuration. Report discovered, configured, enabled, healthy, usable and approved as distinct states.
 
 OpenCode is historical/optional ecosystem context, not an assumed default adapter. Do not silently reinstall or re-enable it.
 
@@ -93,7 +104,7 @@ The orchestrator must decompose missions, select agents/models using verified ca
 ### 3.6 Pstack, skills, tools and extension manager
 - Integrate the pinned Pstack catalog and supported Cursor plugin/skill sources.
 - Current pin: Pstack 0.15.43; commit `2f87c854fe3e2fcda44ca86b46ede35aad3c46b7`; subtree `71d8e1d1d718e2149dc43b2535618064f29cba6b`; MIT; known inventory 58 skills and 2 agent prompt profiles.
-- Discover, preview, import, validate, enable, disable, update and remove extensions.
+- Discover, preview, import, validate, enable, disable, update and remove extensions from Pstack and additional supported ecosystems.
 - Show source, version, license, provenance, compatibility, permissions and integrity.
 - Imports start disabled. No imported script, hook, shell command or MCP action runs merely because it was discovered/imported.
 - Remote installation requires allowlisted sources, pinned manifests, cryptographic hash/signature verification, staged download, backup, atomic activation, audit and rollback.
@@ -103,11 +114,16 @@ The orchestrator must decompose missions, select agents/models using verified ca
 Preserve and integrate ComfyUI image generation, MiniMax H3 text/image-to-video, FlashVSR/video enhancement, job status/cancellation/logs/output/download and GPU lease coordination. A workflow is accepted only when it produces and verifies the expected artifact; for video, a valid playable MP4, not merely a loaded node graph.
 
 ### 3.8 Engineering, security and self-repair
-Support workspace inspection, coding, builds, tests, security scans, fuzzing, diagnostics, root-cause analysis and repair proposals.
+Support workspace inspection, coding, builds, tests, security scans, fuzzing, diagnostics, root-cause analysis and actual bounded self-repair—not only repair proposals.
 
 Mandatory lifecycle:
 
-**Discover → Understand → Diagnose → Plan → Simulate → Verify → Approve → Apply → Monitor → Rollback**
+**Discover → Understand → Diagnose → Plan → Simulate → Backup → Verify Preconditions → Approve/Policy Check → Apply → Verify Postconditions → Monitor → Rollback**
+
+- The repair engine has explicit modes: observe-only, propose, operator-approved apply and policy-authorized unattended apply. Unattended mode is restricted to pre-approved, idempotent, low-risk runbooks with strict scope and rate limits.
+- Each repair runbook declares platform/component applicability, preconditions, permitted operations, expected postconditions, backup strategy, health checks, timeout, rollback strategy and audit evidence.
+- A repair is not successful until postconditions are verified. Failed verification triggers rollback and records both the repair and recovery result.
+- Never auto-update GPU drivers, firmware, kernel, model weights, credentials, firewall/network policy, user data or arbitrary plugin code.
 
 - Record who/what requested, approved and executed each operation.
 - Least privilege and explicit command/tool allowlists.
@@ -118,20 +134,22 @@ Mandatory lifecycle:
 - Verify real postconditions; roll back if verification fails.
 - Unattended mode is policy-limited; sensitive operations remain approval-gated.
 
-### 3.9 Ubuntu installer, executable and updater
-Final distribution targets:
-- Ubuntu x86_64 first, matching the primary workstation.
-- `.deb` package and portable `.tar.gz`.
-- Optional AppImage only after core packaging is stable.
+### 3.9 Portable installation, executable and updater
+Final distribution targets are platform-specific packages built from the same signed, versioned release manifest:
+- Current first validated target: Ubuntu x86_64 with `.deb` and portable `.tar.gz`.
+- Future platform adapters: additional Linux distributions, Windows and macOS with native installer/service integration.
+- Optional AppImage or equivalent portable packages only after each platform's upgrade and rollback are proven.
 
 The installed product must include the Rust API, compiled web assets, default config templates, systemd integration, CLI/launcher and migrations; create private config/state/log directories; preserve existing DREAD workspace/models/ComfyUI/Supervisor/data; detect prerequisites without silently changing GPU drivers; provide service status/log/health commands; and support safe uninstall without deleting user data by default.
 
 The updater must download a pinned release, verify signatures/checksums, stage files, back up binaries/config/database, apply safe migrations, atomically activate, check health and roll back on failure. No release is called an installer until clean Ubuntu install, upgrade and rollback have been exercised.
 
-## 4. Known workstation and integration map
+## 4. Reference workstation and integration map
+
+The following is a historical acceptance fixture used to prove real integration. It must never be treated as the only supported installation or used as a built-in discovery default.
 
 Historical observed environment:
-- Workspace `/mnt/sabrent/dread_workspace`.
+- Workspace `/mnt/sabrent/dread_workspace` on the historical fixture only. Other hosts must use installation discovery or configure `DREAD_WORKSPACE` explicitly.
 - Legacy Master Hub `dread_web_hub.py`, historically port 8080; it was later offline and must not be falsely reported online.
 - ComfyUI `127.0.0.1:8188`; preserve it.
 - GPU Supervisor gateway `127.0.0.1:11500`.
@@ -262,7 +280,7 @@ Retest each before declaring fixed.
 - Work in small reviewable commits. Do not merge PRs, alter live services or perform destructive operations without required approval.
 - Report: verified complete, implemented/unverified, blocked, next concrete action.
 
-**Controlling outcome:** one complete, installable, maintainable PROJECT DREAD Master Hub for Ubuntu 24.04+, with real discovery, agent/model orchestration, GPU-safe inference, media workflows, secure self-repair and transactional upgrades.
+**Controlling outcome:** one complete, installable, maintainable PROJECT DREAD Universal Master Hub that adapts to other dual-/multi-GPU PCs through portable host and accelerator adapters, real Pstack/agent/model discovery, GPU-safe inference, media workflows, policy-controlled self-repair and signed transactional upgrades. Ubuntu 24.04 remains the first verified acceptance target; it is not the universal product boundary.
 
 ## Current audit addendum — 2026-11-17 (PR #12)
 
