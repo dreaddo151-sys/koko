@@ -356,7 +356,10 @@ fn configured_model_roots() -> Vec<PathBuf> {
         roots.push(current.join("ComfyUI/models"));
         roots.push(current.join("models"));
     }
-    if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
+    if let Some(home) = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+    {
         roots.push(home.join("ComfyUI/models"));
         roots.push(home.join("models"));
         roots.push(home.join(".cache/huggingface/hub"));
@@ -364,6 +367,10 @@ fn configured_model_roots() -> Vec<PathBuf> {
     if let Some(data_home) = env::var_os("XDG_DATA_HOME").map(PathBuf::from) {
         roots.push(data_home.join("ComfyUI/models"));
         roots.push(data_home.join("huggingface/hub"));
+    }
+    if let Some(local_app_data) = env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+        roots.push(local_app_data.join("ComfyUI/models"));
+        roots.push(local_app_data.join("huggingface/hub"));
     }
 
     let mut unique = BTreeSet::new();
