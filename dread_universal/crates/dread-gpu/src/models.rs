@@ -61,7 +61,6 @@ pub struct LocalModelInventory {
     pub warnings: Vec<String>,
 }
 
-
 /// A forward-only, bounded reader for the metadata section of a GGUF file.
 /// The tensor records and weight payload are intentionally never read.
 struct GgufHeaderReader {
@@ -71,7 +70,8 @@ struct GgufHeaderReader {
 
 impl GgufHeaderReader {
     fn open(path: &Path) -> Result<Self, String> {
-        let file = File::open(path).map_err(|error| format!("Could not open GGUF file: {error}"))?;
+        let file =
+            File::open(path).map_err(|error| format!("Could not open GGUF file: {error}"))?;
         let file_size = file
             .metadata()
             .map_err(|error| format!("Could not stat GGUF file: {error}"))?
@@ -161,25 +161,33 @@ impl GgufHeaderReader {
             0 => {
                 self.ensure_span(1)?;
                 let mut value = [0u8; 1];
-                self.file.read_exact(&mut value).map_err(|error| error.to_string())?;
+                self.file
+                    .read_exact(&mut value)
+                    .map_err(|error| error.to_string())?;
                 Ok(Some(u64::from(value[0])))
             }
             1 => {
                 self.ensure_span(1)?;
                 let mut value = [0u8; 1];
-                self.file.read_exact(&mut value).map_err(|error| error.to_string())?;
+                self.file
+                    .read_exact(&mut value)
+                    .map_err(|error| error.to_string())?;
                 Ok(i8::from_le_bytes(value).try_into().ok())
             }
             2 => {
                 self.ensure_span(2)?;
                 let mut value = [0u8; 2];
-                self.file.read_exact(&mut value).map_err(|error| error.to_string())?;
+                self.file
+                    .read_exact(&mut value)
+                    .map_err(|error| error.to_string())?;
                 Ok(Some(u64::from(u16::from_le_bytes(value))))
             }
             3 => {
                 self.ensure_span(2)?;
                 let mut value = [0u8; 2];
-                self.file.read_exact(&mut value).map_err(|error| error.to_string())?;
+                self.file
+                    .read_exact(&mut value)
+                    .map_err(|error| error.to_string())?;
                 Ok(i16::from_le_bytes(value).try_into().ok())
             }
             4 => Ok(Some(u64::from(self.read_u32()?))),
@@ -225,7 +233,11 @@ impl GgufHeaderReader {
                     2 | 3 => 2,
                     4 | 5 | 6 => 4,
                     10 | 11 | 12 => 8,
-                    _ => return Err(format!("Unsupported GGUF array element type {element_type}")),
+                    _ => {
+                        return Err(format!(
+                            "Unsupported GGUF array element type {element_type}"
+                        ));
+                    }
                 };
                 let bytes = count
                     .checked_mul(element_width)
