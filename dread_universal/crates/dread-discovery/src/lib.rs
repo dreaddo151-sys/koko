@@ -947,7 +947,7 @@ name = "Remote"
 adapter = "remote"
 health_url = "http://192.168.1.10:8000/health"
 "#).unwrap();
-        fs::write(root.join("bad.agent.toml"), "id = \\"bad\\"\\n").unwrap();
+        fs::write(root.join("bad.agent.toml"), r#"id = "bad""#).unwrap();
         let inventory = discover_agent_manifests_in(std::slice::from_ref(&root));
         assert!(inventory.manifests.is_empty());
         assert_eq!(inventory.warnings.len(), 2);
