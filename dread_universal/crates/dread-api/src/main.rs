@@ -686,7 +686,6 @@ async fn agents() -> Result<Json<Value>, ApiError> {
     })
 }
 
-
 type AgentManifestInventoryResponse = Json<dread_discovery::AgentManifestInventory>;
 
 async fn discover_agent_manifest_inventory() -> Result<AgentManifestInventoryResponse, ApiError> {
@@ -4753,7 +4752,7 @@ async fn local_model_inventory() -> Result<Json<dread_gpu::models::LocalModelInv
 
 async fn comfyui_monitor() -> Result<Json<dread_media::ComfyUiMonitor>, ApiError> {
     let client = dread_media::ComfyUiClient::from_env()
-.map_err(|error| ApiError::internal(format!("Invalid ComfyUI configuration: {error}")))?;
+        .map_err(|error| ApiError::internal(format!("Invalid ComfyUI configuration: {error}")))?;
     Ok(Json(client.monitor().await))
 }
 
@@ -4770,7 +4769,7 @@ async fn extension_discovery() -> Result<Json<dread_agents::extensions::PluginIn
 {
     let inventory = tokio::task::spawn_blocking(dread_agents::extensions::discover_local_plugins)
         .await
-.map_err(|error| ApiError::internal(format!("Plugin discovery worker failed: {error}")))?;
+        .map_err(|error| ApiError::internal(format!("Plugin discovery worker failed: {error}")))?;
     Ok(Json(inventory))
 }
 
@@ -8318,5 +8317,4 @@ mod tests {
         assert!(inventory["scanned_entries"].is_number());
         server.abort();
     }
-
 }
