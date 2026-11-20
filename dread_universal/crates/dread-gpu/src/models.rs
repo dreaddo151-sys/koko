@@ -370,6 +370,7 @@ pub fn discover_local_models_in(
         warnings: Vec::new(),
     };
     let mut canonical_roots = BTreeSet::new();
+    let mut gguf_files_scanned = 0usize;
     if roots.len() > MAX_MODEL_ROOTS {
         inventory.warnings.push(format!(
             "Model root list exceeded the {MAX_MODEL_ROOTS}-root limit; additional roots were not scanned"
@@ -484,6 +485,23 @@ pub fn discover_local_models_in(
                     .file_name()
                     .map(|value| value.to_string_lossy().into_owned())
                     .unwrap_or_else(|| relative_path.clone());
+                let (metadata_status, gguf_metadata, metadata_error) = if format == "gguf" {
+                    if gguf_files_scanned >= MAX_GGUF_FILES_PER_SCAN {
+                        (
+                            "scan_limit".to_string(),
+                            None,
+                            Some("Per-scan GGUF metadata limit reached".to_string()),
+                        )
+                    } else {
+                        gguf_files_scanned += 1;
+                        match read_gguf_metadata(&canonical_file) {
+                            Ok(metadata) => ("parsed".to_string(), Some(metadata), None),
+                            Err(error) => ("unavailable".to_string(), None, Some(error)),
+                        }
+                    }
+                } else {
+                    ("not_applicable".to_string(), None, None)
+                };
                 inventory.models.push(LocalModel {
                     id: format!("local:{}:{relative_path}", root.display()),
                     name,
@@ -493,6 +511,9 @@ pub fn discover_local_models_in(
                     relative_path,
                     size_bytes: metadata.len(),
                     status: "discovered_not_loaded".into(),
+                    metadata_status,
+                    metadata_error,
+                    gguf_metadata,
                 });
                 if inventory.models.len() >= MAX_MODELS {
                     inventory.truncated = true;
