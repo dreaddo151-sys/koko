@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { Activity, AlertCircle, Bot, Check, ChevronRight, Cpu, Gauge, KeyRound, Layers3, LockKeyhole, LogOut, MessageSquare, Play, Plus, Radio, RefreshCw, Search, Server, ShieldCheck, TerminalSquare, X, Zap, Workflow } from "lucide-react";
+import { Activity, AlertCircle, Bot, Check, ChevronRight, Cpu, FolderSearch, Gauge, KeyRound, Layers3, LockKeyhole, LogOut, MessageSquare, Play, Plus, Radio, RefreshCw, Search, Server, ShieldCheck, TerminalSquare, X, Zap, Workflow } from "lucide-react";
 
 type Model = { id: string };
 type Task = { id: string; title: string; task_type: string; status: string; created_at: number };
@@ -19,7 +19,12 @@ type StorageDevice = { source: string; filesystem: string; mount_point: string; 
 type StoragePartition = { name: string; filesystem: string | null; mount_points: string[] };
 type PhysicalStorageDevice = { name: string; model: string | null; transport: string | null; size_mib: number | null; partitions: StoragePartition[] };
 type HostProfile = { os: string; architecture: string; distribution: string | null; distribution_version: string | null; kernel_release: string | null; cpu_model: string | null; cpu_physical_cores: number | null; cpu_logical_threads: number | null; cpu_sockets: number | null; cpu_cores_per_socket: number | null; cpu_threads_per_core: number | null; cpu_numa_nodes: number | null; cuda_version: string | null; cuda_toolkit_version: string | null; cuda_toolkits: {version: string; compiler_path: string}[]; cpu_threads: number; memory_total_mib: number | null; memory_available_mib: number | null; root_disk_total_mib: number | null; root_disk_available_mib: number | null; storage_devices: StorageDevice[]; physical_storage_devices: PhysicalStorageDevice[]; gpu_devices: GpuDevice[]; llama_server: string | null; nvidia_smi_available: boolean; rocm_smi_available: boolean; xpu_smi_available: boolean; inference_backend: string };
-type Page = "overview" | "missions" | "tasks" | "agents" | "capabilities" | "models" | "gpu";
+
+type LocalModel = { id: string; name: string; model_kind: string; format: string; root: string; relative_path: string; size_bytes: number; status: string };
+type LocalWorkflow = { id: string; name: string; relative_path: string; format: string; node_count: number; node_types: string[]; status: string; execution: string };
+type LocalPlugin = { id: string; name: string; display_name: string; version?: string | null; ecosystem: string; manifest_path: string; components: {agents:number;skills:number;commands:number;hooks:number;mcp_servers:number;tools:number}; status: string; trust: string; execution: string };
+type ComfyUiMonitor = { status: string; endpoint: string; queue: {status:string;data?:{running_count:number;pending_count:number;running:{prompt_id:string}[];pending:{prompt_id:string}[]}|null;error?:string|null}; history: {status:string;data?:{prompt_id:string;status:string;completed:boolean;outputs:{filename:string;media_type:string}[];errors:{event_type:string;message?:string|null}[]}[]|null;error?:string|null}; system: {status:string;error?:string|null} };
+type Page = "overview" | "missions" | "tasks" | "agents" | "capabilities" | "models" | "gpu" | "inventory";
 
 async function api<T>(path: string, token: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
@@ -60,6 +65,12 @@ function App() {
   const [prompt,setPrompt]=useState(""); const [active,setActive]=useState("");
   const [events,setEvents]=useState<Event[]>([]); const [result,setResult]=useState<Result|null>(null);
   const [page,setPage]=useState<Page>("overview"); const [lastRefresh,setLastRefresh]=useState<number|null>(null);
+  const [localModels,setLocalModels]=useState<LocalModel[]>([]);
+  const [localWorkflows,setLocalWorkflows]=useState<LocalWorkflow[]>([]);
+  const [localPlugins,setLocalPlugins]=useState<LocalPlugin[]>([]);
+  const [comfyMonitor,setComfyMonitor]=useState<ComfyUiMonitor|null>(null);
+  const [inventoryUpdated,setInventoryUpdated]=useState<number|null>(null);
+  const [inventoryBusy,setInventoryBusy]=useState(false);
 
   const refresh=useCallback(async()=>{
     if(!token){setConnected(false);return;}
@@ -98,6 +109,31 @@ function App() {
     void load();const t=window.setInterval(()=>void load(),2500);
     return()=>{dead=true;window.clearInterval(t);};
   },[active,token]);
+  const refreshInventory=useCallback(async()=>{
+    if(!token)return;
+    setInventoryBusy(true);
+    const [modelsResult,mediaResult,workflowsResult,pluginsResult]=await Promise.allSettled([
+      api<{models:LocalModel[]}>("/api/models/local",token),
+      api<ComfyUiMonitor>("/api/media/comfyui/monitor",token),
+      api<{workflows:LocalWorkflow[]}>("/api/media/workflows/discover",token),
+      api<{plugins:LocalPlugin[]}>("/api/extensions/discover",token)
+    ]);
+    const failures:string[]=[];
+    if(modelsResult.status==="fulfilled")setLocalModels(modelsResult.value.models??[]);else failures.push("local model inventory");
+    if(mediaResult.status==="fulfilled")setComfyMonitor(mediaResult.value);else failures.push("ComfyUI monitor");
+    if(workflowsResult.status==="fulfilled")setLocalWorkflows(workflowsResult.value.workflows??[]);else failures.push("workflow catalog");
+    if(pluginsResult.status==="fulfilled")setLocalPlugins(pluginsResult.value.plugins??[]);else failures.push("plugin inventory");
+    if(failures.length)setError("Could not refresh: "+failures.join(", "));
+    else setError("");
+    setInventoryUpdated(Date.now());
+    setInventoryBusy(false);
+  },[token]);
+  useEffect(()=>{
+    if(page!=="inventory"||!token)return;
+    void refreshInventory();
+    const timer=window.setInterval(()=>void refreshInventory(),30000);
+    return()=>window.clearInterval(timer);
+  },[page,token,refreshInventory]);
   const stats=useMemo(()=>({active:tasks.filter(x=>["queued","running"].includes(x.status)).length,pending:tasks.filter(x=>x.status==="pending_approval").length,done:tasks.filter(x=>x.status==="completed").length}),[tasks]);
   const onlineServices=services.filter(x=>x.status==="ONLINE").length;
   const comfy=services.find(x=>x.id==="comfyui");
@@ -230,7 +266,7 @@ function App() {
     finally{setBusy(false);}
   };
   const nav:[Page,string,ReactNode,string][]=[
-    ["overview","Command deck",<Activity/>,"01"],["gpu","GPU telemetry",<Gauge/>,"02"],["models","Model arsenal",<Layers3/>,"03"],["agents","Agent network",<Bot/>,"04"],["missions","Mission DAG",<Workflow/>,"05"],["tasks","Task queue",<Workflow/>,"06"],["capabilities","Pstack registry",<ShieldCheck/>,"07"]
+    ["overview","Command deck",<Activity/>,"01"],["gpu","GPU telemetry",<Gauge/>,"02"],["models","Model arsenal",<Layers3/>,"03"],["agents","Agent network",<Bot/>,"04"],["missions","Mission DAG",<Workflow/>,"05"],["tasks","Task queue",<Workflow/>,"06"],["capabilities","Pstack registry",<ShieldCheck/>,"07"],["inventory","Local inventory",<FolderSearch/>,"08"]
   ];
   return <div className="shell">
     <aside className="sidebar">
@@ -269,6 +305,30 @@ function App() {
         </div>}
         {page==="gpu"&&<><div className="section-head"><div><label>HARDWARE / RESOURCE DOMAIN</label><h2>GPU telemetry matrix</h2><p>Read-only host samples are displayed independently of inference lease availability.</p></div><Pill value={supervisorOnline?"SUPERVISOR ONLINE":"SUPERVISOR OFFLINE"}/></div><div className="gpu-pair large">{hostProfile?.gpu_devices.length?hostProfile.gpu_devices.map((gpu,index)=><GpuCard key={`${gpu.vendor}-${index}`} index={`GPU ${index}`} gpu={gpu}/>):<Empty text="No supported GPU detected. CPU inference remains available when a local llama.cpp runtime is configured."/>}</div><div className="telemetry-note"><Activity size={13}/> Hardware telemetry is sampled by the host discovery layer. Supervisor status controls inference leases, not whether read-only GPU metrics may be displayed.</div></>}
         {page==="models"&&<section className="panel"><PanelTitle icon={<Layers3/>} title="LOCAL MODEL ARSENAL" meta={`${models.length} DISCOVERED`}/>{models.length?models.map(x=><div className="row" key={x.id}><div><b>{x.id}</b><small>Discovered from local GPU gateway</small></div><Pill value="AVAILABLE"/></div>):<Empty text="No models returned by the local GPU gateway. Confirm gateway and upstream model service status."/>}</section>}
+
+        {page==="inventory"&&<div className="command-grid">
+          <section className="panel">
+            <div className="panel-toolbar"><PanelTitle icon={<FolderSearch/>} title="LOCAL MODEL FILES" meta={String(localModels.length)+" CANDIDATES"}/><button className="secondary" disabled={!token||inventoryBusy} onClick={()=>void refreshInventory()}><RefreshCw size={14}/>REFRESH INVENTORY</button></div>
+            <p className="muted">Filesystem discovery only. These are candidate weight files, not proof of model compatibility or loaded state. Loading and unloading remain under the Python GPU Supervisor.</p>
+            {localModels.length?localModels.slice(0,100).map(item=><div className="row" key={item.id}><div><b>{item.name}</b><small>{item.model_kind} · {item.format.toUpperCase()} · {item.relative_path}</small></div><div className="task-actions"><Pill value="discovered_not_loaded"/><small>{(item.size_bytes/1073741824).toFixed(2)} GiB</small></div></div>):<Empty text="No local model files found under configured model roots. Set DREAD_MODEL_ROOTS to scan additional directories."/>}
+            {localModels.length>100&&<p className="muted">Showing first 100 of {localModels.length} discovered files.</p>}
+          </section>
+          <section className="panel">
+            <PanelTitle icon={<Workflow/>} title="COMFYUI MEDIA RUNTIME" meta={comfyMonitor?.status?.toUpperCase()??"NOT CHECKED"}/>
+            {comfyMonitor?<><div className="row"><div><b>Queue running</b><small>{comfyMonitor.queue.error??comfyMonitor.endpoint}</small></div><Pill value={String(comfyMonitor.queue.data?.running_count??"unavailable")}/></div><div className="row"><div><b>Queue pending</b><small>Live queue metadata only</small></div><Pill value={String(comfyMonitor.queue.data?.pending_count??"unavailable")}/></div><div className="row"><div><b>Recent history</b><small>{comfyMonitor.history.error??"Prompt IDs, completion status and output metadata only"}</small></div><Pill value={String(comfyMonitor.history.data?.length??"unavailable")}/></div>{comfyMonitor.history.data?.slice(0,5).map(job=><div className="row" key={job.prompt_id}><div><b>{job.prompt_id.slice(0,16)}</b><small>{job.status} · {job.outputs.length} output(s)</small></div><Pill value={job.completed?"completed":job.status}/></div>)}</>:<Empty text="ComfyUI has not been queried yet. Open this page to run the read-only monitor."/>}
+            <div className="panel-toolbar"><PanelTitle icon={<Layers3/>} title="WORKFLOW CATALOG" meta={String(localWorkflows.length)+" FOUND"}/></div>
+            <p className="muted">Workflow JSON is parsed for node metadata only. Payloads, widget values and credentials are not returned, and discovery never submits a workflow.</p>
+            {localWorkflows.length?localWorkflows.slice(0,60).map(item=><div className="row" key={item.id}><div><b>{item.name}</b><small>{item.format} · {item.node_count} nodes · {item.relative_path}</small><small>{item.node_types.slice(0,6).join(", ")}</small></div><Pill value="not validated"/></div>):<Empty text="No supported ComfyUI workflow JSON files were discovered under the configured workflow roots."/>}
+            {localWorkflows.length>60&&<p className="muted">Showing first 60 of {localWorkflows.length} workflow files.</p>}
+          </section>
+          <section className="panel">
+            <PanelTitle icon={<ShieldCheck/>} title="LOCAL PLUGIN MANIFESTS" meta={String(localPlugins.length)+" DISCOVERED"}/>
+            <p className="muted">Cursor, Claude and generic manifests are inventory metadata only. Discovered plugins are untrusted and disabled; hooks, scripts, tools and MCP servers are never started.</p>
+            {localPlugins.length?localPlugins.slice(0,100).map(item=><div className="row" key={item.id}><div><b>{item.display_name}</b><small>{item.ecosystem} · {item.name}{item.version?" · "+item.version:""}</small><small>{item.manifest_path} · {item.components.skills} skills / {item.components.tools} tools / {item.components.mcp_servers} MCP servers</small></div><div className="task-actions"><Pill value="untrusted"/><Pill value="disabled"/></div></div>):<Empty text="No local plugin manifests found under the configured Cursor / Claude / generic roots."/>}
+            {localPlugins.length>100&&<p className="muted">Showing first 100 of {localPlugins.length} plugin manifests.</p>}
+            <p className="muted">{inventoryUpdated?"Last scan "+new Date(inventoryUpdated).toLocaleTimeString()+".":"Inventory has not been scanned."} Automatic refresh runs every 30 seconds while this page is open.</p>
+          </section>
+        </div>}
         {page==="missions"&&<div className="task-layout">
           <section className="panel">
             <PanelTitle icon={<Workflow/>} title="MISSION DAG PLANNER" meta="PLAN FIRST / APPROVAL LATER"/>
