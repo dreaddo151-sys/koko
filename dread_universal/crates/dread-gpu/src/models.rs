@@ -445,6 +445,8 @@ pub fn discover_local_models_in(
         inventory.roots_scanned.push(root.display().to_string());
 
         let mut pending = vec![(root.clone(), 0usize)];
+        let mut seen_directories = BTreeSet::from([root.clone()]);
+        let mut seen_files = BTreeSet::new();
         while let Some((directory, depth)) = pending.pop() {
             if inventory.scanned_entries >= max_entries || inventory.models.len() >= MAX_MODELS {
                 inventory.truncated = true;
@@ -477,16 +479,22 @@ pub fn discover_local_models_in(
             paths.sort();
 
             for path in paths.into_iter().rev() {
-                let metadata = match fs::symlink_metadata(&path) {
-                    Ok(value) => value,
+                let entry_metadata = match fs::symlink_metadata(&path) {
+                    Ok(metadata) => metadata,
                     Err(_) => continue,
                 };
-                if metadata.file_type().is_symlink() {
-                    continue;
-                }
+                let canonical_path = match path.canonicalize() {
+                    Ok(value) if value.starts_with(&root) => value,
+                    // Reject broken links, loops and any target outside the configured root.
+                    _ => continue,
+                };
+                let metadata = match fs::metadata(&canonical_path) {
+                    Ok(metadata) => metadata,
+                    Err(_) => continue,
+                };
                 if metadata.is_dir() {
-                    if depth < max_depth {
-                        pending.push((path, depth + 1));
+                    if depth < max_depth && seen_directories.insert(canonical_path.clone()) {
+                        pending.push((canonical_path, depth + 1));
                     }
                     continue;
                 }
@@ -496,12 +504,12 @@ pub fn discover_local_models_in(
                 let Some((format, fallback_kind)) = classify_file(&path) else {
                     continue;
                 };
-                let canonical_file = match path.canonicalize() {
-                    Ok(value) if value.starts_with(&root) => value,
-                    _ => continue,
-                };
-                let Ok(relative) = canonical_file.strip_prefix(&root) else {
+                if !seen_files.insert(canonical_path.clone()) {
                     continue;
+                }
+                let relative = match path.strip_prefix(&root) {
+                    Ok(value) => value,
+                    Err(_) => continue,
                 };
                 let relative_path = relative.to_string_lossy().replace('\\', "/");
                 let name = path
@@ -517,7 +525,7 @@ pub fn discover_local_models_in(
                         )
                     } else {
                         gguf_files_scanned += 1;
-                        match read_gguf_metadata(&canonical_file) {
+                        match read_gguf_metadata(&canonical_path) {
                             Ok(metadata) => ("parsed".to_string(), Some(metadata), None),
                             Err(error) => ("unavailable".to_string(), None, Some(error)),
                         }
@@ -542,6 +550,7 @@ pub fn discover_local_models_in(
                     inventory.truncated = true;
                     break 'roots;
                 }
+                let _ = entry_metadata; // retained to make the symlink decision explicit above
             }
         }
     }
