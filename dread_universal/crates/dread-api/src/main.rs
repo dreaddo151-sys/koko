@@ -1887,10 +1887,8 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
     })
 }
 
-/// Resolve a task's provider only from a reviewed, enabled Agent capability.
-/// The task's executor is selected by task_type, never by a caller-supplied capability
-/// attached to an unrelated built-in task. This helper is shared by mission validation
-/// and final queue admission to prevent policy drift.
+/// Load the immutable execution policy associated with a mission task.
+/// Non-mission tasks inherit workspace defaults.
 fn mission_execution_policy_for_task(
     conn: &Connection,
     task_id: &str,
@@ -7534,7 +7532,7 @@ mod tests {
             "mission_id": "acceptance-mission-1",
             "nodes": [
                 {"id":"report","depends_on":["build"],"priority":200,"task_type":"report"},
-                {"id":"build","depends_on":[],"priority":10,"task_type":"build"},
+                {"id":"build","depends_on":[],"priority":10,"task_type":"build","execution_policy":{"timeout_ms":15000}},
                 {"id":"inspect","depends_on":[],"priority":20,"task_type":"inspect"}
             ]
         });
@@ -7577,6 +7575,10 @@ mod tests {
             stored["item"]["graph"]["mission_id"],
             "acceptance-mission-1"
         );
+        assert_eq!(
+            stored["item"]["graph"]["nodes"][1]["execution_policy"]["timeout_ms"],
+            15000
+        );
         assert_eq!(stored["item"]["execution_started"], false);
 
         let duplicate = router
@@ -7591,6 +7593,73 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn mission_plan_rejects_out_of_range_and_unsupported_agent_timeouts() {
+        let (router, server) = test_app().await;
+
+        for (mission_id, node) in [
+            (
+                "timeout-too-short",
+                json!({
+                    "id": "node",
+                    "task_type": "service_discovery",
+                    "execution_policy": {"timeout_ms": 999}
+                }),
+            ),
+            (
+                "timeout-too-long",
+                json!({
+                    "id": "node",
+                    "task_type": "service_discovery",
+                    "execution_policy": {"timeout_ms": 1805001}
+                }),
+            ),
+            (
+                "agent-timeout-unsupported",
+                json!({
+                    "id": "node",
+                    "task_type": "agent_task",
+                    "execution_policy": {"timeout_ms": 15000}
+                }),
+            ),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/missions")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({
+                                "mission_id": mission_id,
+                                "nodes": [node]
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{mission_id}");
+        }
+
+        let list = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/missions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list.status(), StatusCode::OK);
+        let body = to_bytes(list.into_body(), usize::MAX).await.unwrap();
+        let stored: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(stored["items"].as_array().unwrap().len(), 0);
         server.abort();
     }
 
