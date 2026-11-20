@@ -1,3 +1,4 @@
+pub mod repair;
 //! Read-only host and local runtime discovery for portable DREAD installations.
 //!
 //! Probes only a small allowlist of known system utilities. It never invokes a
