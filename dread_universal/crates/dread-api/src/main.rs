@@ -24,7 +24,7 @@ use dread_discovery::{
 use dread_gpu::{GpuGatewayClient, GpuSupervisorClient};
 use dread_orchestrator::{
     ExecutionConfig, ExecutionError, ExecutionGate, ExecutionResourceClass, MissionExecutionPolicy,
-    MissionGraph,
+    MissionGraph, ResourceLimits,
 };
 use dread_platform::cached_host_profile;
 use dread_skills::{
@@ -46,6 +46,71 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 const MAX_API_BODY_BYTES: usize = 32 * 1024 * 1024;
+const MAX_RESOURCE_CONCURRENCY: usize = 32;
+
+fn parse_resource_concurrency(
+    name: &str,
+    raw: Option<&str>,
+    default: usize,
+) -> anyhow::Result<usize> {
+    let Some(raw) = raw else {
+        return Ok(default);
+    };
+    let parsed = raw.trim().parse::<usize>().map_err(|_| {
+        anyhow::anyhow!("{name} must be an integer between 1 and {MAX_RESOURCE_CONCURRENCY}")
+    })?;
+    anyhow::ensure!(
+        (1..=MAX_RESOURCE_CONCURRENCY).contains(&parsed),
+        "{name} must be between 1 and {MAX_RESOURCE_CONCURRENCY}"
+    );
+    Ok(parsed)
+}
+
+fn resource_limits_from_values(
+    cpu: Option<&str>,
+    network: Option<&str>,
+    agent: Option<&str>,
+    gpu_inference: Option<&str>,
+    media: Option<&str>,
+) -> anyhow::Result<ResourceLimits> {
+    Ok(ResourceLimits {
+        cpu: parse_resource_concurrency("DREAD_RESOURCE_CPU_CONCURRENCY", cpu, 2)?,
+        network: parse_resource_concurrency("DREAD_RESOURCE_NETWORK_CONCURRENCY", network, 2)?,
+        agent: parse_resource_concurrency("DREAD_RESOURCE_AGENT_CONCURRENCY", agent, 2)?,
+        gpu_inference: parse_resource_concurrency(
+            "DREAD_RESOURCE_GPU_INFERENCE_CONCURRENCY",
+            gpu_inference,
+            1,
+        )?,
+        media: parse_resource_concurrency("DREAD_RESOURCE_MEDIA_CONCURRENCY", media, 1)?,
+    })
+}
+
+fn resource_limits_from_env() -> anyhow::Result<ResourceLimits> {
+    fn value(name: &str) -> anyhow::Result<Option<String>> {
+        match env::var(name) {
+            Ok(value) => Ok(Some(value)),
+            Err(env::VarError::NotPresent) => Ok(None),
+            Err(env::VarError::NotUnicode(_)) => {
+                anyhow::bail!("{name} must contain a valid UTF-8 integer")
+            }
+        }
+    }
+
+    let cpu = value("DREAD_RESOURCE_CPU_CONCURRENCY")?;
+    let network = value("DREAD_RESOURCE_NETWORK_CONCURRENCY")?;
+    let agent = value("DREAD_RESOURCE_AGENT_CONCURRENCY")?;
+    let gpu_inference = value("DREAD_RESOURCE_GPU_INFERENCE_CONCURRENCY")?;
+    let media = value("DREAD_RESOURCE_MEDIA_CONCURRENCY")?;
+
+    resource_limits_from_values(
+        cpu.as_deref(),
+        network.as_deref(),
+        agent.as_deref(),
+        gpu_inference.as_deref(),
+        media.as_deref(),
+    )
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -4929,14 +4994,26 @@ async fn main() -> anyhow::Result<()> {
     }
     let db = open_database(&db_path)?;
     let agent_adapters = Arc::new(load_agent_adapters_from_env()?);
+    let resource_limits = resource_limits_from_env()?;
+    info!(
+        cpu = resource_limits.cpu,
+        network = resource_limits.network,
+        agent = resource_limits.agent,
+        gpu_inference = resource_limits.gpu_inference,
+        media = resource_limits.media,
+        "Resource-class concurrency limits configured"
+    );
     let (events, _) = broadcast::channel(256);
     let state = AppState {
         db: Arc::new(Mutex::new(db)),
         gpu: GpuGatewayClient::from_env()?,
         supervisor,
         events,
-        execution: ExecutionGate::new(ExecutionConfig::default())
-            .map_err(|error| anyhow::anyhow!("Invalid execution configuration: {error:?}"))?,
+        execution: ExecutionGate::new_with_resource_limits(
+            ExecutionConfig::default(),
+            resource_limits,
+        )
+        .map_err(|error| anyhow::anyhow!("Invalid execution configuration: {error:?}"))?,
         agent_adapters,
         cancellations: Arc::new(Mutex::new(HashMap::new())),
         api_token,
@@ -5777,6 +5854,45 @@ mod tests {
     async fn test_app() -> (Router, tokio::task::JoinHandle<()>) {
         let (router, _receiver, server) = test_app_with_events().await;
         (router, server)
+    }
+
+    #[test]
+    fn resource_limit_environment_defaults_and_overrides_are_validated() {
+        let defaults = resource_limits_from_values(None, None, None, None, None).unwrap();
+        assert_eq!(defaults, ResourceLimits::default());
+
+        let configured = resource_limits_from_values(
+            Some("4"),
+            Some("3"),
+            Some("5"),
+            Some("1"),
+            Some("2"),
+        )
+        .unwrap();
+        assert_eq!(
+            configured,
+            ResourceLimits {
+                cpu: 4,
+                network: 3,
+                agent: 5,
+                gpu_inference: 1,
+                media: 2
+            }
+        );
+    }
+
+    #[test]
+    fn resource_limit_environment_rejects_invalid_and_unbounded_values() {
+        for invalid in [Some("0"), Some("33"), Some("-1"), Some("many"), Some("")] {
+            assert!(
+                resource_limits_from_values(invalid, None, None, None, None).is_err(),
+                "CPU concurrency value {invalid:?} must be rejected"
+            );
+        }
+        assert!(resource_limits_from_values(None, Some("0"), None, None, None).is_err());
+        assert!(resource_limits_from_values(None, None, Some("33"), None, None).is_err());
+        assert!(resource_limits_from_values(None, None, None, Some("34"), None).is_err());
+        assert!(resource_limits_from_values(None, None, None, None, Some("99")).is_err());
     }
 
     #[test]
