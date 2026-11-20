@@ -722,6 +722,7 @@ mod tests {
                     priority: 0,
                     task_type: "x".into(),
                     payload: Value::Null,
+                    execution_policy: MissionExecutionPolicy::default(),
                 },
             ],
         };
