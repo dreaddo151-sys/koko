@@ -195,6 +195,13 @@ pub fn discover_local_plugins_in(
                     }
                 };
                 if kind.is_dir() && !kind.is_symlink() && depth < max_depth {
+                    // These directories contain ecosystem manifests for their
+                    // parent plugin. Scanning inside them as plugin roots
+                    // would count the same manifest a second time as generic.
+                    let directory_name = entry.file_name();
+                    if directory_name == ".cursor-plugin" || directory_name == ".claude-plugin" {
+                        continue;
+                    }
                     children.push(entry.path());
                 }
             }
