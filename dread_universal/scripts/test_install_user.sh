@@ -109,7 +109,15 @@ grep -q 'custom-services-config' "$HOME/.config/dread-universal/services.toml"
 grep -q 'legacy-sqlite-bytes' "$HOME/.local/share/dread-universal/data/dread_registry.sqlite3"
 grep -q 'legacy-api-token' "$HOME/.config/dread-universal/dread.env"
 grep -q 'legacy-supervisor-token' "$HOME/.config/dread-universal/dread.env"
-grep -q '^DREAD_GPU_GATEWAY_URL=http://127.0.0.1:11515
+grep -q '^DREAD_GPU_GATEWAY_URL=http://127.0.0.1:11515$' "$HOME/.config/dread-universal/dread.env"
+grep -q '^DREAD_COMFYUI_URL=http://127.0.0.1:8189$' "$HOME/.config/dread-universal/dread.env"
+grep -q '^DREAD_WORKSPACE=/opt/dread-workspace$' "$HOME/.config/dread-universal/dread.env"
+grep -q '^DREAD_MODEL_ROOTS=/models/gguf:/models/comfyui$' "$HOME/.config/dread-universal/dread.env"
+grep -q '^DREAD_COMFYUI_WORKFLOW_ROOTS=/workflows$' "$HOME/.config/dread-universal/dread.env"
+grep -q '^DREAD_PLUGIN_ROOTS=/plugins$' "$HOME/.config/dread-universal/dread.env"
+grep -q '^DREAD_AGENT_MANIFEST_ROOTS=/agents$' "$HOME/.config/dread-universal/dread.env"
+! grep -q '^Environment=DREAD_GPU_GATEWAY_URL=' "$HOME/.config/systemd/user/dread-universal.service"
+[[ "$(stat -c '%a' "$HOME/.config/dread-universal/dread.env")" == 600 ]]
 [[ "$(cat "$STATE")" == active ]]
 
 printf 'keep-backup-marker\n' > "$PREFIX/previous-release-marker"
@@ -120,7 +128,9 @@ BUNDLE2="$(make_bundle v2)"
 run_installer "$BUNDLE2"
 [[ "$("$PREFIX/bin/dread-universal")" == v2 ]]
 [[ "$(cat "$STATE")" == active ]]
-grep -q '^DREAD_COMFYUI_URL=http://127.0.0.1:8189"$(find "$HOME/.local/opt" -maxdepth 2 -type f -name previous-release-marker -print -quit)"
+grep -q '^DREAD_COMFYUI_URL=http://127.0.0.1:8189$' "$HOME/.config/dread-universal/dread.env"
+grep -q '^DREAD_COMFYUI_USER_ROOT=/custom/comfyui-user$' "$HOME/.config/dread-universal/dread.env"
+backup_marker="$(find "$HOME/.local/opt" -maxdepth 2 -type f -name previous-release-marker -print -quit)"
 if [[ -z "$backup_marker" ]]; then
   printf 'Prior application backup did not retain the marker file. Backup directories:\n' >&2
   find "$HOME/.local/opt" -maxdepth 2 -type d -name 'dread-universal.backup.*' -print >&2
