@@ -20,6 +20,12 @@ use std::{
 pub struct GpuDevice {
     pub vendor: String,
     pub name: String,
+    /// Stable provider identity where available (for example NVIDIA GPU UUID).
+    pub device_id: Option<String>,
+    /// Current enumeration index; useful for display, not a persistent identity.
+    pub device_index: Option<u32>,
+    /// PCI address such as 00000000:01:00.0 when exposed by the driver.
+    pub pci_bus_id: Option<String>,
     pub compute_capability: Option<String>,
     pub vram_mib: Option<u64>,
     pub vram_used_mib: Option<u64>,
@@ -145,33 +151,69 @@ fn run_probe(program: &Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+fn optional_csv_field(fields: &[&str], index: usize) -> Option<String> {
+    fields
+        .get(index)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("N/A"))
+        .map(ToString::to_string)
+}
+
 fn parse_nvidia_csv(output: &str) -> Vec<GpuDevice> {
     output
         .lines()
         .filter_map(|line| {
             let fields = line.split(',').map(str::trim).collect::<Vec<_>>();
-            if fields.len() < 12 || fields[0].is_empty() {
+            // Preferred query format prefixes the stable UUID and PCI address.
+            // Legacy format is accepted for older query fixtures and fallback tools.
+            let has_identity = fields.len() >= 15
+                && fields.get(3).is_some_and(|name| {
+                    name.to_ascii_lowercase().contains("nvidia")
+                        || name.to_ascii_lowercase().contains("geforce")
+                        || name.to_ascii_lowercase().contains("tesla")
+                        || name.to_ascii_lowercase().contains("quadro")
+                        || name.to_ascii_lowercase().contains("rtx")
+                        || name.to_ascii_lowercase().contains("titan")
+                });
+            let (device_index, device_id, pci_bus_id, offset) = if has_identity {
+                (
+                    fields.first().and_then(|value| value.parse::<u32>().ok()),
+                    optional_csv_field(&fields, 1),
+                    optional_csv_field(&fields, 2),
+                    3usize,
+                )
+            } else {
+                (None, None, None, 0usize)
+            };
+            if fields.len() < offset + 12 {
                 return None;
             }
+            let name = fields[offset].trim();
+            if name.is_empty() || name.eq_ignore_ascii_case("N/A") {
+                return None;
+            }
+            let value = |index: usize| fields.get(offset + index).copied().unwrap_or("");
             Some(GpuDevice {
                 vendor: "nvidia".into(),
-                name: fields[0].into(),
-                compute_capability: fields
-                    .get(12)
-                    .filter(|value| !value.is_empty() && **value != "N/A")
-                    .map(|value| (*value).to_string()),
-                vram_mib: fields[1].parse().ok(),
-                vram_used_mib: fields[2].parse().ok(),
-                vram_free_mib: fields[3].parse().ok(),
-                driver_version: (!fields[4].is_empty() && fields[4] != "N/A")
-                    .then(|| fields[4].to_string()),
-                pcie_link_gen: fields[5].parse().ok(),
-                pcie_link_width: fields[6].parse().ok(),
-                pcie_link_gen_max: fields[7].parse().ok(),
-                pcie_link_width_max: fields[8].parse().ok(),
-                utilization_percent: fields[9].parse().ok(),
-                temperature_c: fields[10].parse().ok(),
-                power_draw_mw: fields[11]
+                name: name.into(),
+                device_id,
+                device_index,
+                pci_bus_id,
+                compute_capability: optional_csv_field(
+                    &fields,
+                    if has_identity { offset + 12 } else { 12 },
+                ),
+                vram_mib: value(1).parse().ok(),
+                vram_used_mib: value(2).parse().ok(),
+                vram_free_mib: value(3).parse().ok(),
+                driver_version: optional_csv_field(&fields, offset + 4),
+                pcie_link_gen: value(5).parse().ok(),
+                pcie_link_width: value(6).parse().ok(),
+                pcie_link_gen_max: value(7).parse().ok(),
+                pcie_link_width_max: value(8).parse().ok(),
+                utilization_percent: value(9).parse().ok(),
+                temperature_c: value(10).parse().ok(),
+                power_draw_mw: value(11)
                     .parse::<f64>()
                     .ok()
                     .filter(|watts| watts.is_finite() && *watts >= 0.0)
@@ -185,7 +227,7 @@ fn nvidia_devices(binary: &Path) -> Vec<GpuDevice> {
     if let Some(output) = run_probe(
         binary,
         &[
-            "--query-gpu=name,memory.total,memory.used,memory.free,driver_version,pcie.link.gen.current,pcie.link.width.current,pcie.link.gen.max,pcie.link.width.max,utilization.gpu,temperature.gpu,power.draw,compute_cap",
+            "--query-gpu=index,uuid,pci.bus_id,name,memory.total,memory.used,memory.free,driver_version,pcie.link.gen.current,pcie.link.width.current,pcie.link.gen.max,pcie.link.width.max,utilization.gpu,temperature.gpu,power.draw,compute_cap",
             "--format=csv,noheader,nounits",
         ],
     ) {
@@ -200,7 +242,7 @@ fn nvidia_devices(binary: &Path) -> Vec<GpuDevice> {
     if let Some(output) = run_probe(
         binary,
         &[
-            "--query-gpu=name,memory.total,memory.used,memory.free,driver_version,pcie.link.gen.current,pcie.link.width.current,pcie.link.gen.max,pcie.link.width.max,utilization.gpu,temperature.gpu,power.draw",
+            "--query-gpu=index,uuid,pci.bus_id,name,memory.total,memory.used,memory.free,driver_version,pcie.link.gen.current,pcie.link.width.current,pcie.link.gen.max,pcie.link.width.max,utilization.gpu,temperature.gpu,power.draw",
             "--format=csv,noheader,nounits",
         ],
     ) {
@@ -213,7 +255,7 @@ fn nvidia_devices(binary: &Path) -> Vec<GpuDevice> {
     let Some(output) = run_probe(
         binary,
         &[
-            "--query-gpu=name,memory.total",
+            "--query-gpu=index,uuid,pci.bus_id,name,memory.total",
             "--format=csv,noheader,nounits",
         ],
     ) else {
