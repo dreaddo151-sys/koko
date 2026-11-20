@@ -36,11 +36,19 @@ pub struct EndpointProbe<T> {
 
 impl<T> EndpointProbe<T> {
     fn available(data: T) -> Self {
-        Self { status: "available".into(), data: Some(data), error: None }
+        Self {
+            status: "available".into(),
+            data: Some(data),
+            error: None,
+        }
     }
 
     fn unavailable(error: impl Into<String>) -> Self {
-        Self { status: "unavailable".into(), data: None, error: Some(error.into()) }
+        Self {
+            status: "unavailable".into(),
+            data: None,
+            error: Some(error.into()),
+        }
     }
 }
 
@@ -94,7 +102,10 @@ pub struct ComfyUiMonitor {
 impl ComfyUiClient {
     pub fn new(raw_url: impl AsRef<str>) -> Result<Self> {
         let base_url = Url::parse(raw_url.as_ref()).context("Invalid ComfyUI URL")?;
-        ensure!(base_url.scheme() == "http", "ComfyUI must use loopback HTTP");
+        ensure!(
+            base_url.scheme() == "http",
+            "ComfyUI must use loopback HTTP"
+        );
         ensure!(base_url.port().is_some(), "ComfyUI URL must specify a port");
         ensure!(
             base_url.username().is_empty()
@@ -106,9 +117,17 @@ impl ComfyUiClient {
         );
         let loopback = base_url
             .host_str()
-            .and_then(|host| host.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>().ok())
+            .and_then(|host| {
+                host.trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<IpAddr>()
+                    .ok()
+            })
             .is_some_and(|ip| ip.is_loopback());
-        ensure!(loopback, "ComfyUI endpoint must use a loopback IP address");
+        ensure!(
+            loopback,
+            "ComfyUI endpoint must use a loopback IP address"
+        );
 
         let http = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -120,8 +139,8 @@ impl ComfyUiClient {
     }
 
     pub fn from_env() -> Result<Self> {
-        let url = std::env::var("DREAD_COMFYUI_URL")
-            .unwrap_or_else(|_| DEFAULT_COMFYUI_URL.to_string());
+        let url =
+            std::env::var("DREAD_COMFYUI_URL").unwrap_or_else(|_| DEFAULT_COMFYUI_URL.to_string());
         Self::new(url)
     }
 
@@ -130,16 +149,35 @@ impl ComfyUiClient {
     }
 
     async fn get_json(&self, path_and_query: &str) -> Result<Value> {
-        let url = self.base_url.join(path_and_query).context("Invalid ComfyUI API path")?;
-        let mut response = self.http.get(url).timeout(REQUEST_TIMEOUT).send().await
+        let url = self
+            .base_url
+            .join(path_and_query)
+            .context("Invalid ComfyUI API path")?;
+        let mut response = self
+            .http
+            .get(url)
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
             .context("ComfyUI request failed")?;
         let status = response.status();
-        ensure!(status.is_success(), "ComfyUI returned HTTP {}", status.as_u16());
-        if response.content_length().is_some_and(|length| length > MAX_RESPONSE_BYTES as u64) {
+        ensure!(
+            status.is_success(),
+            "ComfyUI returned HTTP {}",
+            status.as_u16()
+        );
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+        {
             anyhow::bail!("ComfyUI response exceeded the 2 MiB limit");
         }
         let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.context("Could not read ComfyUI response")? {
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .context("Could not read ComfyUI response")?
+        {
             ensure!(
                 body.len().saturating_add(chunk.len()) <= MAX_RESPONSE_BYTES,
                 "ComfyUI response exceeded the 2 MiB limit"
@@ -163,7 +201,9 @@ impl ComfyUiClient {
         let queue = match queue_result {
             Ok(value) => match parse_queue(&value) {
                 Some(snapshot) => EndpointProbe::available(snapshot),
-                None => EndpointProbe::unavailable("ComfyUI queue response has an unexpected shape"),
+                None => {
+                    EndpointProbe::unavailable("ComfyUI queue response has an unexpected shape")
+                }
             },
             Err(error) => EndpointProbe::unavailable(error.to_string()),
         };
@@ -175,7 +215,10 @@ impl ComfyUiClient {
             system.status == "available",
             queue.status == "available",
             history.status == "available",
-        ].into_iter().filter(|value| *value).count();
+        ]
+        .into_iter()
+        .filter(|value| *value)
+        .count();
         let status = match available {
             3 => "online",
             0 => "offline",
@@ -205,86 +248,121 @@ fn parse_queue(value: &Value) -> Option<QueueSnapshot> {
 
 fn parse_queue_items(value: &Value) -> Option<Vec<QueueJob>> {
     let items = value.as_array()?;
-    Some(items.iter().take(256).filter_map(|item| {
-        let fields = item.as_array()?;
-        let prompt_id = fields.iter().find_map(Value::as_str)?;
-        if prompt_id.is_empty() || prompt_id.len() > 256 {
-            return None;
-        }
-        let queue_position = fields.iter().find_map(Value::as_u64);
-        Some(QueueJob { queue_position, prompt_id: prompt_id.to_string() })
-    }).collect())
+    Some(
+        items
+            .iter()
+            .take(256)
+            .filter_map(|item| {
+                let fields = item.as_array()?;
+                let prompt_id = fields.iter().find_map(Value::as_str)?;
+                if prompt_id.is_empty() || prompt_id.len() > 256 {
+                    return None;
+                }
+                let queue_position = fields.iter().find_map(Value::as_u64);
+                Some(QueueJob {
+                    queue_position,
+                    prompt_id: prompt_id.to_string(),
+                })
+            })
+            .collect(),
+    )
 }
 
 fn parse_history(value: &Value) -> Vec<HistoryJob> {
-    let Some(object) = value.as_object() else { return Vec::new(); };
-    let mut jobs = object.iter().take(MAX_HISTORY_ITEMS).filter_map(|(prompt_id, job)| {
-        if prompt_id.is_empty() || prompt_id.len() > 256 || !job.is_object() {
-            return None;
-        }
-        let status_obj = job.get("status").unwrap_or(&Value::Null);
-        let completed = status_obj.get("completed").and_then(Value::as_bool).unwrap_or(false);
-        let status = status_obj.get("status_str").and_then(Value::as_str)
-            .or_else(|| status_obj.get("status").and_then(Value::as_str))
-            .unwrap_or(if completed { "completed" } else { "unknown" });
-        let mut outputs = Vec::new();
-        if let Some(nodes) = job.get("outputs").and_then(Value::as_object) {
-            'nodes: for (node_id, node) in nodes {
-                for (key, media_type) in [
-                    ("images", "image"),
-                    ("videos", "video"),
-                    ("gifs", "gif"),
-                    ("audio", "audio"),
-                ] {
-                    let Some(files) = node.get(key).and_then(Value::as_array) else { continue; };
-                    for file in files {
-                        if outputs.len() >= MAX_OUTPUT_ITEMS_PER_JOB {
-                            break 'nodes;
-                        }
-                        let Some(filename) = file.get("filename").and_then(Value::as_str) else {
+    let Some(object) = value.as_object() else {
+        return Vec::new();
+    };
+    let mut jobs = object
+        .iter()
+        .take(MAX_HISTORY_ITEMS)
+        .filter_map(|(prompt_id, job)| {
+            if prompt_id.is_empty() || prompt_id.len() > 256 || !job.is_object() {
+                return None;
+            }
+            let status_obj = job.get("status").unwrap_or(&Value::Null);
+            let completed = status_obj
+                .get("completed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let status = status_obj
+                .get("status_str")
+                .and_then(Value::as_str)
+                .or_else(|| status_obj.get("status").and_then(Value::as_str))
+                .unwrap_or(if completed { "completed" } else { "unknown" });
+            let mut outputs = Vec::new();
+            if let Some(nodes) = job.get("outputs").and_then(Value::as_object) {
+                'nodes: for (node_id, node) in nodes {
+                    for (key, media_type) in [
+                        ("images", "image"),
+                        ("videos", "video"),
+                        ("gifs", "gif"),
+                        ("audio", "audio"),
+                    ] {
+                        let Some(files) = node.get(key).and_then(Value::as_array) else {
                             continue;
                         };
-                        if filename.is_empty() || filename.len() > 512 {
-                            continue;
+                        for file in files {
+                            if outputs.len() >= MAX_OUTPUT_ITEMS_PER_JOB {
+                                break 'nodes;
+                            }
+                            let Some(filename) = file.get("filename").and_then(Value::as_str) else {
+                                continue;
+                            };
+                            if filename.is_empty() || filename.len() > 512 {
+                                continue;
+                            }
+                            let subfolder =
+                                file.get("subfolder").and_then(Value::as_str).unwrap_or("");
+                            if subfolder.len() > 512 {
+                                continue;
+                            }
+                            outputs.push(MediaOutput {
+                                node_id: node_id.chars().take(64).collect(),
+                                media_type: media_type.into(),
+                                filename: filename.to_string(),
+                                subfolder: subfolder.to_string(),
+                            });
                         }
-                        let subfolder = file.get("subfolder").and_then(Value::as_str).unwrap_or("");
-                        if subfolder.len() > 512 {
-                            continue;
-                        }
-                        outputs.push(MediaOutput {
-                            node_id: node_id.chars().take(64).collect(),
-                            media_type: media_type.into(),
-                            filename: filename.to_string(),
-                            subfolder: subfolder.to_string(),
-                        });
                     }
                 }
             }
-        }
-        let mut errors = Vec::new();
-        if let Some(messages) = status_obj.get("messages").and_then(Value::as_array) {
-            for message in messages.iter().take(64) {
-                let Some(fields) = message.as_array() else { continue; };
-                let event_type = fields.first().and_then(Value::as_str).unwrap_or("unknown");
-                if event_type.len() > 128 {
-                    continue;
+            let mut errors = Vec::new();
+            if let Some(messages) = status_obj.get("messages").and_then(Value::as_array) {
+                for message in messages.iter().take(64) {
+                    let Some(fields) = message.as_array() else {
+                        continue;
+                    };
+                    let event_type = fields.first().and_then(Value::as_str).unwrap_or("unknown");
+                    if event_type.len() > 128 {
+                        continue;
+                    }
+                    let message = fields
+                        .get(1)
+                        .and_then(Value::as_object)
+                        .and_then(|data| {
+                            data.get("exception_message").or_else(|| data.get("message"))
+                        })
+                        .and_then(Value::as_str)
+                        .map(|text| {
+                            text.chars()
+                                .take(MAX_ERROR_MESSAGE_CHARS)
+                                .collect::<String>()
+                        });
+                    errors.push(MediaError {
+                        event_type: event_type.into(),
+                        message,
+                    });
                 }
-                let message = fields.get(1).and_then(Value::as_object).and_then(|data| {
-                    data.get("exception_message").or_else(|| data.get("message"))
-                }).and_then(Value::as_str).map(|text| {
-                    text.chars().take(MAX_ERROR_MESSAGE_CHARS).collect::<String>()
-                });
-                errors.push(MediaError { event_type: event_type.into(), message });
             }
-        }
-        Some(HistoryJob {
-            prompt_id: prompt_id.to_string(),
-            status: status.chars().take(64).collect(),
-            completed,
-            outputs,
-            errors,
+            Some(HistoryJob {
+                prompt_id: prompt_id.to_string(),
+                status: status.chars().take(64).collect(),
+                completed,
+                outputs,
+                errors,
+            })
         })
-    }).collect::<Vec<_>>();
+        .collect::<Vec<_>>();
     jobs.sort_by(|left, right| left.prompt_id.cmp(&right.prompt_id));
     jobs
 }
