@@ -186,6 +186,55 @@ impl ExecutionGate {
         })
     }
 
+    /// Run a long-lived managed operation under the shared admission and concurrency limits.
+    ///
+    /// This is intended for provider workers whose own lifecycle polls for terminal
+    /// state and performs provider-specific cancellation. It deliberately does not
+    /// apply the generic attempt timeout or automatic retry: dropping a remote
+    /// request can leave non-idempotent provider work running after DREAD has lost
+    /// track of it. The supplied operation must observe cancellation and return only
+    /// after it has confirmed or completed provider-side cleanup.
+    pub async fn run_managed<T, F, Fut>(
+        &self,
+        task_id: impl Into<String>,
+        mut cancellation: watch::Receiver<bool>,
+        operation: F,
+    ) -> Result<T, ExecutionError>
+    where
+        T: Send,
+        F: FnOnce(watch::Receiver<bool>) -> Fut + Send,
+        Fut: Future<Output = Result<T, String>> + Send,
+    {
+        let task_id = task_id.into();
+        if task_id.trim().is_empty() {
+            return Err(ExecutionError::InvalidTaskId);
+        }
+
+        let _admission = self.try_admit()?;
+        let _permit = loop {
+            if *cancellation.borrow() {
+                return Err(ExecutionError::Cancelled { attempts: 0 });
+            }
+            tokio::select! {
+                permit = Arc::clone(&self.semaphore).acquire_owned() => {
+                    break permit.map_err(|_| ExecutionError::SchedulerClosed)?;
+                }
+                changed = cancellation.changed() => {
+                    if changed.is_err() || *cancellation.borrow() {
+                        return Err(ExecutionError::Cancelled { attempts: 0 });
+                    }
+                }
+            }
+        };
+
+        operation(cancellation.clone())
+            .await
+            .map_err(|message| ExecutionError::RunnerFailed {
+                attempts: 1,
+                message,
+            })
+    }
+
     /// Run a caller-supplied operation under bounded admission and concurrency.
     ///
     /// The watch sender cancels by setting true. A dropped sender also cancels.
@@ -555,6 +604,62 @@ mod tests {
             ExecutionGate::new(invalid_backoff).err(),
             Some(ConfigError::MaxRetryBackoffBelowInitial)
         );
+    }
+
+
+    #[tokio::test]
+    async fn managed_runner_shares_admission_and_concurrency_with_regular_runners() {
+        let gate = Arc::new(ExecutionGate::new(config(1, 2)).unwrap());
+        let release = Arc::new(Notify::new());
+        let (managed_started_tx, managed_started_rx) = oneshot::channel();
+        let managed_gate = Arc::clone(&gate);
+        let managed_release = Arc::clone(&release);
+
+        let managed = tokio::spawn(async move {
+            managed_gate
+                .run_managed("agent-task", watch::channel(false).1, move |_| async move {
+                    let _ = managed_started_tx.send(());
+                    managed_release.notified().await;
+                    Ok(json!({"managed": true}))
+                })
+                .await
+        });
+        managed_started_rx.await.unwrap();
+
+        let (regular_started_tx, mut regular_started_rx) = oneshot::channel();
+        let regular_gate = Arc::clone(&gate);
+        let regular = tokio::spawn(async move {
+            let mut started_tx = Some(regular_started_tx);
+            regular_gate
+                .run("builtin-task", watch::channel(false).1, move |_, _| {
+                    let started = started_tx.take();
+                    async move {
+                        if let Some(started) = started {
+                            let _ = started.send(());
+                        }
+                        Ok(json!({"regular": true}))
+                    }
+                })
+                .await
+        });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut regular_started_rx)
+                .await
+                .is_err(),
+            "the regular task must wait while the managed provider task owns the shared permit"
+        );
+
+        release.notify_one();
+        assert!(managed.await.unwrap().is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), &mut regular_started_rx)
+                .await
+                .unwrap()
+                .is_ok()
+        );
+        assert!(regular.await.unwrap().is_ok());
+        assert_eq!(gate.admitted_count(), 0);
     }
 
     #[tokio::test]
