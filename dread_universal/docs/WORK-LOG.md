@@ -620,3 +620,15 @@ Separate previously recorded live evidence remains valid at its own timestamps: 
 - Updated the controlling master plan and implementation matrix with GGUF header parsing, safe in-root model-cache symlinks and environment-based user roots. Workflow and plugin manifest discovery still rejects symlinks; they do not need Hugging Face cache aliases.
 - Latest source head after these changes and docs: see current PR #14 head. No fresh complete green CI run has yet been confirmed for that latest head. Do not mark strict Clippy, Rust tests, release build, installer tests or signed release workflow as passing until current-head Actions confirms them.
 - All changes remain isolated to draft PR #14 stacked on PR #13/#12. No workstation was accessed or changed; no package install, service action, model load/unload, GPU lease, agent execution or ComfyUI render occurred.
+
+
+## Full Ubuntu CI green after installer-test cleanup — 2026-11-21
+
+- Current PR #14 head `977024fc5d05f5799e74e3604a404bfb0dbd5442` passed GitHub Actions run #1149 (`44840250093`) across every job.
+- Rust / Ubuntu 24.04: `cargo fmt --all -- --check` passed; strict `cargo clippy --workspace --all-targets --locked -- -D warnings` passed; `cargo test --workspace --locked` passed for the full workspace; `cargo build --workspace --release --locked` passed; API release binary artifact uploaded.
+- Web / Ubuntu 24.04: committed npm lockfile verified; `npm ci --ignore-scripts --no-audit --no-fund` passed; production `npm run build` passed and web artifact uploaded.
+- Rust-job integration checks passed: shell syntax for installer/package/release scripts, signed-release verifier failure-path tests, portable install migration/upgrade/rollback including watchdog-unit preservation, Python bridge/importer tests (the new watchdog tests run under this test discovery), and the static single-owner GPU boundary guard.
+- Ubuntu package job passed: assembled `.deb` and portable tarball, verified package checksums and contents, then installed and smoke-tested packaged API plus production console. All three jobs concluded success.
+- The previous installer failure was a test-fixture defect, not an installer defect. `scripts/test_install_user.sh` had accumulated 23 duplicate copies of the upgrade/rollback tail and an accidental stray command after the first full test flow. Replaced it with one clean 213-line regression flow, made the mock systemctl logger optional for direct calls, and extended failed-upgrade rollback checks to include both watchdog service and timer files. Run #1149 passed the corrected test.
+- Evidence boundary: this validates Ubuntu 24.04 CI and a disposable package smoke-test environment only. It does not prove install/upgrade on the user's physical workstation, Windows/macOS/other distro support, real dual-GPU contention, signed tagged release publication, or live media/provider task acceptance.
+- PR #14 remains draft/open and unmerged. No local workstation service, ComfyUI instance, Python GPU Supervisor, model file, database or user output was modified.
