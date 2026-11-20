@@ -7622,8 +7622,11 @@ mod tests {
     #[test]
     fn token_usage_aggregation_counts_only_complete_provider_counters() {
         let mut totals = TokenUsageTotals::default();
-        totals.observe(&json!({"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}));
-        totals.observe(&json!({"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}));
+        totals.observe(
+            &json!({"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}),
+        );
+        totals
+            .observe(&json!({"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}));
         totals.observe(&json!({"usage":{"prompt_tokens":1,"completion_tokens":2}}));
         totals.observe(&json!({"choices":[{"message":{"content":"no usage"}}]}));
         assert_eq!(totals.prompt_tokens, 17);
@@ -7654,7 +7657,12 @@ mod tests {
         assert_eq!(value["measured_responses"], 0);
         assert_eq!(value["responses_without_usage"], 0);
         assert_eq!(value["scan_limit"], 10000);
-        assert!(value["note"].as_str().unwrap().contains("no token estimates"));
+        assert!(
+            value["note"]
+                .as_str()
+                .unwrap()
+                .contains("no token estimates")
+        );
         server.abort();
     }
 
@@ -7712,7 +7720,9 @@ mod tests {
                     .method("POST")
                     .uri("/api/prompt/enhance")
                     .header("content-type", "application/json")
-                    .body(Body::from(json!({"model":"qwen3.8:27b","prompt":"  "}).to_string()))
+                    .body(Body::from(
+                        json!({"model":"qwen3.8:27b","prompt":"  "}).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -7725,7 +7735,9 @@ mod tests {
                     .method("POST")
                     .uri("/api/prompt/enhance")
                     .header("content-type", "application/json")
-                    .body(Body::from(json!({"model":"not-in-gateway","prompt":"improve this"}).to_string()))
+                    .body(Body::from(
+                        json!({"model":"not-in-gateway","prompt":"improve this"}).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
