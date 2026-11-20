@@ -155,6 +155,21 @@ The read-only host profile also enumerates persistent and network-mounted filesy
 
 GitHub Actions currently validates Ubuntu 24.04 x86_64. Ubuntu is the first supported/verified packaging baseline, not the product boundary. The universal architecture must not depend on Ubuntu-specific filesystem layouts, fixed GPU counts or NVIDIA-only inventory. Add Windows/macOS and other Linux platform adapters and CI before advertising those platforms as supported. The existing release workflow creates an Ubuntu x86_64 build bundle and SHA-256 manifest. A production package, signed updater, atomic activation and verified rollback remain required before calling the package or updater complete.
 
+## Optional Rust API watchdog
+
+The Ubuntu bundle includes a bounded watchdog for the DREAD Rust API only. It probes the configured loopback `/health` URL and, only when its user timer has been explicitly enabled, can restart `dread-universal.service`. It never targets ComfyUI, llama.cpp, the Python GPU Supervisor/bridge or the legacy Python Hub.
+
+Policy: at most 3 restart requests in a rolling 15-minute window, at least 60 seconds between attempts, 2-second health probe timeout, 4 KiB response limit, private state and incident files. After the ceiling is reached it escalates and stops restarting. The default manual invocation is dry-run; the systemd oneshot uses `--apply` only when an operator enables the timer.
+
+The installer places `dread-watchdog.service` and `dread-watchdog.timer` in the user unit directory but leaves the timer disabled. To opt in after reviewing the unit and policy:
+
+```bash
+systemctl --user enable --now dread-watchdog.timer
+systemctl --user list-timers dread-watchdog.timer
+```
+
+Disable it with `systemctl --user disable --now dread-watchdog.timer`. Incidents are stored privately under `~/.local/state/dread-universal/`. Existing customized watchdog units are preserved during upgrades. This is bounded service recovery, not a general repair engine.
+
 ## GPU ownership
 
 The Python GPU Supervisor is the sole authority for GPU leases and process lifecycle. Rust discovers models through the local gateway and sends approved inference through the authenticated bridge. Never call the tensor upstream directly from Rust or start a second llama-server. Do not stop ComfyUI as part of DREAD development, installation, update or repair.
