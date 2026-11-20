@@ -8152,7 +8152,10 @@ mod tests {
         );
         assert_eq!(completed["item"]["result"]["metrics"]["total_attempts"], 2);
         assert_eq!(
-            completed["item"]["result"]["unresolved_nodes"].as_array().unwrap().len(),
+            completed["item"]["result"]["unresolved_nodes"]
+                .as_array()
+                .unwrap()
+                .len(),
             0
         );
         server.abort();
