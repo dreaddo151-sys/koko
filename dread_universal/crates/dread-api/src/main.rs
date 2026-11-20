@@ -8120,4 +8120,48 @@ mod tests {
     fn timestamp_is_unix_epoch_seconds() {
         assert!(now_epoch() > 1_700_000_000);
     }
+
+    #[tokio::test]
+    async fn local_discovery_routes_require_bearer_auth_and_return_bounded_inventory() {
+        let (router, server) = test_app_with_auth().await;
+        let protected_routes = [
+            "/api/models/local",
+            "/api/media/comfyui/monitor",
+            "/api/media/workflows/discover",
+            "/api/extensions/discover",
+        ];
+
+        for uri in protected_routes {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        }
+
+        let authorized = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/models/local")
+                    .header(AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authorized.status(), StatusCode::OK);
+        let body = to_bytes(authorized.into_body(), usize::MAX).await.unwrap();
+        let inventory: Value = serde_json::from_slice(&body).unwrap();
+        assert!(inventory["models"].is_array());
+        assert!(inventory["scanned_entries"].is_number());
+        server.abort();
+    }
+
 }
