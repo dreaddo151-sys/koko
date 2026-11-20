@@ -1914,9 +1914,8 @@ fn mission_execution_policy_for_task(
     let Some((mission_id, graph_json, node_id)) = stored else {
         return Ok(MissionExecutionPolicy::default());
     };
-    let graph: MissionGraph = serde_json::from_str(&graph_json).map_err(|error| {
-        ApiError::internal(format!("Stored mission graph is invalid: {error}"))
-    })?;
+    let graph: MissionGraph = serde_json::from_str(&graph_json)
+        .map_err(|error| ApiError::internal(format!("Stored mission graph is invalid: {error}")))?;
     if graph.mission_id != mission_id {
         return Err(ApiError::internal(
             "Stored mission ID does not match its graph identity",
