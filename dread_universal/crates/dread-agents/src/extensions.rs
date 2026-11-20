@@ -389,7 +389,7 @@ mod tests {
             r#"{"name":"sample-plugin","displayName":"Sample Plugin","version":"1.2.3","skills":["a"],"agents":["b"],"mcpServers":{"demo":{}},"hooks":{"run":"evil.sh"}}"#,
         ).unwrap();
 
-        let inventory = discover_local_plugins_in(&[root.clone()], 5, 100);
+        let inventory = discover_local_plugins_in(std::slice::from_ref(&root), 5, 100);
         assert_eq!(inventory.plugins.len(), 1);
         let item = &inventory.plugins[0];
         assert_eq!(item.ecosystem, "claude");
@@ -411,7 +411,7 @@ mod tests {
             r#"{"name":"direct-plugin"}"#,
         )
         .unwrap();
-        let inventory = discover_local_plugins_in(&[root.clone()], 3, 100);
+        let inventory = discover_local_plugins_in(std::slice::from_ref(&root), 3, 100);
         assert_eq!(inventory.plugins.len(), 1);
         assert_eq!(inventory.plugins[0].ecosystem, "cursor");
         fs::remove_dir_all(root).unwrap();
@@ -422,7 +422,7 @@ mod tests {
         let root = temporary_directory("invalid");
         fs::create_dir_all(root.join(".claude-plugin")).unwrap();
         fs::write(root.join(".claude-plugin/plugin.json"), "{").unwrap();
-        let inventory = discover_local_plugins_in(&[root.clone()], 3, 100);
+        let inventory = discover_local_plugins_in(std::slice::from_ref(&root), 3, 100);
         assert!(inventory.plugins.is_empty());
         assert!(!inventory.warnings.is_empty());
         fs::remove_dir_all(root).unwrap();
@@ -441,7 +441,7 @@ mod tests {
             root.join(".claude-plugin/plugin.json"),
         )
         .unwrap();
-        let inventory = discover_local_plugins_in(&[root.clone()], 3, 100);
+        let inventory = discover_local_plugins_in(std::slice::from_ref(&root), 3, 100);
         assert!(inventory.plugins.is_empty());
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
