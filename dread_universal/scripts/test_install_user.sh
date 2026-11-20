@@ -9,12 +9,14 @@ HOME="$TMP/home"
 PREFIX="$HOME/.local/opt/dread-universal"
 MOCK_BIN="$TMP/mock-bin"
 STATE="$TMP/systemd-state"
+SYSTEMCTL_LOG="$TMP/systemctl.log"
 mkdir -p "$HOME" "$MOCK_BIN" "$PREFIX/config" "$PREFIX/data" "$PREFIX/bin" "$PREFIX/web/dist"
 
 cat > "$MOCK_BIN/systemctl" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$1" == "--user" ]] || exit 2
+printf '%s\n' "$*" >> "$MOCK_SYSTEMCTL_LOG"
 shift
 case "$1" in
   is-active)
@@ -77,6 +79,7 @@ make_bundle() {
   local version="$1"
   local bundle="$TMP/bundle-$version"
   mkdir -p "$bundle/bin" "$bundle/web/dist/assets" "$bundle/config" "$bundle/scripts" "$bundle/docs"
+  mkdir -p "$bundle/systemd"
   printf '#!/usr/bin/env bash\necho %s\n' "$version" > "$bundle/bin/dread-universal"
   chmod +x "$bundle/bin/dread-universal"
   printf '<div id="root"></div>\n' > "$bundle/web/dist/index.html"
@@ -86,6 +89,9 @@ make_bundle() {
   printf '# docs\n' > "$bundle/README.md"
   printf '# docs\n' > "$bundle/docs/README.md"
   printf '#!/usr/bin/env bash\n' > "$bundle/scripts/helper.sh"
+  install -m 0755 "$ROOT/scripts/dread_watchdog.py" "$bundle/scripts/dread_watchdog.py"
+  install -m 0644 "$ROOT/systemd/dread-watchdog.service" "$bundle/systemd/dread-watchdog.service"
+  install -m 0644 "$ROOT/systemd/dread-watchdog.timer" "$bundle/systemd/dread-watchdog.timer"
   install -m 0755 "$ROOT/scripts/install-user.sh" "$bundle/install-user.sh"
   printf 'test\n' > "$bundle/.env.example"
   printf '%s\n' "$bundle"
@@ -98,6 +104,7 @@ run_installer() {
   MOCK_SYSTEMD_STATE="$STATE" \
   MOCK_SYSTEMD_ENABLED="$TMP/systemd-enabled" \
   MOCK_UNIT_FILE="$HOME/.config/systemd/user/dread-universal.service" \
+  MOCK_SYSTEMCTL_LOG="$SYSTEMCTL_LOG" \
   PATH="$MOCK_BIN:$PATH" \
   bash "$bundle/install-user.sh" 2>/dev/null
 }
@@ -117,10 +124,24 @@ grep -q '^DREAD_COMFYUI_WORKFLOW_ROOTS=/workflows$' "$HOME/.config/dread-univers
 grep -q '^DREAD_PLUGIN_ROOTS=/plugins$' "$HOME/.config/dread-universal/dread.env"
 grep -q '^DREAD_AGENT_MANIFEST_ROOTS=/agents$' "$HOME/.config/dread-universal/dread.env"
 ! grep -q '^Environment=DREAD_GPU_GATEWAY_URL=' "$HOME/.config/systemd/user/dread-universal.service"
+WATCHDOG_SERVICE_FILE="$HOME/.config/systemd/user/dread-watchdog.service"
+WATCHDOG_TIMER_FILE="$HOME/.config/systemd/user/dread-watchdog.timer"
+[[ -f "$WATCHDOG_SERVICE_FILE" && -f "$WATCHDOG_TIMER_FILE" ]]
+grep -Fq "$PREFIX/scripts/dread_watchdog.py --apply" "$WATCHDOG_SERVICE_FILE"
+grep -Fq "$HOME/.local/state/dread-universal" "$WATCHDOG_SERVICE_FILE"
+grep -Fq 'OnUnitActiveSec=60s' "$WATCHDOG_TIMER_FILE"
+! grep -q 'enable --now dread-watchdog.timer' "$SYSTEMCTL_LOG"
+[[ "$(stat -c '%a' "$WATCHDOG_SERVICE_FILE")" == 600 ]]
+[[ "$(stat -c '%a' "$WATCHDOG_TIMER_FILE")" == 600 ]]
 [[ "$(stat -c '%a' "$HOME/.config/dread-universal/dread.env")" == 600 ]]
 [[ "$(cat "$STATE")" == active ]]
+grep -q 'operator-watchdog-override' "$HOME/.config/systemd/user/dread-watchdog.service"
+grep -q 'operator-watchdog-timer-override' "$HOME/.config/systemd/user/dread-watchdog.timer"
 
 printf 'keep-backup-marker\n' > "$PREFIX/previous-release-marker"
+# Preserve operator-managed watchdog policy through a normal upgrade.
+printf '[Service]\n# operator-watchdog-override\n' > "$HOME/.config/systemd/user/dread-watchdog.service"
+printf '[Timer]\n# operator-watchdog-timer-override\n' > "$HOME/.config/systemd/user/dread-watchdog.timer"
 # A legacy per-app .env may still exist alongside an already-created per-user
 # config. Missing allowlisted keys must be merged without replacing user values.
 printf 'DREAD_COMFYUI_URL=http://127.0.0.1:8999\nDREAD_COMFYUI_USER_ROOT=/custom/comfyui-user\n' > "$PREFIX/.env"
