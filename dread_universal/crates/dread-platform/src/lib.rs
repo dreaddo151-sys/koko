@@ -246,47 +246,52 @@ fn nvidia_devices(binary: &Path) -> Vec<GpuDevice> {
         }
     }
 
-    let Some(output) = run_probe(
+    if let Some(output) = run_probe(
         binary,
         &[
             "--query-gpu=index,uuid,pci.bus_id,name,memory.total",
             "--format=csv,noheader,nounits",
         ],
-    ) else {
-        return Vec::new();
-    };
-    output
-        .lines()
-        .filter_map(|line| {
-            let fields = line.split(',').map(str::trim).collect::<Vec<_>>();
-            if fields.len() < 5 {
-                return None;
-            }
-            let name = fields[3];
-            if name.is_empty() || name.eq_ignore_ascii_case("N/A") {
-                return None;
-            }
-            Some(GpuDevice {
-                vendor: "nvidia".into(),
-                name: name.into(),
-                device_id: optional_csv_field(&fields, 1),
-                device_index: fields[0].parse().ok(),
-                pci_bus_id: optional_csv_field(&fields, 2),
-                compute_capability: None,
-                vram_mib: fields[4].parse().ok(),
-                vram_used_mib: None,
-                vram_free_mib: None,
-                driver_version: None,
-                pcie_link_gen: None,
-                pcie_link_width: None,
-                pcie_link_gen_max: None,
-                pcie_link_width_max: None,
-                utilization_percent: None,
-                temperature_c: None,
-                power_draw_mw: None,
+    ) {
+        let devices = output
+            .lines()
+            .filter_map(|line| {
+                let fields = line.split(',').map(str::trim).collect::<Vec<_>>();
+                if fields.len() < 5 {
+                    return None;
+                }
+                let name = fields[3];
+                if name.is_empty() || name.eq_ignore_ascii_case("N/A") {
+                    return None;
+                }
+                Some(GpuDevice {
+                    vendor: "nvidia".into(),
+                    name: name.into(),
+                    device_id: optional_csv_field(&fields, 1),
+                    device_index: fields[0].parse().ok(),
+                    pci_bus_id: optional_csv_field(&fields, 2),
+                    compute_capability: None,
+                    vram_mib: fields[4].parse().ok(),
+                    vram_used_mib: None,
+                    vram_free_mib: None,
+                    driver_version: None,
+                    pcie_link_gen: None,
+                    pcie_link_width: None,
+                    pcie_link_gen_max: None,
+                    pcie_link_width_max: None,
+                    utilization_percent: None,
+                    temperature_c: None,
+                    power_draw_mw: None,
+                })
             })
-        })
-        .collect()
+            .collect::<Vec<_>>();
+        if !devices.is_empty() {
+            return devices;
+        }
+    }
+
+    // Last-resort compatibility path for older nvidia-smi versions that do
+    // not expose UUID or PCI query fields. Device identity remains unknown.
     let Some(output) = run_probe(
         binary,
         &[
@@ -301,7 +306,7 @@ fn nvidia_devices(binary: &Path) -> Vec<GpuDevice> {
         .filter_map(|line| {
             let (name, memory) = line.split_once(',')?;
             let name = name.trim();
-            if name.is_empty() {
+            if name.is_empty() || name.eq_ignore_ascii_case("N/A") {
                 return None;
             }
             Some(GpuDevice {
