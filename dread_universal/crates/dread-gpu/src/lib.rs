@@ -1,3 +1,4 @@
+pub mod models;
 pub mod supervisor;
 pub use supervisor::GpuSupervisorClient;
 
