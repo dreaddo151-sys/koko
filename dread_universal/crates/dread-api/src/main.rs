@@ -3298,6 +3298,41 @@ async fn execute_agent_task(
     state: AppState,
     adapter: Arc<dyn AgentAdapter>,
     execution: AgentTaskExecution,
+    cancellation: watch::Receiver<bool>,
+) {
+    let task_id = execution.task_id.clone();
+    let worker_state = state.clone();
+    let result = state
+        .execution
+        .run_managed(
+            task_id.clone(),
+            cancellation,
+            move |cancellation| async move {
+                execute_agent_task_inner(worker_state, adapter, execution, cancellation).await;
+                Ok(())
+            },
+        )
+        .await;
+
+    if let Err(error) = result {
+        let (status, message) = match error {
+            ExecutionError::Cancelled { .. } => (
+                "cancelled",
+                "Agent task was cancelled before it acquired an execution slot".to_string(),
+            ),
+            other => (
+                "failed",
+                format!("Agent task could not enter the shared execution gate: {other:?}"),
+            ),
+        };
+        finish_agent_task(&state, &task_id, status, None, Some(message));
+    }
+}
+
+async fn execute_agent_task_inner(
+    state: AppState,
+    adapter: Arc<dyn AgentAdapter>,
+    execution: AgentTaskExecution,
     mut cancellation: watch::Receiver<bool>,
 ) {
     let AgentTaskExecution {
@@ -3517,7 +3552,7 @@ fn finish_agent_task(
         .optional()
         .ok()
         .flatten();
-    if !matches!(current.as_deref(), Some("running" | "cancelled")) {
+    if !matches!(current.as_deref(), Some("queued" | "running" | "cancelled")) {
         return;
     }
     let final_status = if current.as_deref() == Some("cancelled") {
