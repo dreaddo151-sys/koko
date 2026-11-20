@@ -1,3 +1,5 @@
+pub mod extensions;
+
 //! Provider-neutral contracts for PROJECT DREAD agent adapters and capabilities.
 //!
 //! Provider adapters are explicit, loopback-restricted clients and are not
