@@ -505,11 +505,13 @@ fn configured_agent_manifest_roots() -> Vec<std::path::PathBuf> {
         }
     }
     if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
+        roots.push(config_home.join("dread-universal/agents.d"));
         roots.push(config_home.join("dread/agents.d"));
     } else if let Some(home) = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
     {
+        roots.push(home.join(".config/dread-universal/agents.d"));
         roots.push(home.join(".config/dread/agents.d"));
     }
     if let Some(data_home) = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from) {
