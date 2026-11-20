@@ -683,6 +683,26 @@ mod tests {
     }
 
     #[test]
+    fn local_inventory_includes_parsed_gguf_metadata_without_loading_the_model() {
+        let root = temporary_directory("gguf-inventory");
+        let model_path = root.join("example.gguf");
+        fs::write(&model_path, synthetic_gguf()).unwrap();
+
+        let inventory = discover_local_models_in(std::slice::from_ref(&root), 2, 100);
+        assert_eq!(inventory.models.len(), 1);
+        let model = &inventory.models[0];
+        assert_eq!(model.status, "discovered_not_loaded");
+        assert_eq!(model.metadata_status, "parsed");
+        let metadata = model.gguf_metadata.as_ref().unwrap();
+        assert_eq!(metadata.model_name.as_deref(), Some("DREAD test model"));
+        assert_eq!(metadata.architecture.as_deref(), Some("llama"));
+        assert_eq!(metadata.context_length, Some(8_192));
+        assert!(model.metadata_error.is_none());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn finds_weight_files_and_never_claims_they_are_loaded() {
         let root = temporary_directory("inventory");
         let vae = root.join("vae");
