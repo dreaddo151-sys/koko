@@ -568,7 +568,7 @@ fn classify_file(path: &Path) -> Option<(&'static str, &'static str)> {
     }
 }
 
-fn infer_kind_from_path(path: &str, fallback: &str) -> &'static str {
+fn infer_kind_from_path<'a>(path: &str, fallback: &'a str) -> &'a str {
     let lower = path.to_ascii_lowercase();
     if lower.contains("/text_encoders/") || lower.contains("/clip/") {
         "text_encoder"
