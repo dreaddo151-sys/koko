@@ -479,10 +479,6 @@ pub fn discover_local_models_in(
             paths.sort();
 
             for path in paths.into_iter().rev() {
-                let entry_metadata = match fs::symlink_metadata(&path) {
-                    Ok(metadata) => metadata,
-                    Err(_) => continue,
-                };
                 let canonical_path = match path.canonicalize() {
                     Ok(value) if value.starts_with(&root) => value,
                     // Reject broken links, loops and any target outside the configured root.
@@ -550,7 +546,6 @@ pub fn discover_local_models_in(
                     inventory.truncated = true;
                     break 'roots;
                 }
-                let _ = entry_metadata; // retained to make the symlink decision explicit above
             }
         }
     }
@@ -756,6 +751,31 @@ mod tests {
                 .iter()
                 .any(|item| item.model_kind == "diffusion_model")
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn follows_huggingface_snapshot_symlinks_only_when_targets_stay_inside_root() {
+        use std::os::unix::fs::symlink;
+        let root = temporary_directory("hf-cache");
+        let blobs = root.join("blobs");
+        let snapshot = root.join("snapshots").join("revision-abc");
+        fs::create_dir_all(&blobs).unwrap();
+        fs::create_dir_all(&snapshot).unwrap();
+        fs::write(blobs.join("model-blob"), b"weight-data").unwrap();
+        symlink(
+            blobs.join("model-blob"),
+            snapshot.join("model.safetensors"),
+        )
+        .unwrap();
+
+        let inventory = discover_local_models_in(std::slice::from_ref(&root), 6, 100);
+        assert_eq!(inventory.models.len(), 1);
+        assert_eq!(inventory.models[0].format, "safetensors");
+        assert!(inventory.models[0].relative_path.contains("snapshots/revision-abc"));
+        assert_eq!(inventory.models[0].status, "discovered_not_loaded");
+
         fs::remove_dir_all(root).unwrap();
     }
 
