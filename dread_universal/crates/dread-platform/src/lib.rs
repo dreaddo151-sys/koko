@@ -264,16 +264,22 @@ fn nvidia_devices(binary: &Path) -> Vec<GpuDevice> {
     output
         .lines()
         .filter_map(|line| {
-            let (name, memory) = line.split_once(',')?;
-            let name = name.trim();
-            if name.is_empty() {
+            let fields = line.split(',').map(str::trim).collect::<Vec<_>>();
+            if fields.len() < 5 {
+                return None;
+            }
+            let name = fields[3];
+            if name.is_empty() || name.eq_ignore_ascii_case("N/A") {
                 return None;
             }
             Some(GpuDevice {
                 vendor: "nvidia".into(),
                 name: name.into(),
+                device_id: optional_csv_field(&fields, 1),
+                device_index: fields[0].parse().ok(),
+                pci_bus_id: optional_csv_field(&fields, 2),
                 compute_capability: None,
-                vram_mib: memory.trim().parse().ok(),
+                vram_mib: fields[4].parse().ok(),
                 vram_used_mib: None,
                 vram_free_mib: None,
                 driver_version: None,
@@ -306,9 +312,16 @@ fn amd_devices(binary: &Path) -> Vec<GpuDevice> {
             if name.is_empty() {
                 return None;
             }
+            let device_index = line
+                .split_once("GPU[")
+                .and_then(|(_, rest)| rest.split_once(']'))
+                .and_then(|(index, _)| index.trim().parse::<u32>().ok());
             Some(GpuDevice {
                 vendor: "amd".into(),
                 name: name.into(),
+                device_id: None,
+                device_index,
+                pci_bus_id: None,
                 compute_capability: None,
                 vram_mib: None,
                 vram_used_mib: None,
@@ -339,9 +352,13 @@ fn apple_devices(binary: &Path) -> Vec<GpuDevice> {
         let line = line.trim();
         if let Some(value) = line.strip_prefix("Chipset Model:") {
             if let Some(name) = current_name.take() {
+                let device_index = u32::try_from(devices.len()).ok();
                 devices.push(GpuDevice {
                     vendor: "apple".into(),
                     name,
+                    device_id: None,
+                    device_index,
+                    pci_bus_id: None,
                     compute_capability: None,
                     vram_mib: current_vram.take(),
                     vram_used_mib: None,
@@ -363,9 +380,13 @@ fn apple_devices(binary: &Path) -> Vec<GpuDevice> {
     }
 
     if let Some(name) = current_name {
+        let device_index = u32::try_from(devices.len()).ok();
         devices.push(GpuDevice {
             vendor: "apple".into(),
             name,
+            device_id: None,
+            device_index,
+            pci_bus_id: None,
             compute_capability: None,
             vram_mib: current_vram,
             vram_used_mib: None,
@@ -1055,6 +1076,9 @@ mod tests {
                 Some(GpuDevice {
                     vendor: "nvidia".into(),
                     name: name.trim().into(),
+                    device_id: None,
+                    device_index: None,
+                    pci_bus_id: None,
                     compute_capability: None,
                     vram_mib: memory.trim().parse().ok(),
                     vram_used_mib: None,
