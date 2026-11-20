@@ -1,8 +1,9 @@
-pub mod repair;
 //! Read-only host and local runtime discovery for portable DREAD installations.
 //!
 //! Probes only a small allowlist of known system utilities. It never invokes a
 //! shell, installs software, changes drivers, or starts an inference process.
+
+pub mod repair;
 
 use serde::Serialize;
 use serde_json::Value;
