@@ -8,6 +8,8 @@ use serde::Serialize;
 use std::{
     collections::BTreeSet,
     env, fs,
+    fs::File,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
@@ -15,6 +17,25 @@ const DEFAULT_MAX_DEPTH: usize = 8;
 const DEFAULT_MAX_ENTRIES: usize = 20_000;
 const MAX_MODEL_ROOTS: usize = 16;
 const MAX_MODELS: usize = 4_096;
+const MAX_GGUF_FILES_PER_SCAN: usize = 64;
+const MAX_GGUF_HEADER_BYTES: u64 = 1024 * 1024;
+const MAX_GGUF_METADATA_ENTRIES: u64 = 16_384;
+const MAX_GGUF_ARRAY_ELEMENTS: u64 = 1_000_000;
+const MAX_GGUF_KEY_BYTES: u64 = 4 * 1024;
+const MAX_GGUF_STRING_BYTES: u64 = 64 * 1024;
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct GgufMetadata {
+    pub version: u32,
+    pub tensor_count: u64,
+    pub metadata_count: u64,
+    pub model_name: Option<String>,
+    pub architecture: Option<String>,
+    pub context_length: Option<u64>,
+    /// Raw GGUF general.file_type enum value; not translated into a quantization label.
+    pub file_type_code: Option<u32>,
+    pub quantization_version: Option<u32>,
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct LocalModel {
@@ -26,6 +47,9 @@ pub struct LocalModel {
     pub relative_path: String,
     pub size_bytes: u64,
     pub status: String,
+    pub metadata_status: String,
+    pub metadata_error: Option<String>,
+    pub gguf_metadata: Option<GgufMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -35,6 +59,255 @@ pub struct LocalModelInventory {
     pub truncated: bool,
     pub models: Vec<LocalModel>,
     pub warnings: Vec<String>,
+}
+
+
+/// A forward-only, bounded reader for the metadata section of a GGUF file.
+/// The tensor records and weight payload are intentionally never read.
+struct GgufHeaderReader {
+    file: File,
+    file_size: u64,
+}
+
+impl GgufHeaderReader {
+    fn open(path: &Path) -> Result<Self, String> {
+        let file = File::open(path).map_err(|error| format!("Could not open GGUF file: {error}"))?;
+        let file_size = file
+            .metadata()
+            .map_err(|error| format!("Could not stat GGUF file: {error}"))?
+            .len();
+        Ok(Self { file, file_size })
+    }
+
+    fn position(&mut self) -> Result<u64, String> {
+        self.file
+            .stream_position()
+            .map_err(|error| format!("Could not read GGUF header position: {error}"))
+    }
+
+    fn ensure_span(&mut self, length: u64) -> Result<u64, String> {
+        let start = self.position()?;
+        let end = start
+            .checked_add(length)
+            .ok_or_else(|| "GGUF header offset overflow".to_string())?;
+        if end > self.file_size {
+            return Err("GGUF header is truncated".into());
+        }
+        if end > MAX_GGUF_HEADER_BYTES {
+            return Err("GGUF metadata scan exceeded the 1 MiB header limit".into());
+        }
+        Ok(end)
+    }
+
+    fn read_u32(&mut self) -> Result<u32, String> {
+        self.ensure_span(4)?;
+        let mut bytes = [0u8; 4];
+        self.file
+            .read_exact(&mut bytes)
+            .map_err(|error| format!("Could not read GGUF u32: {error}"))?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn read_u64(&mut self) -> Result<u64, String> {
+        self.ensure_span(8)?;
+        let mut bytes = [0u8; 8];
+        self.file
+            .read_exact(&mut bytes)
+            .map_err(|error| format!("Could not read GGUF u64: {error}"))?;
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn read_bytes(&mut self, length: u64) -> Result<Vec<u8>, String> {
+        if length > MAX_GGUF_STRING_BYTES {
+            return Err("GGUF string exceeds the 64 KiB value limit".into());
+        }
+        self.ensure_span(length)?;
+        let length = usize::try_from(length)
+            .map_err(|_| "GGUF string length is not representable".to_string())?;
+        let mut bytes = vec![0u8; length];
+        self.file
+            .read_exact(&mut bytes)
+            .map_err(|error| format!("Could not read GGUF string: {error}"))?;
+        Ok(bytes)
+    }
+
+    fn read_string(&mut self, max_length: u64) -> Result<Option<String>, String> {
+        let length = self.read_u64()?;
+        if length > max_length {
+            self.skip_bytes(length)?;
+            return Ok(None);
+        }
+        let bytes = self.read_bytes(length)?;
+        String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|_| "GGUF string contains invalid UTF-8".to_string())
+    }
+
+    fn skip_bytes(&mut self, length: u64) -> Result<(), String> {
+        let end = self.ensure_span(length)?;
+        self.file
+            .seek(SeekFrom::Start(end))
+            .map_err(|error| format!("Could not skip GGUF metadata value: {error}"))?;
+        Ok(())
+    }
+
+    fn skip_string(&mut self) -> Result<(), String> {
+        let length = self.read_u64()?;
+        self.skip_bytes(length)
+    }
+
+    fn read_nonnegative_integer(&mut self, value_type: u32) -> Result<Option<u64>, String> {
+        match value_type {
+            0 => {
+                self.ensure_span(1)?;
+                let mut value = [0u8; 1];
+                self.file.read_exact(&mut value).map_err(|error| error.to_string())?;
+                Ok(Some(u64::from(value[0])))
+            }
+            1 => {
+                self.ensure_span(1)?;
+                let mut value = [0u8; 1];
+                self.file.read_exact(&mut value).map_err(|error| error.to_string())?;
+                Ok((value[0] as i8).try_into().ok())
+            }
+            2 => {
+                self.ensure_span(2)?;
+                let mut value = [0u8; 2];
+                self.file.read_exact(&mut value).map_err(|error| error.to_string())?;
+                Ok(Some(u64::from(u16::from_le_bytes(value))))
+            }
+            3 => {
+                self.ensure_span(2)?;
+                let mut value = [0u8; 2];
+                self.file.read_exact(&mut value).map_err(|error| error.to_string())?;
+                Ok(i16::from_le_bytes(value).try_into().ok())
+            }
+            4 => Ok(Some(u64::from(self.read_u32()?))),
+            5 => Ok(self.read_u32()?.cast_signed().try_into().ok()),
+            10 => Ok(Some(self.read_u64()?)),
+            11 => Ok(i64::from_le_bytes(
+                self.read_u64()?.to_le_bytes(),
+            ).try_into().ok()),
+            _ => {
+                self.skip_value(value_type)?;
+                Ok(None)
+            }
+        }
+    }
+
+    fn skip_value(&mut self, value_type: u32) -> Result<(), String> {
+        let width = match value_type {
+            0 | 1 | 7 => Some(1u64),
+            2 | 3 => Some(2),
+            4 | 5 | 6 => Some(4),
+            8 => {
+                self.skip_string()?;
+                return Ok(());
+            }
+            9 => {
+                let element_type = self.read_u32()?;
+                let count = self.read_u64()?;
+                if count > MAX_GGUF_ARRAY_ELEMENTS {
+                    return Err("GGUF array exceeds the 1,000,000-element limit".into());
+                }
+                if element_type == 8 {
+                    for _ in 0..count {
+                        self.skip_string()?;
+                    }
+                    return Ok(());
+                }
+                let element_width = match element_type {
+                    0 | 1 | 7 => 1,
+                    2 | 3 => 2,
+                    4 | 5 | 6 => 4,
+                    10 | 11 | 12 => 8,
+                    _ => return Err(format!("Unsupported GGUF array element type {element_type}")),
+                };
+                let bytes = count
+                    .checked_mul(element_width)
+                    .ok_or_else(|| "GGUF array byte length overflow".to_string())?;
+                self.skip_bytes(bytes)?;
+                return Ok(());
+            }
+            10 | 11 | 12 => Some(8),
+            _ => return Err(format!("Unsupported GGUF metadata value type {value_type}")),
+        };
+        self.skip_bytes(width.unwrap_or_default())
+    }
+}
+
+/// Parse only the bounded GGUF header and selected scalar metadata; never load tensors.
+fn read_gguf_metadata(path: &Path) -> Result<GgufMetadata, String> {
+    let mut reader = GgufHeaderReader::open(path)?;
+    let mut magic = [0u8; 4];
+    reader
+        .file
+        .read_exact(&mut magic)
+        .map_err(|error| format!("Could not read GGUF magic: {error}"))?;
+    if &magic != b"GGUF" {
+        return Err("File does not have GGUF magic bytes".into());
+    }
+
+    let version = reader.read_u32()?;
+    if !(2..=3).contains(&version) {
+        return Err(format!("Unsupported GGUF version {version}"));
+    }
+    let tensor_count = reader.read_u64()?;
+    let metadata_count = reader.read_u64()?;
+    if tensor_count > 1_000_000 || metadata_count > MAX_GGUF_METADATA_ENTRIES {
+        return Err("GGUF tensor or metadata count exceeds the inventory safety limit".into());
+    }
+
+    let mut metadata = GgufMetadata {
+        version,
+        tensor_count,
+        metadata_count,
+        model_name: None,
+        architecture: None,
+        context_length: None,
+        file_type_code: None,
+        quantization_version: None,
+    };
+
+    for _ in 0..metadata_count {
+        let key = reader
+            .read_string(MAX_GGUF_KEY_BYTES)?
+            .ok_or_else(|| "GGUF metadata key exceeds the 4 KiB limit".to_string())?;
+        let value_type = reader.read_u32()?;
+        match key.as_str() {
+            "general.architecture" if value_type == 8 => {
+                metadata.architecture = reader.read_string(MAX_GGUF_STRING_BYTES)?;
+            }
+            "general.name" if value_type == 8 => {
+                metadata.model_name = reader.read_string(MAX_GGUF_STRING_BYTES)?;
+            }
+            "general.file_type" => {
+                metadata.file_type_code = reader
+                    .read_nonnegative_integer(value_type)?
+                    .and_then(|value| u32::try_from(value).ok());
+            }
+            "general.quantization_version" => {
+                metadata.quantization_version = reader
+                    .read_nonnegative_integer(value_type)?
+                    .and_then(|value| u32::try_from(value).ok());
+            }
+            key if key.ends_with(".context_length") => {
+                metadata.context_length = reader.read_nonnegative_integer(value_type)?;
+            }
+            _ => reader.skip_value(value_type)?,
+        }
+
+        // These fields are enough for a useful inventory record. Stop before
+        // large tokenizer arrays, which can follow the architecture metadata.
+        if metadata.architecture.is_some()
+            && metadata.model_name.is_some()
+            && metadata.context_length.is_some()
+        {
+            break;
+        }
+    }
+
+    Ok(metadata)
 }
 
 pub fn discover_local_models() -> LocalModelInventory {
