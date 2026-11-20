@@ -4592,6 +4592,108 @@ async fn gpu_inference(
 
 
 
+
+async fn repair_plan(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    use dread_agents::AgentHealthState;
+    use dread_platform::repair::{ComponentObservation, build_repair_plan};
+
+    let mut observations = Vec::new();
+
+    match state.gpu.health().await {
+        Ok(health) => observations.push(ComponentObservation {
+            component_id: "llama_cpp_gateway".into(),
+            state: if health.status.eq_ignore_ascii_case("ok")
+                || health.status.eq_ignore_ascii_case("online")
+            {
+                "online".into()
+            } else {
+                "degraded".into()
+            },
+            detail: format!("Gateway status: {}; GPU: {}", health.status, health.gpu),
+        }),
+        Err(error) => observations.push(ComponentObservation {
+            component_id: "llama_cpp_gateway".into(),
+            state: "offline".into(),
+            detail: format!("Read-only gateway health probe failed: {error}"),
+        }),
+    }
+
+    match state.supervisor.as_ref() {
+        Some(supervisor) => match supervisor.is_online().await {
+            Ok(true) => observations.push(ComponentObservation {
+                component_id: "python_gpu_supervisor".into(),
+                state: "online".into(),
+                detail: "Authenticated Supervisor health endpoint responded successfully".into(),
+            }),
+            Ok(false) => observations.push(ComponentObservation {
+                component_id: "python_gpu_supervisor".into(),
+                state: "offline".into(),
+                detail: "Authenticated Supervisor health endpoint did not report online".into(),
+            }),
+            Err(error) => observations.push(ComponentObservation {
+                component_id: "python_gpu_supervisor".into(),
+                state: "unknown".into(),
+                detail: format!("Supervisor health probe failed: {error}"),
+            }),
+        },
+        None => observations.push(ComponentObservation {
+            component_id: "python_gpu_supervisor".into(),
+            state: "not_configured".into(),
+            detail: "Supervisor bridge is not configured; no attempt was made to start or replace it".into(),
+        }),
+    }
+
+    match dread_media::ComfyUiClient::from_env() {
+        Ok(client) => {
+            let monitor = client.monitor().await;
+            observations.push(ComponentObservation {
+                component_id: "comfyui".into(),
+                state: monitor.status.clone(),
+                detail: format!(
+                    "Read-only ComfyUI probe: system={}, queue={}, history={}",
+                    monitor.system.status, monitor.queue.status, monitor.history.status
+                ),
+            });
+        }
+        Err(error) => observations.push(ComponentObservation {
+            component_id: "comfyui".into(),
+            state: "unknown".into(),
+            detail: format!("ComfyUI endpoint configuration could not be used: {error}"),
+        }),
+    }
+
+    for (provider, adapter) in state.agent_adapters.iter() {
+        let health = adapter.health().await;
+        let (state_label, detail) = match health {
+            Ok(value) => {
+                let label = match value.state {
+                    AgentHealthState::Online => "online",
+                    AgentHealthState::Degraded => "degraded",
+                    AgentHealthState::Offline => "offline",
+                    AgentHealthState::Unknown => "unknown",
+                };
+                (label.to_string(), value.detail.unwrap_or_else(|| {
+                    format!("Provider health state: {:?}", value.state)
+                }))
+            }
+            Err(error) => (
+                "unknown".to_string(),
+                format!("Provider health probe did not return a confirmed state: {error}"),
+            ),
+        };
+        observations.push(ComponentObservation {
+            component_id: format!("agent_provider_{provider}"),
+            state: state_label,
+            detail,
+        });
+    }
+
+    let plan = build_repair_plan(&observations);
+    serde_json::to_value(plan)
+        .map(Json)
+        .map_err(|error| ApiError::internal(format!("Could not serialize diagnostic repair plan: {error}")))
+}
+
 async fn local_model_inventory(
 ) -> Result<Json<dread_gpu::models::LocalModelInventory>, ApiError> {
     let inventory = tokio::task::spawn_blocking(dread_gpu::models::discover_local_models)
@@ -4671,6 +4773,7 @@ fn app(state: AppState) -> Router {
         .route("/api/gpu/health", get(gpu_health))
         .route("/api/gpu/models", get(gpu_models))
         .route("/api/models/local", get(local_model_inventory))
+        .route("/api/repair/plan", get(repair_plan))
         .route("/api/media/comfyui/monitor", get(comfyui_monitor))
         .route("/api/media/workflows/discover", get(workflow_discovery))
         .route("/api/extensions/discover", get(extension_discovery))
@@ -8126,6 +8229,7 @@ mod tests {
         let (router, server) = test_app_with_auth().await;
         let protected_routes = [
             "/api/models/local",
+            "/api/repair/plan",
             "/api/media/comfyui/monitor",
             "/api/media/workflows/discover",
             "/api/extensions/discover",
