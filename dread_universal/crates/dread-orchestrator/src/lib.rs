@@ -5,6 +5,7 @@
 //! remains the sole authority for GPU admission and lifecycle.
 
 use std::{
+    collections::HashMap,
     future::Future,
     sync::{
         Arc,
@@ -17,6 +18,53 @@ use serde_json::Value;
 use tokio::sync::{Semaphore, watch};
 
 const CANCELLATION_CLEANUP_GRACE: Duration = Duration::from_secs(5);
+
+/// Application-level admission classes. GPU inference permits only bound request
+/// concurrency; the Python GPU Supervisor remains the sole hardware/lease authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExecutionResourceClass {
+    General,
+    Cpu,
+    Network,
+    Agent,
+    GpuInference,
+    Media,
+}
+
+/// Per-class concurrency ceilings layered underneath the global execution limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceLimits {
+    pub cpu: usize,
+    pub network: usize,
+    pub agent: usize,
+    pub gpu_inference: usize,
+    pub media: usize,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            cpu: 2,
+            network: 2,
+            agent: 2,
+            gpu_inference: 1,
+            media: 1,
+        }
+    }
+}
+
+impl ResourceLimits {
+    fn capacity(self, class: ExecutionResourceClass, global: usize) -> usize {
+        match class {
+            ExecutionResourceClass::General => global,
+            ExecutionResourceClass::Cpu => self.cpu,
+            ExecutionResourceClass::Network => self.network,
+            ExecutionResourceClass::Agent => self.agent,
+            ExecutionResourceClass::GpuInference => self.gpu_inference,
+            ExecutionResourceClass::Media => self.media,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct ExecutionConfig {
@@ -50,6 +98,7 @@ pub enum ConfigError {
     ZeroAttempts,
     ZeroTimeout,
     MaxRetryBackoffBelowInitial,
+    ZeroResourceConcurrency { class: ExecutionResourceClass },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,8 +144,16 @@ pub struct ExecutionResult {
 #[derive(Clone)]
 pub struct ExecutionGate {
     semaphore: Arc<Semaphore>,
+    resource_semaphores: Arc<HashMap<ExecutionResourceClass, Arc<Semaphore>>>,
     admitted: Arc<AtomicUsize>,
     config: ExecutionConfig,
+}
+
+/// Holds global and per-class permits for the lifetime of one operation.
+pub struct ExecutionPermit {
+    _admission: AdmissionGuard,
+    _resource_permit: tokio::sync::OwnedSemaphorePermit,
+    _global_permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 struct AdmissionGuard {
@@ -111,6 +168,13 @@ impl Drop for AdmissionGuard {
 
 impl ExecutionGate {
     pub fn new(config: ExecutionConfig) -> Result<Self, ConfigError> {
+        Self::new_with_resource_limits(config, ResourceLimits::default())
+    }
+
+    pub fn new_with_resource_limits(
+        config: ExecutionConfig,
+        limits: ResourceLimits,
+    ) -> Result<Self, ConfigError> {
         if config.max_concurrency == 0 {
             return Err(ConfigError::ZeroConcurrency);
         }
@@ -126,8 +190,27 @@ impl ExecutionGate {
         if config.max_retry_backoff < config.retry_backoff {
             return Err(ConfigError::MaxRetryBackoffBelowInitial);
         }
+
+        let classes = [
+            ExecutionResourceClass::General,
+            ExecutionResourceClass::Cpu,
+            ExecutionResourceClass::Network,
+            ExecutionResourceClass::Agent,
+            ExecutionResourceClass::GpuInference,
+            ExecutionResourceClass::Media,
+        ];
+        let mut resource_semaphores = HashMap::with_capacity(classes.len());
+        for class in classes {
+            let capacity = limits.capacity(class, config.max_concurrency);
+            if capacity == 0 {
+                return Err(ConfigError::ZeroResourceConcurrency { class });
+            }
+            resource_semaphores.insert(class, Arc::new(Semaphore::new(capacity)));
+        }
+
         Ok(Self {
             semaphore: Arc::new(Semaphore::new(config.max_concurrency)),
+            resource_semaphores: Arc::new(resource_semaphores),
             admitted: Arc::new(AtomicUsize::new(0)),
             config,
         })
@@ -186,7 +269,37 @@ impl ExecutionGate {
         })
     }
 
-    /// Run a caller-supplied operation under bounded admission and concurrency.
+    /// Acquire a global and class-specific slot for work that has its own lifecycle.
+    ///
+    /// This is useful for provider adapters that poll for a long-running result rather
+    /// than running inside the retrying closure. Cancellation while waiting releases
+    /// any already-acquired permit and never starts the operation.
+    pub async fn acquire_resource(
+        &self,
+        class: ExecutionResourceClass,
+        cancellation: &mut watch::Receiver<bool>,
+    ) -> Result<ExecutionPermit, ExecutionError> {
+        let admission = self.try_admit()?;
+        let resource_semaphore = self
+            .resource_semaphores
+            .get(&class)
+            .cloned()
+            .ok_or(ExecutionError::SchedulerClosed)?;
+
+        // Acquire the narrower class first so work waiting on a class quota does not
+        // occupy a global worker slot needed by another resource class.
+        let resource_permit = acquire_cancellable(resource_semaphore, cancellation).await?;
+        let global_permit =
+            acquire_cancellable(Arc::clone(&self.semaphore), cancellation).await?;
+
+        Ok(ExecutionPermit {
+            _admission: admission,
+            _resource_permit: resource_permit,
+            _global_permit: global_permit,
+        })
+    }
+
+    /// Run a caller-supplied operation under bounded admission and the General quota.
     ///
     /// The watch sender cancels by setting true. A dropped sender also cancels.
     /// The operation receives a cloned receiver for cooperative cancellation.
@@ -194,13 +307,34 @@ impl ExecutionGate {
         &self,
         task_id: impl Into<String>,
         cancellation: watch::Receiver<bool>,
+        operation: F,
+    ) -> Result<ExecutionResult, ExecutionError>
+    where
+        F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
+        Fut: Future<Output = Result<Value, String>> + Send,
+    {
+        self.run_with_resource_class(
+            task_id,
+            ExecutionResourceClass::General,
+            cancellation,
+            operation,
+        )
+        .await
+    }
+
+    /// Run a caller-supplied operation under its resource-class and global limits.
+    pub async fn run_with_resource_class<F, Fut>(
+        &self,
+        task_id: impl Into<String>,
+        class: ExecutionResourceClass,
+        cancellation: watch::Receiver<bool>,
         mut operation: F,
     ) -> Result<ExecutionResult, ExecutionError>
     where
         F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
         Fut: Future<Output = Result<Value, String>> + Send,
     {
-        self.run_inner(task_id, cancellation, move |attempt, cancellation| {
+        self.run_inner(task_id, class, cancellation, move |attempt, cancellation| {
             let operation_future = operation(attempt, cancellation);
             async move { operation_future.await.map_err(RunnerError::permanent) }
         })
@@ -219,12 +353,34 @@ impl ExecutionGate {
         F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
         Fut: Future<Output = Result<Value, RunnerError>> + Send,
     {
-        self.run_inner(task_id, cancellation, operation).await
+        self.run_with_resource_class_and_retryable_errors(
+            task_id,
+            ExecutionResourceClass::General,
+            cancellation,
+            operation,
+        )
+        .await
+    }
+
+    /// Resource-class variant for operations with explicitly retryable errors.
+    pub async fn run_with_resource_class_and_retryable_errors<F, Fut>(
+        &self,
+        task_id: impl Into<String>,
+        class: ExecutionResourceClass,
+        cancellation: watch::Receiver<bool>,
+        operation: F,
+    ) -> Result<ExecutionResult, ExecutionError>
+    where
+        F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
+        Fut: Future<Output = Result<Value, RunnerError>> + Send,
+    {
+        self.run_inner(task_id, class, cancellation, operation).await
     }
 
     async fn run_inner<F, Fut>(
         &self,
         task_id: impl Into<String>,
+        class: ExecutionResourceClass,
         mut cancellation: watch::Receiver<bool>,
         mut operation: F,
     ) -> Result<ExecutionResult, ExecutionError>
@@ -236,24 +392,7 @@ impl ExecutionGate {
         if task_id.trim().is_empty() {
             return Err(ExecutionError::InvalidTaskId);
         }
-        let _admission = self.try_admit()?;
-
-        let _permit = loop {
-            if *cancellation.borrow() {
-                return Err(ExecutionError::Cancelled { attempts: 1 });
-            }
-            tokio::select! {
-                permit = Arc::clone(&self.semaphore).acquire_owned() => {
-                    break permit.map_err(|_| ExecutionError::SchedulerClosed)?;
-                }
-                changed = cancellation.changed() => {
-                    if changed.is_err() || *cancellation.borrow() {
-                        return Err(ExecutionError::Cancelled { attempts: 0 });
-                    }
-                }
-            }
-        };
-
+        let _permit = self.acquire_resource(class, &mut cancellation).await?;
         let started = Instant::now();
         let mut attempts = 0;
         while attempts < self.config.max_attempts {
@@ -310,6 +449,27 @@ impl ExecutionGate {
         }
 
         Err(ExecutionError::SchedulerClosed)
+    }
+}
+
+async fn acquire_cancellable(
+    semaphore: Arc<Semaphore>,
+    cancellation: &mut watch::Receiver<bool>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, ExecutionError> {
+    loop {
+        if *cancellation.borrow() {
+            return Err(ExecutionError::Cancelled { attempts: 0 });
+        }
+        tokio::select! {
+            permit = Arc::clone(&semaphore).acquire_owned() => {
+                return permit.map_err(|_| ExecutionError::SchedulerClosed);
+            }
+            changed = cancellation.changed() => {
+                if changed.is_err() || *cancellation.borrow() {
+                    return Err(ExecutionError::Cancelled { attempts: 0 });
+                }
+            }
+        }
     }
 }
 
@@ -528,6 +688,177 @@ mod tests {
             retry_backoff: Duration::ZERO,
             max_retry_backoff: Duration::ZERO,
         }
+    }
+
+    #[test]
+    fn rejects_zero_resource_class_capacity() {
+        let limits = ResourceLimits {
+            agent: 0,
+            ..ResourceLimits::default()
+        };
+        assert_eq!(
+            ExecutionGate::new_with_resource_limits(config(2, 4), limits).err(),
+            Some(ConfigError::ZeroResourceConcurrency {
+                class: ExecutionResourceClass::Agent
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn enforces_agent_class_limit_independently_of_global_capacity() {
+        let limits = ResourceLimits {
+            agent: 1,
+            ..ResourceLimits::default()
+        };
+        let gate = Arc::new(
+            ExecutionGate::new_with_resource_limits(config(2, 4), limits).unwrap(),
+        );
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+
+        let spawn_agent = |name: &'static str| {
+            let gate = Arc::clone(&gate);
+            let active = Arc::clone(&active);
+            let maximum = Arc::clone(&maximum);
+            tokio::spawn(async move {
+                let (_cancel, receiver) = watch::channel(false);
+                gate.run_with_resource_class(
+                    name,
+                    ExecutionResourceClass::Agent,
+                    receiver,
+                    move |_, _| {
+                        let active = Arc::clone(&active);
+                        let maximum = Arc::clone(&maximum);
+                        async move {
+                            let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                            maximum.fetch_max(now, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(25)).await;
+                            active.fetch_sub(1, Ordering::SeqCst);
+                            Ok(json!({"done": true}))
+                        }
+                    },
+                )
+                .await
+            })
+        };
+
+        let first = spawn_agent("agent-one");
+        let second = spawn_agent("agent-two");
+        assert!(first.await.unwrap().is_ok());
+        assert!(second.await.unwrap().is_ok());
+        assert_eq!(maximum.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn different_resource_classes_share_global_but_not_class_limits() {
+        let limits = ResourceLimits {
+            agent: 1,
+            network: 1,
+            ..ResourceLimits::default()
+        };
+        let gate = Arc::new(
+            ExecutionGate::new_with_resource_limits(config(2, 4), limits).unwrap(),
+        );
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+
+        let spawn = |name: &'static str, class: ExecutionResourceClass| {
+            let gate = Arc::clone(&gate);
+            let active = Arc::clone(&active);
+            let maximum = Arc::clone(&maximum);
+            tokio::spawn(async move {
+                let (_cancel, receiver) = watch::channel(false);
+                gate.run_with_resource_class(name, class, receiver, move |_, _| {
+                    let active = Arc::clone(&active);
+                    let maximum = Arc::clone(&maximum);
+                    async move {
+                        let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        maximum.fetch_max(now, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        Ok(json!({"done": true}))
+                    }
+                })
+                .await
+            })
+        };
+
+        let agent = spawn("agent", ExecutionResourceClass::Agent);
+        let network = spawn("network", ExecutionResourceClass::Network);
+        assert!(agent.await.unwrap().is_ok());
+        assert!(network.await.unwrap().is_ok());
+        assert_eq!(maximum.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn cancellation_while_waiting_for_resource_class_does_not_start_runner() {
+        let limits = ResourceLimits {
+            agent: 1,
+            ..ResourceLimits::default()
+        };
+        let gate = Arc::new(
+            ExecutionGate::new_with_resource_limits(config(2, 4), limits).unwrap(),
+        );
+        let (cancel_first, receiver_first) = watch::channel(false);
+        let (cancel_second, receiver_second) = watch::channel(false);
+        let started = Arc::new(AtomicUsize::new(0));
+
+        let first_gate = Arc::clone(&gate);
+        let first_started = Arc::clone(&started);
+        let first = tokio::spawn(async move {
+            first_gate
+                .run_with_resource_class(
+                    "holding-agent",
+                    ExecutionResourceClass::Agent,
+                    receiver_first,
+                    move |_, _| {
+                        let started = Arc::clone(&first_started);
+                        async move {
+                            started.fetch_add(1, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            Ok(Value::Null)
+                        }
+                    },
+                )
+                .await
+        });
+
+        for _ in 0..50 {
+            if started.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        let second_gate = Arc::clone(&gate);
+        let second_started = Arc::clone(&started);
+        let second = tokio::spawn(async move {
+            second_gate
+                .run_with_resource_class(
+                    "cancelled-agent",
+                    ExecutionResourceClass::Agent,
+                    receiver_second,
+                    move |_, _| {
+                        let started = Arc::clone(&second_started);
+                        async move {
+                            started.fetch_add(1, Ordering::SeqCst);
+                            Ok(Value::Null)
+                        }
+                    },
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        cancel_second.send(true).unwrap();
+        assert_eq!(
+            second.await.unwrap(),
+            Err(ExecutionError::Cancelled { attempts: 0 })
+        );
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        cancel_first.send(true).unwrap();
+        assert_eq!(
+            first.await.unwrap(),
+            Err(ExecutionError::Cancelled { attempts: 1 })
+        );
     }
 
     #[test]
