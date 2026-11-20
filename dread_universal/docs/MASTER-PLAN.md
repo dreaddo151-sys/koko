@@ -65,7 +65,8 @@ The finished operator experience must provide:
 Detect and report, without changing the host:
 - OS, distribution/release, kernel, architecture, CPU model/topology/thread count and memory.
 - Physical disks, filesystems, workspace capacity and installation roots.
-- Every visible GPU with stable vendor identity (UUID/serial where exposed), PCI bus address, current enumeration index, vendor/model/count, VRAM, PCIe link, driver and available CUDA/ROCm/oneAPI/Metal capabilities. Enumeration index is not treated as a persistent identity; missing identity fields remain unknown rather than fabricated.
+- Every visible GPU with stable vendor identity (UUID/serial where exposed), PCI bus address, current enumeration index, vendor/model/count, VRAM, PCIe link, driver and available CUDA/ROCm/oneAPI/Metal capabilities.
+- Separately read runtime telemetry from the authenticated Python GPU Supervisor where configured. Keep host discovery and Supervisor runtime samples distinct; Supervisor telemetry must be read-only, size-bounded and must not acquire, release or modify GPU leases. Enumeration index is not treated as a persistent identity; missing identity fields remain unknown rather than fabricated.
 - llama.cpp binaries, gateway state, model files, model metadata and gateway-advertised model inventory.
 - ComfyUI, GPU Supervisor, bridge, existing Hub and configured local services.
 - Pstack, Cursor/Claude and other extension catalogs; local agent manifests, known runtime health endpoints, tools and MCP declarations.
@@ -749,3 +750,11 @@ The PR #9 token/prompt work lived on the older Run 81 branch and was absent from
 - State and JSONL incidents are private under `~/.local/state/dread-universal/`. The service unit grants write access only to that state directory. No other DREAD/ComfyUI/GPU service is in the restart allowlist.
 - Both portable installer and Debian configurator install watchdog service/timer templates without enabling the timer. The portable installer preserves operator-customized unit files during upgrades and restores prior watchdog files during failed-upgrade rollback.
 - This is bounded Rust API service recovery only. It does not complete full self-repair planning/simulation/precondition/backup/apply/postcondition/rollback requirements.
+
+
+### PR #10 Supervisor telemetry reconciliation — 2026-11-21
+
+- Restored `GpuSupervisorClient::telemetry()` using the existing loopback bridge base URL and Bearer token. It requests `GET /v1/telemetry`, uses a 4-second timeout, caps both declared and streamed response size at 1 MiB, rejects non-success HTTP status and invalid JSON, and performs no lease or process-lifecycle operation.
+- Added protected Rust `GET /api/gpu/telemetry`. When the Python Supervisor is not configured it returns 503; otherwise it forwards the telemetry JSON from the authenticated bridge. API tests verify the bridge Bearer token, returned read-only marker and representative device counters; the route is included in the Bearer-auth protected-route regression.
+- Added a separate GPU-page console panel showing the bridge's actual sample timestamp, source and per-device utilization, VRAM, temperature, power and PCIe fields. It refreshes every 30 seconds only while the GPU page is open and is cleared on disconnect.
+- This is distinct from `/api/system/profile`, which reads host utilities and inventories host hardware. NVIDIA Supervisor telemetry does not replace AMD/Intel/Apple host discovery. The Python GPU Supervisor remains sole GPU lease/process owner.
