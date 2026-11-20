@@ -524,7 +524,10 @@ fn configured_agent_manifest_roots() -> Vec<std::path::PathBuf> {
     }
 
     let mut seen = HashSet::new();
-    roots.into_iter().filter(|path| seen.insert(path.clone())).collect()
+    roots
+        .into_iter()
+        .filter(|path| seen.insert(path.clone()))
+        .collect()
 }
 
 /// Discover local adapter manifests only. This never probes their endpoint or
@@ -628,18 +631,18 @@ pub fn discover_agent_manifests_in(roots: &[std::path::PathBuf]) -> AgentManifes
                 let entry = match entry {
                     Ok(entry) => entry,
                     Err(error) => {
-                        inventory.warnings.push(format!(
-                            "Could not read an agent manifest entry: {error}"
-                        ));
+                        inventory
+                            .warnings
+                            .push(format!("Could not read an agent manifest entry: {error}"));
                         continue;
                     }
                 };
                 let kind = match entry.file_type() {
                     Ok(kind) => kind,
                     Err(error) => {
-                        inventory.warnings.push(format!(
-                            "Could not inspect agent manifest entry: {error}"
-                        ));
+                        inventory
+                            .warnings
+                            .push(format!("Could not inspect agent manifest entry: {error}"));
                         continue;
                     }
                 };
@@ -757,7 +760,9 @@ pub fn discover_agent_manifests_in(roots: &[std::path::PathBuf]) -> AgentManifes
         }
     }
 
-    inventory.manifests.sort_by(|left, right| left.id.cmp(&right.id));
+    inventory
+        .manifests
+        .sort_by(|left, right| left.id.cmp(&right.id));
     inventory
 }
 
@@ -765,18 +770,27 @@ fn valid_agent_manifest_fields(manifest: &AgentManifestFile) -> bool {
     let identifier = |value: &str| {
         !value.trim().is_empty()
             && value.len() <= 160
-            && value.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)
-            })
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
     };
     identifier(&manifest.id)
         && identifier(&manifest.adapter)
         && !manifest.name.trim().is_empty()
         && manifest.name.len() <= 200
-        && manifest.version.as_ref().is_none_or(|value| value.len() <= 80)
-        && manifest.description.as_ref().is_none_or(|value| value.len() <= 2_000)
+        && manifest
+            .version
+            .as_ref()
+            .is_none_or(|value| value.len() <= 80)
+        && manifest
+            .description
+            .as_ref()
+            .is_none_or(|value| value.len() <= 2_000)
         && manifest.capabilities.len() <= 128
-        && manifest.capabilities.iter().all(|value| !value.trim().is_empty() && value.len() <= 160)
+        && manifest
+            .capabilities
+            .iter()
+            .all(|value| !value.trim().is_empty() && value.len() <= 160)
 }
 
 #[cfg(test)]
@@ -906,7 +920,10 @@ mod agent_manifest_tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let root = std::env::temp_dir().join(format!("dread-agent-manifests-{label}-{nonce}"));
         fs::create_dir_all(&root).unwrap();
         root
@@ -917,7 +934,9 @@ mod agent_manifest_tests {
         let root = temp_dir("valid");
         let nested = root.join("openhands");
         fs::create_dir_all(&nested).unwrap();
-        fs::write(nested.join("agent.toml"), r#"
+        fs::write(
+            nested.join("agent.toml"),
+            r#"
 id = "openhands.local"
 name = "OpenHands local adapter"
 adapter = "openhands.agent_server"
@@ -925,7 +944,9 @@ health_url = "http://127.0.0.1:8000/health"
 version = "1.0.0"
 description = "Candidate only"
 capabilities = ["task.start", "task.status"]
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let inventory = discover_agent_manifests_in(std::slice::from_ref(&root));
         assert_eq!(inventory.manifests.len(), 1);
@@ -941,12 +962,16 @@ capabilities = ["task.start", "task.status"]
     #[test]
     fn rejects_non_loopback_or_invalid_agent_manifests() {
         let root = temp_dir("invalid");
-        fs::write(root.join("remote.agent.toml"), r#"
+        fs::write(
+            root.join("remote.agent.toml"),
+            r#"
 id = "remote.agent"
 name = "Remote"
 adapter = "remote"
 health_url = "http://192.168.1.10:8000/health"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         fs::write(root.join("bad.agent.toml"), r#"id = "bad""#).unwrap();
         let inventory = discover_agent_manifests_in(std::slice::from_ref(&root));
         assert!(inventory.manifests.is_empty());
@@ -960,13 +985,21 @@ health_url = "http://192.168.1.10:8000/health"
         use std::os::unix::fs::symlink;
         let root = temp_dir("symlink");
         let outside = temp_dir("outside");
-        fs::write(outside.join("outside.agent.toml"), r#"
+        fs::write(
+            outside.join("outside.agent.toml"),
+            r#"
 id = "outside"
 name = "Outside"
 adapter = "outside"
 health_url = "http://127.0.0.1:8000/health"
-"#).unwrap();
-        symlink(outside.join("outside.agent.toml"), root.join("linked.agent.toml")).unwrap();
+"#,
+        )
+        .unwrap();
+        symlink(
+            outside.join("outside.agent.toml"),
+            root.join("linked.agent.toml"),
+        )
+        .unwrap();
         let inventory = discover_agent_manifests_in(std::slice::from_ref(&root));
         assert!(inventory.manifests.is_empty());
         fs::remove_dir_all(root).unwrap();
