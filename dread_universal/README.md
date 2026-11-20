@@ -106,7 +106,7 @@ Never commit API or Supervisor tokens. Store them outside the repository with re
 | POST | `/api/tasks/{id}/approve` | Record approval; does not itself execute |
 | POST | `/api/tasks/{id}/run` | Queue supported approved task |
 | GET | `/api/gpu/models` | Models advertised by llama.cpp gateway |
-| GET | `/api/models/local` | Bounded local model-file inventory; candidates are never assumed loaded |
+| GET | `/api/models/local` | Bounded local model-file inventory; reads selected GGUF header fields (name, architecture, context and raw file type) without loading weights |
 | GET | `/api/media/comfyui/monitor` | Read-only ComfyUI system, queue and recent history monitor |
 | GET | `/api/media/workflows/discover` | Bounded metadata-only ComfyUI workflow catalog; never submits workflows |
 | GET | `/api/extensions/discover` | Read-only Cursor/Claude/generic plugin manifest inventory; results remain untrusted/disabled |
