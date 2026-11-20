@@ -65,7 +65,7 @@ The finished operator experience must provide:
 Detect and report, without changing the host:
 - OS, distribution/release, kernel, architecture, CPU model/topology/thread count and memory.
 - Physical disks, filesystems, workspace capacity and installation roots.
-- Every visible GPU with stable device identity, vendor/model/count, VRAM, PCI location/link, driver and available CUDA/ROCm/oneAPI/Metal capabilities.
+- Every visible GPU with stable vendor identity (UUID/serial where exposed), PCI bus address, current enumeration index, vendor/model/count, VRAM, PCIe link, driver and available CUDA/ROCm/oneAPI/Metal capabilities. Enumeration index is not treated as a persistent identity; missing identity fields remain unknown rather than fabricated.
 - llama.cpp binaries, gateway state, model files, model metadata and gateway-advertised model inventory.
 - ComfyUI, GPU Supervisor, bridge, existing Hub and configured local services.
 - Pstack, Cursor/Claude and other extension catalogs; local agent manifests, known runtime health endpoints, tools and MCP declarations.
@@ -699,3 +699,12 @@ Safety and release boundary:
 - Rust CI run #972 passed the Web console build but failed the Rust formatting gate, so Clippy, Rust tests, release build and package smoke test were skipped. The reported rustfmt changes and a crate-level doc-comment ordering compile issue were corrected in subsequent commits. Those corrections have not yet been validated by a fresh green current-head CI run.
 - Latest inspected PR #14 source head at this log entry: 30dba903ac2b4e588a96f3778cfb92b74b6fa15b. PR #14 remains a draft stacked continuation, not merged. Do not claim its new Rust code compiled or passed tests until a later CI run confirms it.
 - Still incomplete: full GPU stable identity/heterogeneous scheduling, GGUF/projector/context metadata, live agent adapter enablement/verification, executable extension transaction/signatures, WebSocket media progress and artifact pipelines, resource-aware mission scheduling, repair simulation/apply/postcondition/backup/rollback, Python Hub route parity, signed updater and physical host acceptance.
+
+
+### Multi-GPU identity slice — 2026-11-21
+
+- `dread-platform::GpuDevice` now carries `device_id`, `device_index` and `pci_bus_id` as separate optional values. NVIDIA discovery requests UUID and PCI bus address with the telemetry query; legacy query fallback still reports a device by name/VRAM with identity fields unknown.
+- AMD `rocm-smi --showproductname` records its reported GPU index where present; the current adapter does not invent UUID or PCI address. Apple `system_profiler` records the ordinal it reports through enumeration; it does not claim a stable hardware identifier.
+- The host profile and console display index, provider ID and PCI bus address separately. The index is explicitly an enumeration/display index, not a stable key.
+- Unit tests cover two RTX devices with distinct UUIDs/PCI addresses and a driver response that lacks compute capability. More vendor-specific identity coverage remains required.
+- This closes only the stable identity slice for NVIDIA reporting. Intel enumeration, AMD stable IDs/PCI address, persistent identity across hardware reordering, heterogeneous scheduling and actual multi-GPU contention remain open.
