@@ -973,18 +973,22 @@ mod tests {
         let (cancel_tx, cancel_rx) = watch::channel(false);
 
         let managed = tokio::spawn(async move {
-            gate.run_managed("provider-cleanup", cancel_rx, move |mut cancellation| async move {
-                let _ = started_tx.send(());
-                cancellation
-                    .changed()
-                    .await
-                    .map_err(|_| "cancellation channel closed unexpectedly".to_string())?;
-                if !*cancellation.borrow() {
-                    return Err("provider cleanup received a non-cancellation update".into());
-                }
-                cleanup_flag.store(1, Ordering::Release);
-                Ok(json!({"provider_cleanup": "confirmed"}))
-            })
+            gate.run_managed(
+                "provider-cleanup",
+                cancel_rx,
+                move |mut cancellation| async move {
+                    let _ = started_tx.send(());
+                    cancellation
+                        .changed()
+                        .await
+                        .map_err(|_| "cancellation channel closed unexpectedly".to_string())?;
+                    if !*cancellation.borrow() {
+                        return Err("provider cleanup received a non-cancellation update".into());
+                    }
+                    cleanup_flag.store(1, Ordering::Release);
+                    Ok(json!({"provider_cleanup": "confirmed"}))
+                },
+            )
             .await
         });
 
@@ -994,5 +998,4 @@ mod tests {
         assert_eq!(result, json!({"provider_cleanup": "confirmed"}));
         assert_eq!(cleaned_up.load(Ordering::Acquire), 1);
     }
-
 }
