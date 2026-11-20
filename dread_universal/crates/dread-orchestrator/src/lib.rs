@@ -915,4 +915,84 @@ mod tests {
         assert_eq!(result, Err(ExecutionError::TimedOut { attempts: 1 }));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
+
+    #[tokio::test]
+    async fn managed_runner_cancellation_releases_admission_while_waiting_for_permit() {
+        let gate = Arc::new(ExecutionGate::new(config(1, 2)).unwrap());
+        let release = Arc::new(Notify::new());
+        let (holder_started_tx, holder_started_rx) = oneshot::channel();
+        let holder_gate = Arc::clone(&gate);
+        let holder_release = Arc::clone(&release);
+        let holder = tokio::spawn(async move {
+            holder_gate
+                .run("holder", watch::channel(false).1, move |_, _| async move {
+                    let _ = holder_started_tx.send(());
+                    holder_release.notified().await;
+                    Ok(json!({"holder": true}))
+                })
+                .await
+        });
+        holder_started_rx.await.unwrap();
+
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let waiting_gate = Arc::clone(&gate);
+        let waiting = tokio::spawn(async move {
+            waiting_gate
+                .run_managed("waiting-provider", cancel_rx, |_| async {
+                    Ok(json!({"unexpected": "runner started"}))
+                })
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while gate.admitted_count() != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("managed task should be admitted while waiting for the shared permit");
+
+        cancel_tx.send(true).unwrap();
+        assert_eq!(
+            waiting.await.unwrap(),
+            Err(ExecutionError::Cancelled { attempts: 0 })
+        );
+        assert_eq!(gate.admitted_count(), 1);
+
+        release.notify_one();
+        assert!(holder.await.unwrap().is_ok());
+        assert_eq!(gate.admitted_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn managed_runner_passes_cancellation_to_provider_cleanup() {
+        let gate = Arc::new(ExecutionGate::new(config(1, 2)).unwrap());
+        let cleaned_up = Arc::new(AtomicUsize::new(0));
+        let cleanup_flag = Arc::clone(&cleaned_up);
+        let (started_tx, started_rx) = oneshot::channel();
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+
+        let managed = tokio::spawn(async move {
+            gate.run_managed("provider-cleanup", cancel_rx, move |mut cancellation| async move {
+                let _ = started_tx.send(());
+                cancellation
+                    .changed()
+                    .await
+                    .map_err(|_| "cancellation channel closed unexpectedly".to_string())?;
+                if !*cancellation.borrow() {
+                    return Err("provider cleanup received a non-cancellation update".into());
+                }
+                cleanup_flag.store(1, Ordering::Release);
+                Ok(json!({"provider_cleanup": "confirmed"}))
+            })
+            .await
+        });
+
+        started_rx.await.unwrap();
+        cancel_tx.send(true).unwrap();
+        let result = managed.await.unwrap().unwrap();
+        assert_eq!(result, json!({"provider_cleanup": "confirmed"}));
+        assert_eq!(cleaned_up.load(Ordering::Acquire), 1);
+    }
+
 }
