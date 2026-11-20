@@ -23,7 +23,8 @@ use dread_discovery::{
 };
 use dread_gpu::{GpuGatewayClient, GpuSupervisorClient};
 use dread_orchestrator::{
-    ExecutionConfig, ExecutionError, ExecutionGate, ExecutionResourceClass, MissionGraph,
+    ExecutionConfig, ExecutionError, ExecutionGate, ExecutionResourceClass, MissionExecutionPolicy,
+    MissionGraph,
 };
 use dread_platform::cached_host_profile;
 use dread_skills::{
@@ -38,7 +39,7 @@ use std::{
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{broadcast, watch};
 use tracing::{error, info};
@@ -1890,6 +1891,51 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
 /// The task's executor is selected by task_type, never by a caller-supplied capability
 /// attached to an unrelated built-in task. This helper is shared by mission validation
 /// and final queue admission to prevent policy drift.
+fn mission_execution_policy_for_task(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<MissionExecutionPolicy, ApiError> {
+    let stored = conn
+        .query_row(
+            "SELECT m.id, m.graph_json, mt.node_id
+             FROM mission_tasks mt
+             JOIN missions m ON m.id = mt.mission_id
+             WHERE mt.task_id = ?1",
+            params![task_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+
+    let Some((mission_id, graph_json, node_id)) = stored else {
+        return Ok(MissionExecutionPolicy::default());
+    };
+    let graph: MissionGraph = serde_json::from_str(&graph_json).map_err(|error| {
+        ApiError::internal(format!("Stored mission graph is invalid: {error}"))
+    })?;
+    if graph.mission_id != mission_id {
+        return Err(ApiError::internal(
+            "Stored mission ID does not match its graph identity",
+        ));
+    }
+    let node = graph
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)
+        .ok_or_else(|| ApiError::internal("Stored mission node is missing"))?;
+    Ok(node.execution_policy.clone())
+}
+
+/// Resolve a task's provider only from a reviewed, enabled Agent capability.
+/// The task's executor is selected by task_type, never by a caller-supplied capability
+/// attached to an unrelated built-in task. This helper is shared by mission validation
+/// and final queue admission to prevent policy drift.
 fn resolve_agent_provider(
     state: &AppState,
     conn: &Connection,
@@ -1982,6 +2028,18 @@ async fn create_mission(
             return Err(ApiError::bad_request(
                 "mission node identifiers, task types, or dependencies exceed their limits",
             ));
+        }
+        if let Some(timeout_ms) = node.execution_policy.timeout_ms {
+            if !(1_000..=1_805_000).contains(&timeout_ms) {
+                return Err(ApiError::bad_request(
+                    "mission node timeout_ms must be between 1000 and 1805000",
+                ));
+            }
+            if node.task_type == "agent_task" {
+                return Err(ApiError::bad_request(
+                    "Per-node timeout overrides are not supported for agent_task nodes until provider cancellation is fully bounded",
+                ));
+            }
         }
         let payload_size = serde_json::to_vec(&node.payload)
             .map(|encoded| encoded.len())
@@ -2183,6 +2241,7 @@ async fn instantiate_mission(
             "task_type": node.task_type,
             "capability_id": capability_id,
             "depends_on": node.depends_on,
+            "execution_policy": node.execution_policy,
             "status": "pending_approval"
         }));
     }
@@ -3251,6 +3310,7 @@ fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), 
             task_from_row,
         )
         .map_err(|e| ApiError::internal(e.to_string()))?;
+    let execution_policy = mission_execution_policy_for_task(&tx, &id)?;
     tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
     let _ = state.events.send(event);
 
@@ -3286,6 +3346,7 @@ fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), 
             id,
             runner_type,
             runner_payload,
+            execution_policy,
             cancel_receiver,
         ));
     }
@@ -3913,6 +3974,7 @@ async fn execute_approved_task(
     task_id: String,
     task_type: String,
     payload: Value,
+    execution_policy: MissionExecutionPolicy,
     cancellation: watch::Receiver<bool>,
 ) {
     let started_at = now_epoch();
@@ -3961,9 +4023,10 @@ async fn execute_approved_task(
     };
     let execution = state
         .execution
-        .run_with_resource_class(
+        .run_with_resource_class_and_timeout(
             task_id.clone(),
             resource_class,
+            execution_policy.timeout_ms.map(Duration::from_millis),
             cancellation,
             move |_, cancellation| {
             let runner_type = runner_type.clone();
@@ -4420,11 +4483,14 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
                 cancel_receiver,
             ));
         } else {
+            let execution_policy = mission_execution_policy_for_task(&conn, &task.id)
+                .map_err(|error| anyhow::anyhow!(error.message))?;
             tokio::spawn(execute_approved_task(
                 state.clone(),
                 task.id,
                 task.task_type,
                 task.payload,
+                execution_policy,
                 cancel_receiver,
             ));
         }
