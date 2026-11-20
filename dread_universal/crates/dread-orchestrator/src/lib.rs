@@ -920,19 +920,26 @@ mod tests {
     async fn managed_runner_cancellation_releases_admission_while_waiting_for_permit() {
         let gate = Arc::new(ExecutionGate::new(config(1, 2)).unwrap());
         let release = Arc::new(Notify::new());
-        let (holder_started_tx, holder_started_rx) = oneshot::channel();
+        let holder_started = Arc::new(Notify::new());
         let holder_gate = Arc::clone(&gate);
-        let holder_release = Arc::clone(&release);
+        let holder_started_for_runner = Arc::clone(&holder_started);
+        let holder_release_for_runner = Arc::clone(&release);
         let holder = tokio::spawn(async move {
             holder_gate
-                .run("holder", watch::channel(false).1, move |_, _| async move {
-                    let _ = holder_started_tx.send(());
-                    holder_release.notified().await;
-                    Ok(json!({"holder": true}))
+                .run("holder", watch::channel(false).1, move |_, _| {
+                    let started = Arc::clone(&holder_started_for_runner);
+                    let release = Arc::clone(&holder_release_for_runner);
+                    async move {
+                        started.notify_one();
+                        release.notified().await;
+                        Ok(json!({"holder": true}))
+                    }
                 })
                 .await
         });
-        holder_started_rx.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), holder_started.notified())
+            .await
+            .expect("holder execution should start");
 
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let waiting_gate = Arc::clone(&gate);
