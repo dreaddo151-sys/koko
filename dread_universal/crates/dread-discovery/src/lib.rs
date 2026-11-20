@@ -443,7 +443,6 @@ pub async fn discover(services: Vec<Service>) -> Vec<ServiceResult> {
     .await
 }
 
-
 /// Untrusted, disabled-by-default local agent adapter manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DiscoveredAgentManifest {
@@ -910,7 +909,6 @@ mod tests {
         assert_eq!(classify_agent_http_status(503), "DEGRADED");
     }
 }
-
 
 #[cfg(test)]
 mod agent_manifest_tests {
