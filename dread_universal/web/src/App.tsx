@@ -23,6 +23,7 @@ type HostProfile = { os: string; architecture: string; distribution: string | nu
 type LocalModel = { id: string; name: string; model_kind: string; format: string; root: string; relative_path: string; size_bytes: number; status: string };
 type LocalWorkflow = { id: string; name: string; relative_path: string; format: string; node_count: number; node_types: string[]; status: string; execution: string };
 type LocalPlugin = { id: string; name: string; display_name: string; version?: string | null; ecosystem: string; manifest_path: string; components: {agents:number;skills:number;commands:number;hooks:number;mcp_servers:number;tools:number}; status: string; trust: string; execution: string };
+type AgentManifest = { id: string; name: string; adapter: string; health_url: string; version?: string | null; description?: string | null; capabilities: string[]; manifest_path: string; enabled: boolean; status: string; execution: string };
 type ComfyUiMonitor = { status: string; endpoint: string; queue: {status:string;data?:{running_count:number;pending_count:number;running:{prompt_id:string}[];pending:{prompt_id:string}[]}|null;error?:string|null}; history: {status:string;data?:{prompt_id:string;status:string;completed:boolean;outputs:{filename:string;media_type:string}[];errors:{event_type:string;message?:string|null}[]}[]|null;error?:string|null}; system: {status:string;error?:string|null} };
 type Page = "overview" | "missions" | "tasks" | "agents" | "capabilities" | "models" | "gpu" | "inventory";
 
@@ -68,6 +69,7 @@ function App() {
   const [localModels,setLocalModels]=useState<LocalModel[]>([]);
   const [localWorkflows,setLocalWorkflows]=useState<LocalWorkflow[]>([]);
   const [localPlugins,setLocalPlugins]=useState<LocalPlugin[]>([]);
+  const [agentManifests,setAgentManifests]=useState<AgentManifest[]>([]);
   const [comfyMonitor,setComfyMonitor]=useState<ComfyUiMonitor|null>(null);
   const [inventoryUpdated,setInventoryUpdated]=useState<number|null>(null);
   const [inventoryBusy,setInventoryBusy]=useState(false);
@@ -112,17 +114,19 @@ function App() {
   const refreshInventory=useCallback(async()=>{
     if(!token)return;
     setInventoryBusy(true);
-    const [modelsResult,mediaResult,workflowsResult,pluginsResult]=await Promise.allSettled([
+    const [modelsResult,mediaResult,workflowsResult,pluginsResult,agentsResult]=await Promise.allSettled([
       api<{models:LocalModel[]}>("/api/models/local",token),
       api<ComfyUiMonitor>("/api/media/comfyui/monitor",token),
       api<{workflows:LocalWorkflow[]}>("/api/media/workflows/discover",token),
-      api<{plugins:LocalPlugin[]}>("/api/extensions/discover",token)
+      api<{plugins:LocalPlugin[]}>("/api/extensions/discover",token),
+      api<{manifests:AgentManifest[]}>("/api/agents/manifests/discover",token)
     ]);
     const failures:string[]=[];
     if(modelsResult.status==="fulfilled")setLocalModels(modelsResult.value.models??[]);else failures.push("local model inventory");
     if(mediaResult.status==="fulfilled")setComfyMonitor(mediaResult.value);else failures.push("ComfyUI monitor");
     if(workflowsResult.status==="fulfilled")setLocalWorkflows(workflowsResult.value.workflows??[]);else failures.push("workflow catalog");
     if(pluginsResult.status==="fulfilled")setLocalPlugins(pluginsResult.value.plugins??[]);else failures.push("plugin inventory");
+    if(agentsResult.status==="fulfilled")setAgentManifests(agentsResult.value.manifests??[]);else failures.push("agent manifest inventory");
     if(failures.length)setError("Could not refresh: "+failures.join(", "));
     else setError("");
     setInventoryUpdated(Date.now());
@@ -326,6 +330,10 @@ function App() {
             <p className="muted">Cursor, Claude and generic manifests are inventory metadata only. Discovered plugins are untrusted and disabled; hooks, scripts, tools and MCP servers are never started.</p>
             {localPlugins.length?localPlugins.slice(0,100).map(item=><div className="row" key={item.id}><div><b>{item.display_name}</b><small>{item.ecosystem} · {item.name}{item.version?" · "+item.version:""}</small><small>{item.manifest_path} · {item.components.skills} skills / {item.components.tools} tools / {item.components.mcp_servers} MCP servers</small></div><div className="task-actions"><Pill value="untrusted"/><Pill value="disabled"/></div></div>):<Empty text="No local plugin manifests found under the configured Cursor / Claude / generic roots."/>}
             {localPlugins.length>100&&<p className="muted">Showing first 100 of {localPlugins.length} plugin manifests.</p>}
+            <div className="panel-toolbar"><PanelTitle icon={<Bot/>} title="LOCAL AGENT ADAPTER MANIFESTS" meta={String(agentManifests.length)+" CANDIDATES"}/></div>
+            <p className="muted">These manifests are discovered automatically from configured and standard per-user locations. DREAD does not probe the declared URL or start an agent during discovery. A candidate must be reviewed, mapped to a supported adapter, explicitly configured, and separately enabled before health checks or execution.</p>
+            {agentManifests.length?agentManifests.slice(0,100).map(item=><div className="row" key={item.manifest_path}><div><b>{item.name}</b><small>{item.id} · adapter {item.adapter}{item.version?" · "+item.version:""}</small><small>{item.health_url} · {item.manifest_path}</small><small>{item.capabilities.slice(0,8).join(", ")||"No capability metadata"}{item.description?" · "+item.description:""}</small></div><div className="task-actions"><Pill value="review_required"/><Pill value="disabled"/></div></div>):<Empty text="No local agent manifests found. Configure DREAD_AGENT_MANIFEST_ROOTS or add agent.toml / *.agent.toml files under config/agents.d or the per-user DREAD config directory."/>}
+            {agentManifests.length>100&&<p className="muted">Showing first 100 of {agentManifests.length} agent manifests.</p>}
             <p className="muted">{inventoryUpdated?"Last scan "+new Date(inventoryUpdated).toLocaleTimeString()+".":"Inventory has not been scanned."} Automatic refresh runs every 30 seconds while this page is open.</p>
           </section>
         </div>}
