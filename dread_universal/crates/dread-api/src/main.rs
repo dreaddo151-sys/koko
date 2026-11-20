@@ -19,7 +19,7 @@ use dread_agents::{
     openhands::OpenHandsAgentServerAdapter,
 };
 use dread_discovery::{
-    discover, discover_agents, known_agent_endpoints, load_agents, load_services,
+    discover, discover_agent_manifests, discover_agents, known_agent_endpoints, load_agents, load_services,
 };
 use dread_gpu::{GpuGatewayClient, GpuSupervisorClient};
 use dread_orchestrator::{ExecutionConfig, ExecutionError, ExecutionGate, MissionGraph};
@@ -683,6 +683,17 @@ async fn agents() -> Result<Json<Value>, ApiError> {
             "Could not serialize agent discovery results: {error}"
         ))
     })
+}
+
+
+async fn discover_agent_manifest_inventory(
+) -> Result<Json<dread_discovery::AgentManifestInventory>, ApiError> {
+    let inventory = tokio::task::spawn_blocking(discover_agent_manifests)
+        .await
+        .map_err(|error| {
+            ApiError::internal(format!("Agent manifest discovery worker failed: {error}"))
+        })?;
+    Ok(Json(inventory))
 }
 
 async fn agent_adapter_registry(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -4835,6 +4846,7 @@ fn app(state: AppState) -> Router {
         .route("/api/gpu/{*path}", axum::routing::post(gpu_inference))
         .route("/api/services", get(services))
         .route("/api/agents", get(agents))
+        .route("/api/agents/manifests/discover", get(discover_agent_manifest_inventory))
         .route("/api/agent-adapters", get(agent_adapter_registry))
         .route(
             "/api/capabilities",
@@ -8267,6 +8279,7 @@ mod tests {
         let protected_routes = [
             "/api/models/local",
             "/api/repair/plan",
+            "/api/agents/manifests/discover",
             "/api/media/comfyui/monitor",
             "/api/media/workflows/discover",
             "/api/extensions/discover",
