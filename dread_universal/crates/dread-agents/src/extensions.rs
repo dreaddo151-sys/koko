@@ -70,9 +70,16 @@ fn configured_plugin_roots() -> Vec<PathBuf> {
         return env::split_paths(&value).take(MAX_ROOTS + 1).collect();
     }
     let mut roots = vec![PathBuf::from("integrations/cursor-plugins-full")];
-    if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
+    if let Some(home) = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+    {
         roots.push(home.join(".cursor/plugins"));
         roots.push(home.join(".claude/plugins"));
+    }
+    if let Some(app_data) = env::var_os("APPDATA").map(PathBuf::from) {
+        roots.push(app_data.join("Cursor/plugins"));
+        roots.push(app_data.join("Claude/plugins"));
     }
     roots
 }
