@@ -168,19 +168,27 @@ cd ..
 bash scripts/package-ubuntu.sh
 ```
 
-The packaging script creates an Ubuntu `.deb`, a portable `.tar.gz`, and `SHA256SUMS` under `dist/release/`. It packages the API, production console, default service/agent configuration, bridge helper, user systemd unit and operating documentation.
+The packaging script creates an Ubuntu `.deb`, a portable `.tar.gz`, and `SHA256SUMS` under `dist/release/`. The tagged GitHub release workflow additionally creates the keyless Sigstore bundle `SHA256SUMS.sigstore.json` using GitHub OIDC, verifies it against the pinned release-workflow identity, and publishes it alongside the artifacts. A locally assembled package directory is not a signed official release until that bundle has been created and verified.
 
-Portable install (run as the regular desktop user, not with sudo):
+**Verify the release before installing.** Install Sigstore Cosign using the [official instructions](https://docs.sigstore.dev/installation/), put the downloaded release assets in one directory, then run:
 
 ```bash
-tar -xzf dist/release/dread-universal-ubuntu-*.tar.gz
+./verify-release.sh ./SHA256SUMS
+```
+
+The verifier requires the adjacent `SHA256SUMS.sigstore.json` bundle, checks the GitHub release workflow identity and OIDC issuer, then validates every artifact checksum. Do not install a release that lacks the bundle or fails verification.
+
+Portable install (run as the regular desktop user, not with sudo), after successful verification:
+
+```bash
+tar -xzf dread-universal-ubuntu-*.tar.gz
 ./bundle/install-user.sh
 ```
 
-Debian package install:
+Debian package install, after successful verification:
 
 ```bash
-sudo dpkg -i dist/release/dread-universal_*.deb
+sudo dpkg -i ./dread-universal_*.deb
 /usr/share/dread-universal/configure-user.sh
 ```
 
