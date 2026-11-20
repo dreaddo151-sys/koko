@@ -39,7 +39,7 @@ use std::{
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{broadcast, watch};
 use tracing::{error, info};
@@ -47,6 +47,10 @@ use uuid::Uuid;
 
 const MAX_API_BODY_BYTES: usize = 32 * 1024 * 1024;
 const MAX_RESOURCE_CONCURRENCY: usize = 32;
+
+fn elapsed_ms_since(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
 
 fn parse_resource_concurrency(
     name: &str,
@@ -3533,6 +3537,7 @@ async fn execute_agent_task(
         payload,
         initial_event_cursor,
     } = execution;
+    let worker_started = Instant::now();
 
     // Keep provider tasks inside the same bounded execution kernel as built-in
     // tasks. This is application-level admission only; provider sandboxing and
@@ -3552,6 +3557,7 @@ async fn execute_agent_task(
             finish_agent_task(
                 &state,
                 &task_id,
+                elapsed_ms_since(worker_started),
                 status,
                 None,
                 Some(format!("Agent task admission failed: {error:?}")),
@@ -3591,19 +3597,28 @@ async fn execute_agent_task(
         input: payload,
         idempotency_key: format!("project-dread:{task_id}"),
     };
-    let started = tokio::select! { result = adapter.start_task(request) => result, _ = cancellation.changed() => { finish_agent_task(&state, &task_id, "cancelled", None, Some("Cancelled before provider submission".into())); return; } };
+    let started = tokio::select! { result = adapter.start_task(request) => result, _ = cancellation.changed() => { finish_agent_task(
+                &state,
+                &task_id,
+                elapsed_ms_since(worker_started),
+                "cancelled", None, Some("Cancelled before provider submission".into())); return; } };
     let started = match started {
         Ok(task) => task,
         Err(error) => {
-            finish_agent_task(&state, &task_id, "failed", None, Some(error.to_string()));
+            finish_agent_task(
+                &state,
+                &task_id,
+                elapsed_ms_since(worker_started),
+                "failed", None, Some(error.to_string()));
             return;
         }
     };
     let Some(provider_id) = started.provider_task_id else {
         finish_agent_task(
-            &state,
-            &task_id,
-            "failed",
+                &state,
+                &task_id,
+                elapsed_ms_since(worker_started),
+                "failed",
             None,
             Some("Provider returned no task identifier".into()),
         );
@@ -3621,12 +3636,17 @@ async fn execute_agent_task(
         if *cancellation.borrow() {
             match adapter.cancel_task(&task_id, &provider_id).await {
                 Ok(task) => {
-                    finish_agent_task(&state, &task_id, "cancelled", task.result, task.error)
+                    finish_agent_task(
+                &state,
+                &task_id,
+                elapsed_ms_since(worker_started),
+                "cancelled", task.result, task.error)
                 }
                 Err(error) => finish_agent_task(
-                    &state,
-                    &task_id,
-                    "failed",
+                &state,
+                &task_id,
+                elapsed_ms_since(worker_started),
+                "failed",
                     None,
                     Some(format!("Provider cancellation failed: {error}")),
                 ),
@@ -3660,9 +3680,10 @@ async fn execute_agent_task(
             }
             Err(error) => {
                 finish_agent_task(
-                    &state,
-                    &task_id,
-                    "failed",
+                &state,
+                &task_id,
+                elapsed_ms_since(worker_started),
+                "failed",
                     None,
                     Some(format!("Provider event polling failed: {error}")),
                 );
@@ -3685,7 +3706,11 @@ async fn execute_agent_task(
                     AgentTaskState::Cancelled => "cancelled",
                     _ => "failed",
                 };
-                finish_agent_task(&state, &task_id, status, result.result, result.error);
+                finish_agent_task(
+                &state,
+                &task_id,
+                elapsed_ms_since(worker_started),
+                status, result.result, result.error);
                 return;
             }
             Ok(task) if task.state == AgentTaskState::WaitingForConfirmation => {
@@ -3698,9 +3723,10 @@ async fn execute_agent_task(
                         "executor",
                     ) {
                         finish_agent_task(
-                            &state,
-                            &task_id,
-                            "failed",
+                &state,
+                &task_id,
+                elapsed_ms_since(worker_started),
+                "failed",
                             None,
                             Some(format!(
                                 "Could not persist agent confirmation state: {error:?}"
@@ -3721,9 +3747,10 @@ async fn execute_agent_task(
                         "executor",
                     ) {
                         finish_agent_task(
-                            &state,
-                            &task_id,
-                            "failed",
+                &state,
+                &task_id,
+                elapsed_ms_since(worker_started),
+                "failed",
                             None,
                             Some(format!("Could not persist agent resume state: {error:?}")),
                         );
@@ -3734,9 +3761,10 @@ async fn execute_agent_task(
             }
             Err(error) => {
                 finish_agent_task(
-                    &state,
-                    &task_id,
-                    "failed",
+                &state,
+                &task_id,
+                elapsed_ms_since(worker_started),
+                "failed",
                     None,
                     Some(format!("Provider status polling failed: {error}")),
                 );
@@ -3750,6 +3778,7 @@ async fn execute_agent_task(
 fn finish_agent_task(
     state: &AppState,
     task_id: &str,
+    elapsed_ms: u64,
     status: &str,
     result: Option<Value>,
     error: Option<String>,
@@ -3791,8 +3820,8 @@ fn finish_agent_task(
     if tx
         .execute(
             "INSERT OR REPLACE INTO task_results (task_id, result_json, error, attempts, elapsed_ms, completed_at)
-             VALUES (?1, ?2, ?3, 1, 0, ?4)",
-            params![task_id, result_json, error, now],
+             VALUES (?1, ?2, ?3, 1, ?4, ?5)",
+            params![task_id, result_json, error, elapsed_ms, now],
         )
         .is_err()
     {
@@ -4184,6 +4213,7 @@ async fn execute_approved_task(
         "service_discovery" => ExecutionResourceClass::Network,
         _ => ExecutionResourceClass::General,
     };
+    let execution_started = Instant::now();
     let execution = state
         .execution
         .run_with_resource_class_and_timeout(
@@ -4226,6 +4256,7 @@ async fn execute_approved_task(
         },
         )
         .await;
+    let elapsed_ms = elapsed_ms_since(execution_started);
 
     let (status, result_json, error, attempts, elapsed_ms) = match execution {
         Ok(result) => (
@@ -4233,7 +4264,7 @@ async fn execute_approved_task(
             Some(result.result.to_string()),
             None,
             result.attempts,
-            result.elapsed_ms,
+            elapsed_ms,
         ),
         Err(error) => {
             let attempts = match &error {
@@ -4247,7 +4278,7 @@ async fn execute_approved_task(
             } else {
                 "failed"
             };
-            (status, None, Some(format!("{error:?}")), attempts, 0)
+            (status, None, Some(format!("{error:?}")), attempts, elapsed_ms)
         }
     };
 
@@ -5854,6 +5885,13 @@ mod tests {
     async fn test_app() -> (Router, tokio::task::JoinHandle<()>) {
         let (router, _receiver, server) = test_app_with_events().await;
         (router, server)
+    }
+
+    #[test]
+    fn elapsed_metric_uses_monotonic_clock_for_failed_and_cancelled_runs() {
+        let started = Instant::now();
+        std::thread::sleep(Duration::from_millis(3));
+        assert!(elapsed_ms_since(started) >= 1);
     }
 
     #[test]
