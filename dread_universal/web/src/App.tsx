@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Activity, AlertCircle, Bot, Check, ChevronRight, Cpu, FolderSearch, Gauge, KeyRound, Layers3, LockKeyhole, LogOut, MessageSquare, Play, Plus, Radio, RefreshCw, Search, Server, ShieldCheck, TerminalSquare, X, Zap, Workflow } from "lucide-react";
 
@@ -24,6 +24,8 @@ type LocalModel = { id: string; name: string; model_kind: string; format: string
 type LocalWorkflow = { id: string; name: string; relative_path: string; format: string; node_count: number; node_types: string[]; status: string; execution: string };
 type LocalPlugin = { id: string; name: string; display_name: string; version?: string | null; ecosystem: string; manifest_path: string; components: {agents:number;skills:number;commands:number;hooks:number;mcp_servers:number;tools:number}; status: string; trust: string; execution: string };
 type AgentManifest = { id: string; name: string; adapter: string; health_url: string; version?: string | null; description?: string | null; capabilities: string[]; manifest_path: string; enabled: boolean; status: string; execution: string };
+type RepairFinding = { component_id: string; severity: string; condition: string; observed_state: string; evidence: string; recommended_action: string; requires_operator_approval: boolean; auto_apply_eligible: boolean; status: string };
+type RepairPlan = { status: string; checked_components: number; findings: RepairFinding[]; summary: string; safety_boundary: string };
 type ComfyUiMonitor = { status: string; endpoint: string; queue: {status:string;data?:{running_count:number;pending_count:number;running:{prompt_id:string}[];pending:{prompt_id:string}[]}|null;error?:string|null}; history: {status:string;data?:{prompt_id:string;status:string;completed:boolean;outputs:{filename:string;media_type:string}[];errors:{event_type:string;message?:string|null}[]}[]|null;error?:string|null}; system: {status:string;error?:string|null} };
 type Page = "overview" | "missions" | "tasks" | "agents" | "capabilities" | "models" | "gpu" | "inventory";
 
@@ -70,6 +72,8 @@ function App() {
   const [localWorkflows,setLocalWorkflows]=useState<LocalWorkflow[]>([]);
   const [localPlugins,setLocalPlugins]=useState<LocalPlugin[]>([]);
   const [agentManifests,setAgentManifests]=useState<AgentManifest[]>([]);
+  const [repairPlan,setRepairPlan]=useState<RepairPlan|null>(null);
+  const inventoryScanInFlight=useRef(false);
   const [comfyMonitor,setComfyMonitor]=useState<ComfyUiMonitor|null>(null);
   const [inventoryUpdated,setInventoryUpdated]=useState<number|null>(null);
   const [inventoryBusy,setInventoryBusy]=useState(false);
@@ -112,14 +116,16 @@ function App() {
     return()=>{dead=true;window.clearInterval(t);};
   },[active,token]);
   const refreshInventory=useCallback(async()=>{
-    if(!token)return;
+    if(!token||inventoryScanInFlight.current)return;
+    inventoryScanInFlight.current=true;
     setInventoryBusy(true);
-    const [modelsResult,mediaResult,workflowsResult,pluginsResult,agentsResult]=await Promise.allSettled([
+    const [modelsResult,mediaResult,workflowsResult,pluginsResult,agentsResult,repairResult]=await Promise.allSettled([
       api<{models:LocalModel[]}>("/api/models/local",token),
       api<ComfyUiMonitor>("/api/media/comfyui/monitor",token),
       api<{workflows:LocalWorkflow[]}>("/api/media/workflows/discover",token),
       api<{plugins:LocalPlugin[]}>("/api/extensions/discover",token),
-      api<{manifests:AgentManifest[]}>("/api/agents/manifests/discover",token)
+      api<{manifests:AgentManifest[]}>("/api/agents/manifests/discover",token),
+      api<RepairPlan>("/api/repair/plan",token)
     ]);
     const failures:string[]=[];
     if(modelsResult.status==="fulfilled")setLocalModels(modelsResult.value.models??[]);else failures.push("local model inventory");
@@ -127,10 +133,12 @@ function App() {
     if(workflowsResult.status==="fulfilled")setLocalWorkflows(workflowsResult.value.workflows??[]);else failures.push("workflow catalog");
     if(pluginsResult.status==="fulfilled")setLocalPlugins(pluginsResult.value.plugins??[]);else failures.push("plugin inventory");
     if(agentsResult.status==="fulfilled")setAgentManifests(agentsResult.value.manifests??[]);else failures.push("agent manifest inventory");
+    if(repairResult.status==="fulfilled")setRepairPlan(repairResult.value);else failures.push("diagnostic repair plan");
     if(failures.length)setError("Could not refresh: "+failures.join(", "));
     else setError("");
     setInventoryUpdated(Date.now());
     setInventoryBusy(false);
+    inventoryScanInFlight.current=false;
   },[token]);
   useEffect(()=>{
     if(page!=="inventory"||!token)return;
@@ -241,7 +249,7 @@ function App() {
     }catch(e){setError(e instanceof Error?e.message:"Capability removal failed");}
     finally{setBusy(false);}
   };
-  const disconnect=()=>{setToken("");setDraft("");setPage("overview");setActive("");setEvents([]);setResult(null);setTasks([]);setMissions([]);setSelectedMission("");setMissionDetail(null);setAgents([]);setCapabilities([]);setModels([]);setServices([]);setModel("");setConnected(false);setSupervisorConfigured(false);};
+  const disconnect=()=>{setToken("");setDraft("");setPage("overview");setActive("");setEvents([]);setResult(null);setTasks([]);setMissions([]);setSelectedMission("");setMissionDetail(null);setAgents([]);setCapabilities([]);setModels([]);setServices([]);setModel("");setLocalModels([]);setLocalWorkflows([]);setLocalPlugins([]);setAgentManifests([]);setComfyMonitor(null);setRepairPlan(null);setInventoryUpdated(null);setInventoryBusy(false);inventoryScanInFlight.current=false;setConnected(false);setSupervisorConfigured(false);};
   const activeTask=tasks.find(x=>x.id===active);
   const latestWaitEvent=[...events].reverse().find(event=>event.event_type==="agent_waiting_for_confirmation");
   const pendingActionEvent=latestWaitEvent?[...events].reverse().find(event=>event.event_type==="ActionEvent"&&event.sequence<latestWaitEvent.sequence):undefined;
@@ -335,6 +343,17 @@ function App() {
             {agentManifests.length?agentManifests.slice(0,100).map(item=><div className="row" key={item.manifest_path}><div><b>{item.name}</b><small>{item.id} · adapter {item.adapter}{item.version?" · "+item.version:""}</small><small>{item.health_url} · {item.manifest_path}</small><small>{item.capabilities.slice(0,8).join(", ")||"No capability metadata"}{item.description?" · "+item.description:""}</small></div><div className="task-actions"><Pill value="review_required"/><Pill value="disabled"/></div></div>):<Empty text="No local agent manifests found. Configure DREAD_AGENT_MANIFEST_ROOTS or add agent.toml / *.agent.toml files under config/agents.d or the per-user DREAD config directory."/>}
             {agentManifests.length>100&&<p className="muted">Showing first 100 of {agentManifests.length} agent manifests.</p>}
             <p className="muted">{inventoryUpdated?"Last scan "+new Date(inventoryUpdated).toLocaleTimeString()+".":"Inventory has not been scanned."} Automatic refresh runs every 30 seconds while this page is open.</p>
+          </section>
+          <section className="panel">
+            <PanelTitle icon={<ShieldCheck/>} title="SELF-REPAIR DIAGNOSTICS" meta={repairPlan?.status?.toUpperCase()??"NOT CHECKED"}/>
+            <p className="muted">This is the diagnosis and proposal layer only. It does not edit files, restart services, load/unload models, alter GPU leases or apply repairs.</p>
+            {repairPlan?<><div className="row"><div><b>{repairPlan.summary}</b><small>{repairPlan.checked_components} component(s) observed</small></div><Pill value="diagnostic_plan_only"/></div>
+              {repairPlan.findings.length?repairPlan.findings.map(item=><div className="row" key={item.component_id+item.condition}><div><b>{item.component_id} · {item.condition.replaceAll("_"," ")}</b><small>{item.evidence}</small><small>Proposal: {item.recommended_action}</small></div><div className="task-actions"><Pill value={item.severity}/><Pill value="proposed_not_applied"/></div></div>):<Empty text="No repair findings were produced from the currently observable components."/>}
+              <p className="muted">{repairPlan.safety_boundary}</p>
+            </>:<Empty text="Diagnostic plan has not been loaded."/>}
+          </section>
+          <section className="panel">
+            <div className="row"><div><b>Inventory refresh guard</b><small>Disk scans are serialized; one refresh runs at a time.</small></div><Pill value={inventoryBusy?"running":"idle"}/></div>
           </section>
         </div>}
         {page==="missions"&&<div className="task-layout">
