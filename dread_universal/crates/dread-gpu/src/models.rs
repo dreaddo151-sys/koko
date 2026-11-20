@@ -764,16 +764,16 @@ mod tests {
         fs::create_dir_all(&blobs).unwrap();
         fs::create_dir_all(&snapshot).unwrap();
         fs::write(blobs.join("model-blob"), b"weight-data").unwrap();
-        symlink(
-            blobs.join("model-blob"),
-            snapshot.join("model.safetensors"),
-        )
-        .unwrap();
+        symlink(blobs.join("model-blob"), snapshot.join("model.safetensors")).unwrap();
 
         let inventory = discover_local_models_in(std::slice::from_ref(&root), 6, 100);
         assert_eq!(inventory.models.len(), 1);
         assert_eq!(inventory.models[0].format, "safetensors");
-        assert!(inventory.models[0].relative_path.contains("snapshots/revision-abc"));
+        assert!(
+            inventory.models[0]
+                .relative_path
+                .contains("snapshots/revision-abc")
+        );
         assert_eq!(inventory.models[0].status, "discovered_not_loaded");
 
         fs::remove_dir_all(root).unwrap();
