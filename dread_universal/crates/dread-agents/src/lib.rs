@@ -1,10 +1,10 @@
-pub mod extensions;
-
 //! Provider-neutral contracts for PROJECT DREAD agent adapters and capabilities.
 //!
 //! Provider adapters are explicit, loopback-restricted clients and are not
 //! auto-discovered or registered by this crate. Callers must enforce DREAD
 //! approval before task submission; imported capabilities start disabled.
+
+pub mod extensions;
 
 pub mod deerflow;
 pub mod hermes;
