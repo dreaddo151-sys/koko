@@ -113,6 +113,15 @@ Never commit API or Supervisor tokens. Store them outside the repository with re
 | GET | `/api/agents/manifests/discover` | Read-only local agent adapter manifest inventory; does not probe or start agents |
 | GET | `/api/repair/plan` | Evidence-backed diagnostic repair proposals; does not apply changes |
 | POST | `/api/gpu/v1/chat/completions` | Supervisor-managed inference |
+| GET | `/api/usage/tokens` | Aggregate exact provider-reported token counters from completed `gpu_chat` tasks; missing counters are reported separately, never estimated |
+| POST | `/api/prompt/enhance` | Generate a local-model prompt suggestion through the authenticated Python GPU Supervisor; returns a preview only and never creates or executes a task |
+
+## Token observability and prompt enhancement
+
+- Token usage is aggregated only from completed `gpu_chat` results whose provider response includes complete `prompt_tokens`, `completion_tokens` and `total_tokens` counters. The API scans at most the latest 10,000 completed results per request; partial/missing counters are reported separately.
+- DREAD does not infer or estimate token counts when the provider omits usage metadata.
+- Prompt enhancement uses the selected model advertised by the local llama.cpp gateway and sends inference through the authenticated Python GPU Supervisor bridge. The endpoint returns a bounded suggestion marked `requires_operator_review`; it sets `submitted=false`, does not create a task, and never bypasses normal approval.
+- In the operator console, the enhanced prompt is a preview. The operator must explicitly apply or discard it before any separate task creation.
 
 ## Agent and extension boundaries
 
