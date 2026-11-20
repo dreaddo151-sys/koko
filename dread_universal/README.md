@@ -14,6 +14,7 @@ DREAD is intended to provide one coherent operator environment for autonomous en
 - Preserve ComfyUI, the Python GPU Supervisor, authenticated bridge, model files, databases, configuration and user data.
 - llama.cpp is the active inference backend. Ollama is not started or used as the active model server.
 - The Python GPU Supervisor remains the only GPU lease and process-lifecycle authority. Rust must not launch a competing llama-server or bypass the authenticated bridge.
+- GPU inventory keeps stable provider IDs (for example NVIDIA UUID) and PCI bus addresses separate from the current enumeration index. Missing identity fields are reported as unavailable; they are never synthesized from array order.
 - Imported skills and agent prompt profiles start disabled and are untrusted reference content. Discovery/import does not execute code.
 - Changes must be backed up, reversible and verified against real postconditions.
 
@@ -88,7 +89,7 @@ Never commit API or Supervisor tokens. Store them outside the repository with re
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/health` | API liveness/version |
-| GET | `/api/system/profile` | Read-only host discovery |
+| GET | `/api/system/profile` | Read-only host discovery; reports vendor device ID, enumeration index and PCI bus address separately where available |
 | GET | `/api/services` | Configured local service health |
 | GET | `/api/agents` | Read-only configured/known endpoint probes |
 | GET | `/api/agent-adapters` | Authenticated inventory of explicitly configured provider adapters |
