@@ -289,8 +289,7 @@ impl ExecutionGate {
         // Acquire the narrower class first so work waiting on a class quota does not
         // occupy a global worker slot needed by another resource class.
         let resource_permit = acquire_cancellable(resource_semaphore, cancellation).await?;
-        let global_permit =
-            acquire_cancellable(Arc::clone(&self.semaphore), cancellation).await?;
+        let global_permit = acquire_cancellable(Arc::clone(&self.semaphore), cancellation).await?;
 
         Ok(ExecutionPermit {
             _admission: admission,
@@ -334,10 +333,15 @@ impl ExecutionGate {
         F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
         Fut: Future<Output = Result<Value, String>> + Send,
     {
-        self.run_inner(task_id, class, cancellation, move |attempt, cancellation| {
-            let operation_future = operation(attempt, cancellation);
-            async move { operation_future.await.map_err(RunnerError::permanent) }
-        })
+        self.run_inner(
+            task_id,
+            class,
+            cancellation,
+            move |attempt, cancellation| {
+                let operation_future = operation(attempt, cancellation);
+                async move { operation_future.await.map_err(RunnerError::permanent) }
+            },
+        )
         .await
     }
 
@@ -374,7 +378,8 @@ impl ExecutionGate {
         F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
         Fut: Future<Output = Result<Value, RunnerError>> + Send,
     {
-        self.run_inner(task_id, class, cancellation, operation).await
+        self.run_inner(task_id, class, cancellation, operation)
+            .await
     }
 
     async fn run_inner<F, Fut>(
@@ -710,9 +715,7 @@ mod tests {
             agent: 1,
             ..ResourceLimits::default()
         };
-        let gate = Arc::new(
-            ExecutionGate::new_with_resource_limits(config(2, 4), limits).unwrap(),
-        );
+        let gate = Arc::new(ExecutionGate::new_with_resource_limits(config(2, 4), limits).unwrap());
         let active = Arc::new(AtomicUsize::new(0));
         let maximum = Arc::new(AtomicUsize::new(0));
 
@@ -756,9 +759,7 @@ mod tests {
             network: 1,
             ..ResourceLimits::default()
         };
-        let gate = Arc::new(
-            ExecutionGate::new_with_resource_limits(config(2, 4), limits).unwrap(),
-        );
+        let gate = Arc::new(ExecutionGate::new_with_resource_limits(config(2, 4), limits).unwrap());
         let active = Arc::new(AtomicUsize::new(0));
         let maximum = Arc::new(AtomicUsize::new(0));
 
@@ -796,9 +797,7 @@ mod tests {
             agent: 1,
             ..ResourceLimits::default()
         };
-        let gate = Arc::new(
-            ExecutionGate::new_with_resource_limits(config(2, 4), limits).unwrap(),
-        );
+        let gate = Arc::new(ExecutionGate::new_with_resource_limits(config(2, 4), limits).unwrap());
         let (cancel_first, receiver_first) = watch::channel(false);
         let (cancel_second, receiver_second) = watch::channel(false);
         let started = Arc::new(AtomicUsize::new(0));
