@@ -403,7 +403,7 @@ mod tests {
             &workflow,
             r#"{"last_node_id":2,"nodes":[{"id":1,"type":"CheckpointLoaderSimple"},{"id":2,"type":"VHS_VideoCombine","widgets_values":["private-value"]}]}"#,
         ).unwrap();
-        let inventory = discover_local_workflows_in(&[root.clone()]);
+        let inventory = discover_local_workflows_in(std::slice::from_ref(&root));
         assert_eq!(inventory.workflows.len(), 1);
         let item = &inventory.workflows[0];
         assert_eq!(item.format, "comfyui_graph");
@@ -426,7 +426,7 @@ mod tests {
             r#"{"1":{"class_type":"KSampler","inputs":{}},"2":{"class_type":"VAELoader","inputs":{}}}"#,
         ).unwrap();
         fs::write(root.join("unrelated.json"), r#"{"hello":"world"}"#).unwrap();
-        let inventory = discover_local_workflows_in(&[root.clone()]);
+        let inventory = discover_local_workflows_in(std::slice::from_ref(&root));
         assert_eq!(inventory.workflows.len(), 1);
         assert_eq!(inventory.workflows[0].format, "comfyui_api_prompt");
         assert_eq!(inventory.workflows[0].node_count, 2);
@@ -446,7 +446,7 @@ mod tests {
         )
         .unwrap();
         symlink(outside.join("external.json"), root.join("linked.json")).unwrap();
-        let inventory = discover_local_workflows_in(&[root.clone()]);
+        let inventory = discover_local_workflows_in(std::slice::from_ref(&root));
         assert!(inventory.workflows.is_empty());
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
