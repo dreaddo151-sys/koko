@@ -11,6 +11,7 @@ type MissionDetail = { mission_id: string; graph: { mission_id: string; nodes: M
 type Agent = { id: string; name: string; status: string; adapter?: string };
 type Event = { sequence: number; event_type: string; actor: string; created_at: number; payload?: Record<string, unknown> };
 type Result = { result?: unknown; error?: string | null; attempts?: number; elapsed_ms?: number };
+type TokenUsage = { provider: string; prompt_tokens: number; completion_tokens: number; total_tokens: number; measured_responses: number; responses_without_usage: number; scan_limit: number; note: string };
 type Capability = { id: string; name: string; kind: string; description: string; version?: string | null; license?: string | null; compatibility: string; dependencies: string[]; adapter?: string | null; status: string; provenance: { source_name: string; source_version?: string | null } };
 type SkillPreview = { id: string; name: string; description: string; content: string; trust: string; execution: string };
 type Service = { id: string; name: string; role: string; status: string; http_status?: number | null; latency_ms?: number; summary?: string | null; detail?: string };
@@ -66,7 +67,7 @@ function App() {
   {"id":"summarize","depends_on":["discover"],"priority":1,"task_type":"service_discovery","payload":{}}
 ]`);
   const [skillPreview,setSkillPreview]=useState<SkillPreview|null>(null); const [notice,setNotice]=useState(""); const [selectedSkills,setSelectedSkills]=useState<string[]>([]); const [hostProfile,setHostProfile]=useState<HostProfile|null>(null);
-  const [prompt,setPrompt]=useState(""); const [active,setActive]=useState("");
+  const [prompt,setPrompt]=useState(""); const [enhancedPrompt,setEnhancedPrompt]=useState(""); const [enhancing,setEnhancing]=useState(false); const [tokenUsage,setTokenUsage]=useState<TokenUsage|null>(null); const [active,setActive]=useState("");
   const [events,setEvents]=useState<Event[]>([]); const [result,setResult]=useState<Result|null>(null);
   const [page,setPage]=useState<Page>("overview"); const [lastRefresh,setLastRefresh]=useState<number|null>(null);
   const [localModels,setLocalModels]=useState<LocalModel[]>([]);
@@ -90,6 +91,17 @@ function App() {
     }catch(e){setConnected(false);setError(e instanceof Error?e.message:"API request failed");}
   },[token]);
   useEffect(()=>{void refresh();if(!token)return;const t=window.setInterval(()=>void refresh(),5000);return()=>window.clearInterval(t);},[refresh,token]);
+  const refreshTokenUsage=useCallback(async()=>{
+    if(!token){setTokenUsage(null);return;}
+    try{setTokenUsage(await api<TokenUsage>("/api/usage/tokens",token));}
+    catch{setTokenUsage(null);}
+  },[token]);
+  useEffect(()=>{
+    void refreshTokenUsage();
+    if(!token)return;
+    const timer=window.setInterval(()=>void refreshTokenUsage(),30000);
+    return()=>window.clearInterval(timer);
+  },[refreshTokenUsage,token]);
   useEffect(()=>{if(models.length&&!models.some(x=>x.id===model))setModel(models[0].id);},[models,model]);
   useEffect(()=>{
     if(!token||!selectedMission){setMissionDetail(null);return;}
@@ -159,6 +171,26 @@ function App() {
       const out=await api<{item:Task}>("/api/tasks",token,{method:"POST",body:JSON.stringify({title:type==="gpu_chat"?`Chat · ${model}`:"Local service discovery",task_type:type,payload})});
       setTasks(x=>[out.item,...x]);setActive(out.item.id);setPage("tasks");if(type==="gpu_chat")setPrompt("");
     }catch(e){setError(e instanceof Error?e.message:"Task creation failed");}finally{setBusy(false);}
+  };
+  const enhancePrompt=async()=>{
+    if(!token||!supervisorOnline||!model||!prompt.trim())return;
+    setEnhancing(true);setError("");setEnhancedPrompt("");
+    try{
+      const out=await api<{enhanced_prompt:string;requires_operator_review:boolean;submitted:boolean}>(
+        "/api/prompt/enhance",token,
+        {method:"POST",body:JSON.stringify({model,prompt:prompt.trim()})}
+      );
+      if(!out.requires_operator_review||out.submitted)throw new Error("Prompt service did not return a review-only preview.");
+      setEnhancedPrompt(out.enhanced_prompt);
+      setNotice("An enhanced prompt preview is ready. Nothing was submitted or executed.");
+    }catch(e){setError(e instanceof Error?e.message:"Prompt enhancement failed");}
+    finally{setEnhancing(false);}
+  };
+  const applyEnhancedPrompt=()=>{
+    if(!enhancedPrompt)return;
+    setPrompt(enhancedPrompt);
+    setEnhancedPrompt("");
+    setNotice("Enhanced prompt applied to the composer only. Queueing still requires your separate action and task approval.");
   };
   const planMission=async()=>{
     if(!token)return;
@@ -302,10 +334,13 @@ function App() {
           <Metric icon={<Layers3/>} label="LOCAL MODEL POOL" value={String(models.length).padStart(2,"0")} detail="DISCOVERED VIA GPU GATEWAY" tone="cyan"/>
           <Metric icon={<Radio/>} label="SERVICE UPLINKS" value={String(onlineServices).padStart(2,"0")} detail={`${services.length} CONFIGURED / READ-ONLY PROBES`} tone="green"/>
         </div>
+        <div className="approval token-usage-strip"><Activity size={14}/><span>PROVIDER-REPORTED TOKENS · {tokenUsage?tokenUsage.total_tokens.toLocaleString():"—"} TOTAL · {tokenUsage?tokenUsage.prompt_tokens.toLocaleString():"—"} PROMPT · {tokenUsage?tokenUsage.completion_tokens.toLocaleString():"—"} COMPLETION · {tokenUsage?tokenUsage.measured_responses.toLocaleString():"—"} MEASURED RESPONSES · {tokenUsage?tokenUsage.responses_without_usage.toLocaleString():"—"} WITHOUT USAGE METADATA</span><small>{tokenUsage?"30 SEC REFRESH · NO ESTIMATES":"CONNECT TO LOAD USAGE"}</small></div>
         {page==="overview"&&<div className="command-grid">
           <section className="panel inference-panel"><PanelTitle icon={<Zap/>} title="INFERENCE COMMAND" meta="APPROVAL REQUIRED"/><div className="panel-intro">Submit a local task. Execution remains gated until an operator approves it.</div>
             <label>MODEL ROUTE</label><select value={model} onChange={e=>setModel(e.target.value)} disabled={!token||!models.length}><option value="">Connect to discover local models</option>{models.map(x=><option key={x.id}>{x.id}</option>)}</select>
-            <label>MISSION PROMPT</label><textarea rows={5} value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder="Define the objective for your local model..." disabled={!token}/>
+            <div className="panel-toolbar"><label>MISSION PROMPT</label><button className="secondary" disabled={!token||!supervisorOnline||enhancing||!model||!prompt.trim()} onClick={()=>void enhancePrompt()}>{enhancing?"ENHANCING…":"ENHANCE PROMPT"}</button></div>
+            <textarea rows={5} value={prompt} onChange={e=>{setPrompt(e.target.value);setEnhancedPrompt("");}} placeholder="Define the objective for your local model..." disabled={!token}/>
+            {enhancedPrompt&&<div className="skill-preview"><div className="row"><div><b>ENHANCED PROMPT / REVIEW BEFORE APPLYING</b><small>Preview only · not submitted · model {model}</small></div><button className="link" onClick={()=>setEnhancedPrompt("")}>DISCARD</button></div><pre className="result">{enhancedPrompt}</pre><div className="compose-foot"><small>Review the complete suggestion before applying it to the composer.</small><button className="primary" onClick={applyEnhancedPrompt}>APPLY TO COMPOSER</button></div></div>}
             <div className="skill-picker"><label>APPROVED SKILL CONTEXT / OPTIONAL</label>{capabilities.filter(x=>(x.kind==="skill"||x.kind==="agent")&&x.status==="enabled").length?capabilities.filter(x=>(x.kind==="skill"||x.kind==="agent")&&x.status==="enabled").map(skill=><label className="skill-choice" key={skill.id}><input type="checkbox" checked={selectedSkills.includes(skill.id)} onChange={e=>setSelectedSkills(current=>e.target.checked?[...current,skill.id]:current.filter(id=>id!==skill.id))}/><span>{skill.name}<small>{skill.id}</small></span></label>):<small>No enabled skills or agent profiles. Import, preview and approve them in the Pstack registry.</small>}</div>
             <div className="compose-foot"><small>TEXT ONLY / NON-STREAMING / RESULT CAP 1 MiB</small><button className="primary" disabled={!token||!supervisorOnline||busy||!model||!prompt.trim()} onClick={()=>void create("gpu_chat")}><Plus size={14}/>QUEUE INFERENCE</button></div>
             <div className="approval"><ShieldCheck size={14}/>{supervisorOnline?"Task creation does not execute inference. Operator approval is required.":"GPU inference locked — authenticated Python Supervisor bridge unavailable."}</div>
