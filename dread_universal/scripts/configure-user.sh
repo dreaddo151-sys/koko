@@ -34,6 +34,24 @@ for name in services.toml agents.toml; do
   fi
 done
 
+# Install optional watchdog templates only when no operator-managed unit exists.
+# The timer is deliberately not enabled by this configurator.
+WATCHDOG_SERVICE_FILE="$UNIT_DIR/dread-watchdog.service"
+WATCHDOG_TIMER_FILE="$UNIT_DIR/dread-watchdog.timer"
+WATCHDOG_STATE_DIR="$HOME/.local/state/dread-universal"
+WATCHDOG_SCRIPT="/usr/share/dread-universal/scripts/dread_watchdog.py"
+if [[ ! -e "$WATCHDOG_SERVICE_FILE" ]]; then
+  sed \
+    -e "s|@DREAD_WATCHDOG_SCRIPT@|$WATCHDOG_SCRIPT|g" \
+    -e "s|@DREAD_WATCHDOG_STATE_DIR@|$WATCHDOG_STATE_DIR|g" \
+    /usr/share/dread-universal/systemd/dread-watchdog.service > "$WATCHDOG_SERVICE_FILE"
+  chmod 0600 "$WATCHDOG_SERVICE_FILE"
+fi
+if [[ ! -e "$WATCHDOG_TIMER_FILE" ]]; then
+  install -m 0600 /usr/share/dread-universal/systemd/dread-watchdog.timer "$WATCHDOG_TIMER_FILE"
+fi
+
+
 if [[ ! -e "$ENV_FILE" ]]; then
   umask 077
   token="$(openssl rand -hex 32)"
@@ -63,4 +81,5 @@ fi
 printf 'PROJECT DREAD is running at http://127.0.0.1:8765\n'
 printf 'API token file: %s (keep private; paste its value into the console)\n' "$ENV_FILE"
 printf 'Service: systemctl --user status %s\n' "$SERVICE"
+printf 'Optional watchdog is installed but disabled: systemctl --user enable --now dread-watchdog.timer\n'
 printf 'GPU inference remains disabled until the existing authenticated Supervisor bridge URL and token are added to %s.\n' "$ENV_FILE"
