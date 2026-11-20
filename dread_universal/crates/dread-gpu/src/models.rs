@@ -56,10 +56,7 @@ fn configured_model_roots() -> Vec<PathBuf> {
     let workspace = env::var_os("DREAD_WORKSPACE")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/mnt/sabrent/dread_workspace"));
-    let mut roots = vec![
-        workspace.join("ComfyUI/models"),
-        workspace.join("models"),
-    ];
+    let mut roots = vec![workspace.join("ComfyUI/models"), workspace.join("models")];
     if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
         roots.push(home.join("models"));
         roots.push(home.join(".cache/huggingface/hub"));
@@ -155,9 +152,9 @@ pub fn discover_local_models_in(
                 inventory.scanned_entries += 1;
                 match entry {
                     Ok(entry) => paths.push(entry.path()),
-                    Err(error) => inventory.warnings.push(format!(
-                        "Could not read a model directory entry: {error}"
-                    )),
+                    Err(error) => inventory
+                        .warnings
+                        .push(format!("Could not read a model directory entry: {error}")),
                 }
             }
             paths.sort();
@@ -212,7 +209,9 @@ pub fn discover_local_models_in(
         }
     }
 
-    inventory.models.sort_by(|left, right| left.id.cmp(&right.id));
+    inventory
+        .models
+        .sort_by(|left, right| left.id.cmp(&right.id));
     inventory.models.dedup_by(|left, right| left.id == right.id);
     inventory
 }
@@ -282,9 +281,19 @@ mod tests {
 
         let inventory = discover_local_models_in(&[root.clone()], 4, 100);
         assert_eq!(inventory.models.len(), 2);
-        assert!(inventory.models.iter().all(|item| item.status == "discovered_not_loaded"));
+        assert!(
+            inventory
+                .models
+                .iter()
+                .all(|item| item.status == "discovered_not_loaded")
+        );
         assert!(inventory.models.iter().any(|item| item.model_kind == "vae"));
-        assert!(inventory.models.iter().any(|item| item.model_kind == "diffusion_model"));
+        assert!(
+            inventory
+                .models
+                .iter()
+                .any(|item| item.model_kind == "diffusion_model")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
