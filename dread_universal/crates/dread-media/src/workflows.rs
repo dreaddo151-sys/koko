@@ -56,13 +56,29 @@ fn configured_roots() -> Vec<PathBuf> {
     if let Some(value) = env::var_os("DREAD_COMFYUI_WORKFLOW_ROOTS") {
         return env::split_paths(&value).take(MAX_ROOTS + 1).collect();
     }
-    let mut roots = vec![PathBuf::from(
-        "/mnt/sabrent/dread_workspace/ComfyUI/user/default/workflows",
-    )];
+
+    let mut roots = Vec::new();
+    if let Some(user_root) = env::var_os("DREAD_COMFYUI_USER_ROOT").map(PathBuf::from) {
+        roots.push(user_root.join("workflows"));
+    }
+    for key in ["DREAD_COMFYUI_ROOT", "COMFYUI_HOME"] {
+        if let Some(root) = env::var_os(key).map(PathBuf::from) {
+            roots.push(root.join("user/default/workflows"));
+        }
+    }
+    if let Some(workspace) = env::var_os("DREAD_WORKSPACE").map(PathBuf::from) {
+        roots.push(workspace.join("ComfyUI/user/default/workflows"));
+    }
+    if let Ok(current) = env::current_dir() {
+        roots.push(current.join("ComfyUI/user/default/workflows"));
+    }
     if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
+        roots.push(home.join("ComfyUI/user/default/workflows"));
         roots.push(home.join(".config/ComfyUI/user/default/workflows"));
     }
-    roots
+
+    let mut unique = BTreeSet::new();
+    roots.into_iter().filter(|path| unique.insert(path.clone())).collect()
 }
 
 pub fn discover_local_workflows_in(roots: &[PathBuf]) -> WorkflowInventory {
