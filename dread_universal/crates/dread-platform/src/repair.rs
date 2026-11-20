@@ -93,8 +93,14 @@ pub fn build_repair_plan(observations: &[ComponentObservation]) -> RepairPlan {
             .cmp(&severity_rank(&right.severity))
             .then_with(|| left.component_id.cmp(&right.component_id))
     });
-    let high = findings.iter().filter(|finding| finding.severity == "high").count();
-    let medium = findings.iter().filter(|finding| finding.severity == "medium").count();
+    let high = findings
+        .iter()
+        .filter(|finding| finding.severity == "high")
+        .count();
+    let medium = findings
+        .iter()
+        .filter(|finding| finding.severity == "medium")
+        .count();
     let low = findings.len().saturating_sub(high + medium);
     RepairPlan {
         status: "diagnostic_plan_only".into(),
@@ -131,8 +137,16 @@ mod tests {
     #[test]
     fn healthy_components_do_not_create_repair_findings() {
         let plan = build_repair_plan(&[
-            ComponentObservation { component_id: "api".into(), state: "online".into(), detail: "HTTP 200".into() },
-            ComponentObservation { component_id: "comfyui".into(), state: "available".into(), detail: "queue and history available".into() },
+            ComponentObservation {
+                component_id: "api".into(),
+                state: "online".into(),
+                detail: "HTTP 200".into(),
+            },
+            ComponentObservation {
+                component_id: "comfyui".into(),
+                state: "available".into(),
+                detail: "queue and history available".into(),
+            },
         ]);
         assert_eq!(plan.status, "diagnostic_plan_only");
         assert_eq!(plan.checked_components, 2);
@@ -143,14 +157,34 @@ mod tests {
     #[test]
     fn offline_findings_are_prioritized_and_never_auto_applied() {
         let plan = build_repair_plan(&[
-            ComponentObservation { component_id: "comfyui".into(), state: "degraded".into(), detail: "history endpoint timed out".into() },
-            ComponentObservation { component_id: "legacy-hub".into(), state: "offline".into(), detail: "connection refused".into() },
+            ComponentObservation {
+                component_id: "comfyui".into(),
+                state: "degraded".into(),
+                detail: "history endpoint timed out".into(),
+            },
+            ComponentObservation {
+                component_id: "legacy-hub".into(),
+                state: "offline".into(),
+                detail: "connection refused".into(),
+            },
         ]);
         assert_eq!(plan.findings[0].component_id, "legacy-hub");
         assert_eq!(plan.findings[0].severity, "high");
-        assert!(plan.findings.iter().all(|finding| finding.requires_operator_approval));
-        assert!(plan.findings.iter().all(|finding| !finding.auto_apply_eligible));
-        assert!(plan.findings.iter().all(|finding| finding.status == "proposed_not_applied"));
+        assert!(
+            plan.findings
+                .iter()
+                .all(|finding| finding.requires_operator_approval)
+        );
+        assert!(
+            plan.findings
+                .iter()
+                .all(|finding| !finding.auto_apply_eligible)
+        );
+        assert!(
+            plan.findings
+                .iter()
+                .all(|finding| finding.status == "proposed_not_applied")
+        );
     }
 
     #[test]
