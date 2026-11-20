@@ -85,6 +85,10 @@ Distinguish **detected**, **configured**, **healthy**, **usable**, **approved** 
 - Respect VRAM, context, batch, tensor split and concurrent workload limits.
 - Coordinate chat, ComfyUI and video through the same Supervisor authority.
 - Rust must not call the tensor upstream directly or recursively acquire the same lease.
+- Provide exact, bounded token-usage observability from provider-reported counters on completed `gpu_chat` results. Missing or incomplete usage must remain visibly unreported; do not estimate it.
+- Provide prompt enhancement through the authenticated Python GPU Supervisor bridge using a model explicitly advertised by the managed gateway. Enforce prompt/output limits and return a review-only preview that is never submitted or executed.
+- Applying a prompt suggestion changes only the composer. It must not create, approve or dispatch a task; any subsequent inference follows the normal task approval and Supervisor lease path.
+- Token-history aggregation refreshes independently from high-frequency host/mission telemetry and uses a strict result-record scan budget.
 
 ### 3.5 Agent ecosystem and orchestration
 Desired provider integrations behind reviewed adapters:
@@ -723,3 +727,13 @@ Safety and release boundary:
 - Local model inventory now resolves symlink targets and follows only canonical targets that remain under the configured model root. Canonical directories/files are deduplicated, so symlink cycles/duplicate snapshot aliases do not cause repeated scans. External symlink targets and broken links are ignored.
 - Added a Hugging Face cache regression test for `snapshots/<revision>/model.safetensors` pointing to an in-root `blobs/<hash>` file. The scanner preserves the visible snapshot filename for format classification and API display while using the canonical file for containment, size and metadata.
 - The existing external-link rejection test remains in place. Workflow/plugin manifest scanners continue to reject symlinks entirely because their manifests are not needed through cache-style aliases.
+
+
+### PR #9 reconciliation — token observability and prompt enhancement — 2026-11-21
+
+The PR #9 token/prompt work lived on the older Run 81 branch and was absent from the later PR #12/#13 base. It has been selectively ported to PR #14:
+- `GET /api/usage/tokens` aggregates complete provider-reported counters from completed `gpu_chat` results with a 10,000-record bound. Incomplete/missing usage is counted separately; no estimates are generated.
+- `POST /api/prompt/enhance` validates prompt/model size, requires a model advertised by the llama.cpp gateway, and sends the enhancement request through the authenticated Python GPU Supervisor bridge.
+- Responses are marked `requires_operator_review=true` and `submitted=false`; prompt enhancement does not create a task or mission. The UI offers explicit Apply/Discard and applies only to composer text.
+- The console refreshes token totals every 30 seconds independently from the 5-second dashboard refresh and clears the usage state/preview on disconnect.
+- Tests cover complete/missing provider usage counters, endpoint contract, preview-only response, no task creation, invalid prompt/model and bearer authentication. Current-head CI is still pending at the time of this entry; do not claim this new code is validated until the complete workflow passes.
