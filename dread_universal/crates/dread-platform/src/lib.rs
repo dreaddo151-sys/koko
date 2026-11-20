@@ -167,14 +167,8 @@ fn parse_nvidia_csv(output: &str) -> Vec<GpuDevice> {
             // Preferred query format prefixes the stable UUID and PCI address.
             // Legacy format is accepted for older query fixtures and fallback tools.
             let has_identity = fields.len() >= 15
-                && fields.get(3).is_some_and(|name| {
-                    name.to_ascii_lowercase().contains("nvidia")
-                        || name.to_ascii_lowercase().contains("geforce")
-                        || name.to_ascii_lowercase().contains("tesla")
-                        || name.to_ascii_lowercase().contains("quadro")
-                        || name.to_ascii_lowercase().contains("rtx")
-                        || name.to_ascii_lowercase().contains("titan")
-                });
+                && fields.first().and_then(|value| value.parse::<u32>().ok()).is_some()
+                && fields.get(3).is_some_and(|name| !name.trim().is_empty());
             let (device_index, device_id, pci_bus_id, offset) = if has_identity {
                 (
                     fields.first().and_then(|value| value.parse::<u32>().ok()),
@@ -280,6 +274,44 @@ fn nvidia_devices(binary: &Path) -> Vec<GpuDevice> {
                 pci_bus_id: optional_csv_field(&fields, 2),
                 compute_capability: None,
                 vram_mib: fields[4].parse().ok(),
+                vram_used_mib: None,
+                vram_free_mib: None,
+                driver_version: None,
+                pcie_link_gen: None,
+                pcie_link_width: None,
+                pcie_link_gen_max: None,
+                pcie_link_width_max: None,
+                utilization_percent: None,
+                temperature_c: None,
+                power_draw_mw: None,
+            })
+        })
+        .collect()
+    let Some(output) = run_probe(
+        binary,
+        &[
+            "--query-gpu=name,memory.total",
+            "--format=csv,noheader,nounits",
+        ],
+    ) else {
+        return Vec::new();
+    };
+    output
+        .lines()
+        .filter_map(|line| {
+            let (name, memory) = line.split_once(',')?;
+            let name = name.trim();
+            if name.is_empty() {
+                return None;
+            }
+            Some(GpuDevice {
+                vendor: "nvidia".into(),
+                name: name.into(),
+                device_id: None,
+                device_index: None,
+                pci_bus_id: None,
+                compute_capability: None,
+                vram_mib: memory.trim().parse().ok(),
                 vram_used_mib: None,
                 vram_free_mib: None,
                 driver_version: None,
