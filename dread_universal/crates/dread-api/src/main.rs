@@ -357,6 +357,38 @@ struct EnhancePrompt {
     prompt: String,
 }
 
+#[derive(Debug, Default)]
+struct TokenUsageTotals {
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    total_tokens: u64,
+    measured_responses: u64,
+    responses_without_usage: u64,
+}
+
+impl TokenUsageTotals {
+    fn observe(&mut self, result: &Value) {
+        let usage = result.get("usage");
+        let prompt = usage
+            .and_then(|item| item.get("prompt_tokens"))
+            .and_then(Value::as_u64);
+        let completion = usage
+            .and_then(|item| item.get("completion_tokens"))
+            .and_then(Value::as_u64);
+        let total = usage
+            .and_then(|item| item.get("total_tokens"))
+            .and_then(Value::as_u64);
+        if let (Some(prompt), Some(completion), Some(total)) = (prompt, completion, total) {
+            self.prompt_tokens = self.prompt_tokens.saturating_add(prompt);
+            self.completion_tokens = self.completion_tokens.saturating_add(completion);
+            self.total_tokens = self.total_tokens.saturating_add(total);
+            self.measured_responses = self.measured_responses.saturating_add(1);
+        } else {
+            self.responses_without_usage = self.responses_without_usage.saturating_add(1);
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ApproveTask {
     reason: String,
@@ -4612,36 +4644,20 @@ async fn token_usage(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
         .query_map([], |row| row.get::<_, String>(0))
         .map_err(|error| ApiError::internal(error.to_string()))?;
 
-    let mut prompt_tokens = 0_u64;
-    let mut completion_tokens = 0_u64;
-    let mut total_tokens = 0_u64;
-    let mut measured_responses = 0_u64;
-    let mut responses_without_usage = 0_u64;
-
+    let mut totals = TokenUsageTotals::default();
     for row in rows {
         let encoded = row.map_err(|error| ApiError::internal(error.to_string()))?;
         let value: Value = serde_json::from_str(&encoded).unwrap_or(Value::Null);
-        let usage = value.get("usage");
-        let prompt = usage.and_then(|item| item.get("prompt_tokens")).and_then(Value::as_u64);
-        let completion = usage.and_then(|item| item.get("completion_tokens")).and_then(Value::as_u64);
-        let total = usage.and_then(|item| item.get("total_tokens")).and_then(Value::as_u64);
-        if let (Some(prompt), Some(completion), Some(total)) = (prompt, completion, total) {
-            prompt_tokens = prompt_tokens.saturating_add(prompt);
-            completion_tokens = completion_tokens.saturating_add(completion);
-            total_tokens = total_tokens.saturating_add(total);
-            measured_responses = measured_responses.saturating_add(1);
-        } else {
-            responses_without_usage = responses_without_usage.saturating_add(1);
-        }
+        totals.observe(&value);
     }
 
     Ok(Json(json!({
         "provider": "llama.cpp-compatible local gateway",
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "total_tokens": total_tokens,
-        "measured_responses": measured_responses,
-        "responses_without_usage": responses_without_usage,
+        "prompt_tokens": totals.prompt_tokens,
+        "completion_tokens": totals.completion_tokens,
+        "total_tokens": totals.total_tokens,
+        "measured_responses": totals.measured_responses,
+        "responses_without_usage": totals.responses_without_usage,
         "scan_limit": 10000,
         "note": "Only provider-reported usage from completed gpu_chat tasks is counted. Missing usage is reported separately; no token estimates are generated."
     })))
@@ -7603,10 +7619,25 @@ mod tests {
         server.abort();
     }
 
+    #[test]
+    fn token_usage_aggregation_counts_only_complete_provider_counters() {
+        let mut totals = TokenUsageTotals::default();
+        totals.observe(&json!({"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}));
+        totals.observe(&json!({"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}));
+        totals.observe(&json!({"usage":{"prompt_tokens":1,"completion_tokens":2}}));
+        totals.observe(&json!({"choices":[{"message":{"content":"no usage"}}]}));
+        assert_eq!(totals.prompt_tokens, 17);
+        assert_eq!(totals.completion_tokens, 8);
+        assert_eq!(totals.total_tokens, 25);
+        assert_eq!(totals.measured_responses, 2);
+        assert_eq!(totals.responses_without_usage, 2);
+    }
+
     #[tokio::test]
     async fn token_usage_route_reports_measured_provider_counters_without_estimates() {
         let (router, server) = test_app().await;
         let response = router
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/usage/tokens")
