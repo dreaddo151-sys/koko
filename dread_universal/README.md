@@ -79,6 +79,7 @@ Open `http://127.0.0.1:5173`; Vite proxies API calls to `127.0.0.1:8765`. The to
 | `DREAD_COMFYUI_USER_ROOT` | ComfyUI `user/default` root | Optional custom ComfyUI user directory |
 | `DREAD_COMFYUI_WORKFLOW_ROOTS` | ComfyUI user workflow locations | Optional path-separated workflow inventory roots |
 | `DREAD_PLUGIN_ROOTS` | Cursor/Claude/application roots | Optional path-separated local plugin manifest roots |
+| `DREAD_AGENT_MANIFEST_ROOTS` | install-relative and per-user `agents.d` roots | Optional path-separated local agent adapter manifest roots |
 
 Never commit API or Supervisor tokens. Store them outside the repository with restrictive permissions. Bearer authentication does not authorize LAN/public exposure.
 
@@ -108,6 +109,7 @@ Never commit API or Supervisor tokens. Store them outside the repository with re
 | GET | `/api/media/comfyui/monitor` | Read-only ComfyUI system, queue and recent history monitor |
 | GET | `/api/media/workflows/discover` | Bounded metadata-only ComfyUI workflow catalog; never submits workflows |
 | GET | `/api/extensions/discover` | Read-only Cursor/Claude/generic plugin manifest inventory; results remain untrusted/disabled |
+| GET | `/api/agents/manifests/discover` | Read-only local agent adapter manifest inventory; does not probe or start agents |
 | GET | `/api/repair/plan` | Evidence-backed diagnostic repair proposals; does not apply changes |
 | POST | `/api/gpu/v1/chat/completions` | Supervisor-managed inference |
 
