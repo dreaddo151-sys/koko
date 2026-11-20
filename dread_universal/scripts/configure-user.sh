@@ -25,7 +25,7 @@ for command in systemctl openssl curl dpkg; do
   }
 done
 
-install -d -m 0700 "$CONFIG_DIR" "$DATA_DIR/data" "$UNIT_DIR"
+install -d -m 0700 "$CONFIG_DIR" "$DATA_DIR/data" "$UNIT_DIR" "$HOME/.local/state/dread-universal"
 for name in services.toml agents.toml; do
   source="/usr/share/dread-universal/config/$name"
   destination="$CONFIG_DIR/$name"
