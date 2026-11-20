@@ -77,7 +77,7 @@ Distinguish **detected**, **configured**, **healthy**, **usable**, **approved** 
 
 ### 3.4 Models and GPU runtime
 - llama.cpp is the only active model serving backend.
-- Discover GGUF and explicitly supported model formats, metadata, quantization, context limits, projector/dependency files and model-specific hardware requirements.
+- Discover GGUF and explicitly supported model formats, metadata, quantization, context limits, projector/dependency files and model-specific hardware requirements. Read bounded GGUF header metadata (name, architecture, context length, file type and quantization version) without reading tensors or loading the model.
 - Support arbitrary GPU counts, including heterogeneous devices where the selected runtime supports them; scheduling must use discovered device identities and measured free resources rather than assuming exactly two identical cards.
 - Distinguish a model file discovered on disk, a model advertised by the gateway, a model loadable on this host and a model currently resident. These are separate states.
 - Discover models advertised by the managed gateway; report unavailable models accurately.
@@ -708,3 +708,10 @@ Safety and release boundary:
 - The host profile and console display index, provider ID and PCI bus address separately. The index is explicitly an enumeration/display index, not a stable key.
 - Unit tests cover two RTX devices with distinct UUIDs/PCI addresses and a driver response that lacks compute capability. More vendor-specific identity coverage remains required.
 - This closes only the stable identity slice for NVIDIA reporting. Intel enumeration, AMD stable IDs/PCI address, persistent identity across hardware reordering, heterogeneous scheduling and actual multi-GPU contention remain open.
+
+
+### Bounded GGUF metadata inventory — 2026-11-21
+
+- Local `.gguf` files are now inspected through a bounded metadata-only parser that validates GGUF magic/version and reads the selected metadata keys. It does not read tensor records or weight payloads and does not load the model.
+- Header parsing has a 1 MiB per-file scan cap, 16,384 metadata-entry cap, 1,000,000 array-element cap, 64 KiB string-value cap and 64 GGUF files per inventory scan. Oversized, malformed or truncated headers remain visible as local candidates with `metadata_status=unavailable` and a bounded error rather than being represented as usable models.
+- Exposed metadata includes the raw GGUF file-type code and quantization version; the file-type code is deliberately not translated into an inferred quantization label. Compatibility, tokenizer/projector dependency checks, VRAM fit, residency and gateway-load acceptance remain separate requirements.
