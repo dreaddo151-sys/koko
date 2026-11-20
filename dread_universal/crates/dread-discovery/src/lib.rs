@@ -698,7 +698,17 @@ pub fn discover_agent_manifests_in(roots: &[std::path::PathBuf]) -> AgentManifes
                         continue;
                     }
                 };
-                let manifest: AgentManifestFile = match toml::from_slice(&bytes) {
+                let manifest_text = match std::str::from_utf8(&bytes) {
+                    Ok(text) => text,
+                    Err(error) => {
+                        inventory.warnings.push(format!(
+                            "Agent manifest is not UTF-8 {}: {error}",
+                            file_path.display()
+                        ));
+                        continue;
+                    }
+                };
+                let manifest: AgentManifestFile = match toml::from_str(manifest_text) {
                     Ok(manifest) => manifest,
                     Err(error) => {
                         inventory.warnings.push(format!(
