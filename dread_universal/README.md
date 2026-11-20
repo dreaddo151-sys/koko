@@ -106,6 +106,7 @@ Never commit API or Supervisor tokens. Store them outside the repository with re
 | POST | `/api/tasks/{id}/approve` | Record approval; does not itself execute |
 | POST | `/api/tasks/{id}/run` | Queue supported approved task |
 | GET | `/api/gpu/models` | Models advertised by llama.cpp gateway |
+| GET | `/api/gpu/telemetry` | Read-only hardware telemetry via the authenticated Python GPU Supervisor bridge; bounded to 1 MiB |
 | GET | `/api/models/local` | Bounded local model-file inventory; reads selected GGUF header fields (name, architecture, context and raw file type) without loading weights |
 | GET | `/api/media/comfyui/monitor` | Read-only ComfyUI system, queue and recent history monitor |
 | GET | `/api/media/workflows/discover` | Bounded metadata-only ComfyUI workflow catalog; never submits workflows |
@@ -115,6 +116,12 @@ Never commit API or Supervisor tokens. Store them outside the repository with re
 | POST | `/api/gpu/v1/chat/completions` | Supervisor-managed inference |
 | GET | `/api/usage/tokens` | Aggregate exact provider-reported token counters from completed `gpu_chat` tasks; missing counters are reported separately, never estimated |
 | POST | `/api/prompt/enhance` | Generate a local-model prompt suggestion through the authenticated Python GPU Supervisor; returns a preview only and never creates or executes a task |
+
+## Host vs Supervisor GPU telemetry
+
+- `GET /api/system/profile` is the host discovery snapshot. It inventories OS/CPU/storage/GPU devices through installed host utilities and reports provider ID/PCI identity where exposed.
+- `GET /api/gpu/telemetry` is a separate read-only sample returned by the Python GPU Supervisor bridge. It includes only fields the bridge obtains from `nvidia-smi`: utilization, VRAM use/total, temperature, power and current PCIe link. It is bearer-authenticated, loopback-only through the existing bridge client, has a 1 MiB response cap and never acquires or changes a GPU lease.
+- The GPU console shows these two sources separately and polls Supervisor telemetry only while the GPU page is open (30-second interval). The Supervisor remains the single authority for GPU admission and process lifecycle.
 
 ## Token observability and prompt enhancement
 
