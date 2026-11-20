@@ -3304,10 +3304,14 @@ async fn execute_agent_task(
     let worker_state = state.clone();
     let result = state
         .execution
-        .run_managed(task_id.clone(), cancellation, move |cancellation| async move {
-            execute_agent_task_inner(worker_state, adapter, execution, cancellation).await;
-            Ok(())
-        })
+        .run_managed(
+            task_id.clone(),
+            cancellation,
+            move |cancellation| async move {
+                execute_agent_task_inner(worker_state, adapter, execution, cancellation).await;
+                Ok(())
+            },
+        )
         .await;
 
     if let Err(error) = result {

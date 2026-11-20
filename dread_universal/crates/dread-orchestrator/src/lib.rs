@@ -606,7 +606,6 @@ mod tests {
         );
     }
 
-
     #[tokio::test]
     async fn managed_runner_shares_admission_and_concurrency_with_regular_runners() {
         let gate = Arc::new(ExecutionGate::new(config(1, 2)).unwrap());
