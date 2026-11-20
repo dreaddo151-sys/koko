@@ -201,9 +201,9 @@ impl GgufHeaderReader {
 
     fn skip_value(&mut self, value_type: u32) -> Result<(), String> {
         let width = match value_type {
-            0 | 1 | 7 => Some(1u64),
-            2 | 3 => Some(2),
-            4 | 5 | 6 => Some(4),
+            0 | 1 | 7 => 1u64,
+            2 | 3 => 2,
+            4 | 5 | 6 => 4,
             8 => {
                 self.skip_string()?;
                 return Ok(());
@@ -233,10 +233,10 @@ impl GgufHeaderReader {
                 self.skip_bytes(bytes)?;
                 return Ok(());
             }
-            10 | 11 | 12 => Some(8),
+            10 | 11 | 12 => 8,
             _ => return Err(format!("Unsupported GGUF metadata value type {value_type}")),
         };
-        self.skip_bytes(width.unwrap_or_default())
+        self.skip_bytes(width)
     }
 }
 
