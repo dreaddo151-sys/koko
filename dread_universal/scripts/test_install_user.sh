@@ -16,7 +16,9 @@ cat > "$MOCK_BIN/systemctl" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$1" == "--user" ]] || exit 2
-printf '%s\n' "$*" >> "$MOCK_SYSTEMCTL_LOG"
+if [[ -n "${MOCK_SYSTEMCTL_LOG:-}" ]]; then
+  printf '%s\n' "$*" >> "$MOCK_SYSTEMCTL_LOG"
+fi
 shift
 case "$1" in
   is-active)
