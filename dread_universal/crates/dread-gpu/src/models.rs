@@ -53,15 +53,32 @@ fn configured_model_roots() -> Vec<PathBuf> {
             .collect();
     }
 
-    let workspace = env::var_os("DREAD_WORKSPACE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/mnt/sabrent/dread_workspace"));
-    let mut roots = vec![workspace.join("ComfyUI/models"), workspace.join("models")];
+    let mut roots = Vec::new();
+    for key in ["DREAD_COMFYUI_ROOT", "COMFYUI_HOME"] {
+        if let Some(path) = env::var_os(key).map(PathBuf::from) {
+            roots.push(path.join("models"));
+        }
+    }
+    if let Some(workspace) = env::var_os("DREAD_WORKSPACE").map(PathBuf::from) {
+        roots.push(workspace.join("ComfyUI/models"));
+        roots.push(workspace.join("models"));
+    }
+    if let Ok(current) = env::current_dir() {
+        roots.push(current.join("ComfyUI/models"));
+        roots.push(current.join("models"));
+    }
     if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
+        roots.push(home.join("ComfyUI/models"));
         roots.push(home.join("models"));
         roots.push(home.join(".cache/huggingface/hub"));
     }
-    roots
+    if let Some(data_home) = env::var_os("XDG_DATA_HOME").map(PathBuf::from) {
+        roots.push(data_home.join("ComfyUI/models"));
+        roots.push(data_home.join("huggingface/hub"));
+    }
+
+    let mut unique = BTreeSet::new();
+    roots.into_iter().filter(|path| unique.insert(path.clone())).collect()
 }
 
 pub fn discover_local_models_in(
