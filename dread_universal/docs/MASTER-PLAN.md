@@ -137,6 +137,8 @@ Mandatory lifecycle:
 - Back up files/config/database consistently before mutation.
 - Verify real postconditions; roll back if verification fails.
 - Unattended mode is policy-limited; sensitive operations remain approval-gated.
+- A separate bounded watchdog may monitor the Rust API `/health` endpoint and restart only the `dread-universal.service` user unit. It must have a fixed target, strict loopback URL, bounded restart ceiling/cooldown, private state/audit, and remain disabled until an operator opts in.
+- The watchdog is not a general repair engine. It must never restart ComfyUI, llama.cpp, the Python GPU Supervisor/bridge or the legacy Python Hub, and it cannot claim health until a later post-restart health probe succeeds.
 
 ### 3.9 Portable installation, executable and updater
 Final distribution targets are platform-specific packages built from the same signed, versioned release manifest:
@@ -737,3 +739,13 @@ The PR #9 token/prompt work lived on the older Run 81 branch and was absent from
 - Responses are marked `requires_operator_review=true` and `submitted=false`; prompt enhancement does not create a task or mission. The UI offers explicit Apply/Discard and applies only to composer text.
 - The console refreshes token totals every 30 seconds independently from the 5-second dashboard refresh and clears the usage state/preview on disconnect.
 - Tests cover complete/missing provider usage counters, endpoint contract, preview-only response, no task creation, invalid prompt/model and bearer authentication. Current-head CI is still pending at the time of this entry; do not claim this new code is validated until the complete workflow passes.
+
+
+### PR #10 watchdog reconciliation — 2026-11-21
+
+- The earlier PR #10 watchdog has been adapted to the current DREAD install layout. It validates an explicit-port loopback HTTP `/health` endpoint, rejects redirects and non-loopback endpoints, caps the response at 4 KiB and uses a 2-second probe timeout.
+- It can restart only the fixed `dread-universal.service` user unit. The budget is at most three restart requests per rolling 15-minute window, with a 60-second cooldown. Reaching the ceiling emits an escalation incident and stops further restarts. A successful systemctl request is recorded as `restart_requested`; health is verified on the next timer cycle.
+- Manual invocation defaults to dry-run. The packaged systemd timer is installed but disabled; the operator must explicitly run `systemctl --user enable --now dread-watchdog.timer` to opt in.
+- State and JSONL incidents are private under `~/.local/state/dread-universal/`. The service unit grants write access only to that state directory. No other DREAD/ComfyUI/GPU service is in the restart allowlist.
+- Both portable installer and Debian configurator install watchdog service/timer templates without enabling the timer. The portable installer preserves operator-customized unit files during upgrades and restores prior watchdog files during failed-upgrade rollback.
+- This is bounded Rust API service recovery only. It does not complete full self-repair planning/simulation/precondition/backup/apply/postcondition/rollback requirements.
