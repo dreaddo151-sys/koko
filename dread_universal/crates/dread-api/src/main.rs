@@ -4591,6 +4591,15 @@ async fn gpu_inference(
 }
 
 
+
+async fn local_model_inventory(
+) -> Result<Json<dread_gpu::models::LocalModelInventory>, ApiError> {
+    let inventory = tokio::task::spawn_blocking(dread_gpu::models::discover_local_models)
+        .await
+        .map_err(|error| ApiError::internal(format!("Local model discovery worker failed: {error}")))?;
+    Ok(Json(inventory))
+}
+
 async fn comfyui_monitor() -> Result<Json<dread_media::ComfyUiMonitor>, ApiError> {
     let client = dread_media::ComfyUiClient::from_env()
         .map_err(|error| ApiError::internal(format!("Invalid ComfyUI configuration: {error}")))?;
@@ -4661,6 +4670,7 @@ fn app(state: AppState) -> Router {
         .route("/api/system/profile", get(system_profile))
         .route("/api/gpu/health", get(gpu_health))
         .route("/api/gpu/models", get(gpu_models))
+        .route("/api/models/local", get(local_model_inventory))
         .route("/api/media/comfyui/monitor", get(comfyui_monitor))
         .route("/api/media/workflows/discover", get(workflow_discovery))
         .route("/api/extensions/discover", get(extension_discovery))
