@@ -167,7 +167,10 @@ fn parse_nvidia_csv(output: &str) -> Vec<GpuDevice> {
             // Preferred query format prefixes the stable UUID and PCI address.
             // Legacy format is accepted for older query fixtures and fallback tools.
             let has_identity = fields.len() >= 15
-                && fields.first().and_then(|value| value.parse::<u32>().ok()).is_some()
+                && fields
+                    .first()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .is_some()
                 && fields.get(3).is_some_and(|name| !name.trim().is_empty());
             let (device_index, device_id, pci_bus_id, offset) = if has_identity {
                 (
