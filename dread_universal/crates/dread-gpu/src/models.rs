@@ -736,7 +736,7 @@ mod tests {
         fs::write(diffusion.join("model.gguf"), b"test").unwrap();
         fs::write(root.join("notes.txt"), b"not a model").unwrap();
 
-        let inventory = discover_local_models_in(&[root.clone()], 4, 100);
+        let inventory = discover_local_models_in(std::slice::from_ref(&root), 4, 100);
         assert_eq!(inventory.models.len(), 2);
         assert!(
             inventory
@@ -787,7 +787,7 @@ mod tests {
         let outside = temporary_directory("outside");
         fs::write(outside.join("external.gguf"), b"model").unwrap();
         symlink(outside.join("external.gguf"), root.join("linked.gguf")).unwrap();
-        let inventory = discover_local_models_in(&[root.clone()], 2, 100);
+        let inventory = discover_local_models_in(std::slice::from_ref(&root), 2, 100);
         assert!(inventory.models.is_empty());
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
@@ -799,7 +799,7 @@ mod tests {
         for index in 0..10 {
             fs::write(root.join(format!("{index}.gguf")), b"x").unwrap();
         }
-        let inventory = discover_local_models_in(&[root.clone()], 2, 3);
+        let inventory = discover_local_models_in(std::slice::from_ref(&root), 2, 3);
         assert!(inventory.truncated);
         assert!(inventory.scanned_entries <= 3);
         fs::remove_dir_all(root).unwrap();
