@@ -268,7 +268,7 @@ fn inspect_plugin_directory(
                 continue;
             }
         };
-        let manifest: Value = match serde_json::from_slice(&bytes) {
+        let manifest: Value = match serde_json::from_slice::<Value>(&bytes) {
             Ok(value) if value.is_object() => value,
             _ => {
                 inventory.warnings.push(format!(
