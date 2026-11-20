@@ -204,12 +204,16 @@ chmod 0600 "$UNIT_FILE"
 
 # Install the watchdog units but leave the timer disabled. The operator must
 # explicitly enable dread-watchdog.timer after reviewing the bounded policy.
-sed \
-  -e "s|@DREAD_WATCHDOG_SCRIPT@|$PREFIX/scripts/dread_watchdog.py|g" \
-  -e "s|@DREAD_WATCHDOG_STATE_DIR@|$WATCHDOG_STATE_DIR|g" \
-  "$PREFIX/systemd/dread-watchdog.service" > "$WATCHDOG_SERVICE_FILE"
-install -m 0600 "$PREFIX/systemd/dread-watchdog.timer" "$WATCHDOG_TIMER_FILE"
-chmod 0600 "$WATCHDOG_SERVICE_FILE"
+if [[ ! -e "$WATCHDOG_SERVICE_FILE" ]]; then
+  sed \
+    -e "s|@DREAD_WATCHDOG_SCRIPT@|$PREFIX/scripts/dread_watchdog.py|g" \
+    -e "s|@DREAD_WATCHDOG_STATE_DIR@|$WATCHDOG_STATE_DIR|g" \
+    "$PREFIX/systemd/dread-watchdog.service" > "$WATCHDOG_SERVICE_FILE"
+  chmod 0600 "$WATCHDOG_SERVICE_FILE"
+fi
+if [[ ! -e "$WATCHDOG_TIMER_FILE" ]]; then
+  install -m 0600 "$PREFIX/systemd/dread-watchdog.timer" "$WATCHDOG_TIMER_FILE"
+fi
 
 
 rollback() {
