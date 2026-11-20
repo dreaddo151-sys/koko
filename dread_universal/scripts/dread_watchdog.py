@@ -161,12 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--state-file",
         type=Path,
-        default=Path(
-            os.environ.get(
-                "XDG_STATE_HOME",
-                str(Path.home() / ".local" / "state"),
-            )
-        ) / "dread-universal" / "watchdog.json",
+        default=Path.home() / ".local" / "state" / "dread-universal" / "watchdog.json",
     )
     args = parser.parse_args(argv)
     now = time.time()
