@@ -2479,7 +2479,7 @@ fn aggregate_mission_result(mission_status: &str, tasks: &[Value]) -> Value {
         "state": mission_status,
         "terminal": terminal,
         "successful": mission_status == "completed" && completed_nodes == total_nodes,
-        "fully_resolved": terminal_nodes == total_nodes,
+        "fully_resolved": terminal && terminal_nodes == total_nodes,
         "counts": {
             "total": total_nodes,
             "by_status": counts
@@ -7604,6 +7604,93 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn mission_result_summary_aggregates_counts_errors_and_execution_metrics() {
+        let tasks = vec![
+            json!({
+                "node_id": "success-node",
+                "task_id": "task-1",
+                "status": "completed",
+                "attempts": 1,
+                "elapsed_ms": 120,
+                "result": {"value": "ok"},
+                "error": null
+            }),
+            json!({
+                "node_id": "failed-node",
+                "task_id": "task-2",
+                "status": "failed",
+                "attempts": 2,
+                "elapsed_ms": 500,
+                "result": null,
+                "error": "provider failed"
+            }),
+            json!({
+                "node_id": "waiting-node",
+                "task_id": "task-3",
+                "status": "pending_approval",
+                "attempts": 0,
+                "elapsed_ms": 0,
+                "result": null,
+                "error": null
+            }),
+        ];
+
+        let summary = aggregate_mission_result("blocked", &tasks);
+        assert_eq!(summary["terminal"], true);
+        assert_eq!(summary["successful"], false);
+        assert_eq!(summary["fully_resolved"], false);
+        assert_eq!(summary["counts"]["total"], 3);
+        assert_eq!(summary["counts"]["by_status"]["completed"], 1);
+        assert_eq!(summary["counts"]["by_status"]["failed"], 1);
+        assert_eq!(summary["counts"]["by_status"]["pending_approval"], 1);
+        assert_eq!(summary["metrics"]["total_attempts"], 3);
+        assert_eq!(summary["metrics"]["total_elapsed_ms"], 620);
+        assert_eq!(summary["failed_nodes"][0]["node_id"], "failed-node");
+        assert_eq!(summary["failed_nodes"][0]["error"], "provider failed");
+        assert_eq!(summary["unresolved_nodes"][0]["node_id"], "waiting-node");
+    }
+
+    #[test]
+    fn mission_result_summary_marks_only_fully_completed_missions_successful() {
+        let tasks = vec![
+            json!({
+                "node_id": "first",
+                "task_id": "task-1",
+                "status": "completed",
+                "attempts": 1,
+                "elapsed_ms": 25
+            }),
+            json!({
+                "node_id": "second",
+                "task_id": "task-2",
+                "status": "completed",
+                "attempts": 1,
+                "elapsed_ms": 40
+            }),
+        ];
+
+        let summary = aggregate_mission_result("completed", &tasks);
+        assert_eq!(summary["terminal"], true);
+        assert_eq!(summary["successful"], true);
+        assert_eq!(summary["fully_resolved"], true);
+        assert_eq!(summary["counts"]["by_status"]["completed"], 2);
+        assert_eq!(summary["metrics"]["total_attempts"], 2);
+        assert_eq!(summary["metrics"]["total_elapsed_ms"], 65);
+        assert_eq!(summary["failed_nodes"].as_array().unwrap().len(), 0);
+        assert_eq!(summary["cancelled_nodes"].as_array().unwrap().len(), 0);
+        assert_eq!(summary["unresolved_nodes"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn mission_result_summary_is_not_terminal_before_mission_start() {
+        let summary = aggregate_mission_result("planned", &[]);
+        assert_eq!(summary["terminal"], false);
+        assert_eq!(summary["successful"], false);
+        assert_eq!(summary["fully_resolved"], false);
+        assert_eq!(summary["counts"]["total"], 0);
+    }
+
     #[tokio::test]
     async fn mission_plan_is_validated_persisted_and_never_auto_executed() {
         let (router, server) = test_app().await;
@@ -8009,6 +8096,15 @@ mod tests {
             .await
             .expect("first mission node should complete while the dependent awaits approval");
         assert_eq!(waiting_for_approval["item"]["status"], "running");
+        assert_eq!(
+            waiting_for_approval["item"]["result"]["counts"]["by_status"]["completed"],
+            1
+        );
+        assert_eq!(
+            waiting_for_approval["item"]["result"]["counts"]["by_status"]["pending_approval"],
+            1
+        );
+        assert_eq!(waiting_for_approval["item"]["result"]["terminal"], false);
 
         let approved = router
             .clone()
@@ -8050,6 +8146,17 @@ mod tests {
         .expect("newly approved dependent task should be dispatched automatically");
         assert_eq!(completed["item"]["tasks"][0]["status"], "completed");
         assert_eq!(completed["item"]["tasks"][1]["status"], "completed");
+        assert_eq!(completed["item"]["result"]["successful"], true);
+        assert_eq!(completed["item"]["result"]["fully_resolved"], true);
+        assert_eq!(
+            completed["item"]["result"]["counts"]["by_status"]["completed"],
+            2
+        );
+        assert_eq!(completed["item"]["result"]["metrics"]["total_attempts"], 2);
+        assert_eq!(
+            completed["item"]["result"]["unresolved_nodes"].as_array().unwrap().len(),
+            0
+        );
         server.abort();
     }
 
