@@ -110,9 +110,22 @@ fi
 if [[ ! -e "$ENV_FILE" ]]; then
   umask 077
   : > "$ENV_FILE"
-  if [[ -f "$PREFIX/.env" ]]; then
-    grep -E '^(DREAD_API_TOKEN|DREAD_OPERATOR_ID|DREAD_BIND|DREAD_DB_PATH|DREAD_WEB_ROOT|DREAD_SERVICES_CONFIG|DREAD_AGENTS_CONFIG|DREAD_GPU_GATEWAY_URL|DREAD_GPU_SUPERVISOR_URL|DREAD_GPU_SUPERVISOR_TOKEN|DREAD_COMFYUI_URL|DREAD_COMFYUI_ROOT|COMFYUI_HOME|DREAD_WORKSPACE|DREAD_MODEL_ROOTS|DREAD_COMFYUI_USER_ROOT|DREAD_COMFYUI_WORKFLOW_ROOTS|DREAD_PLUGIN_ROOTS|DREAD_AGENT_MANIFEST_ROOTS|DREAD_SKILLS_ROOT|DREAD_PSTACK_VERSION|DREAD_PSTACK_REVISION)=' "$PREFIX/.env" >> "$ENV_FILE" || true
-  fi
+fi
+# Merge only recognized legacy settings that are missing from the per-user
+# environment file. Existing per-user values always win during an upgrade.
+if [[ -f "$PREFIX/.env" ]]; then
+  while IFS= read -r setting || [[ -n "$setting" ]]; do
+    [[ "$setting" == *=* ]] || continue
+    key="${setting%%=*}"
+    case "$key" in
+      DREAD_API_TOKEN|DREAD_OPERATOR_ID|DREAD_BIND|DREAD_DB_PATH|DREAD_WEB_ROOT|DREAD_SERVICES_CONFIG|DREAD_AGENTS_CONFIG|DREAD_GPU_GATEWAY_URL|DREAD_GPU_SUPERVISOR_URL|DREAD_GPU_SUPERVISOR_TOKEN|DREAD_COMFYUI_URL|DREAD_COMFYUI_ROOT|COMFYUI_HOME|DREAD_WORKSPACE|DREAD_MODEL_ROOTS|DREAD_COMFYUI_USER_ROOT|DREAD_COMFYUI_WORKFLOW_ROOTS|DREAD_PLUGIN_ROOTS|DREAD_AGENT_MANIFEST_ROOTS|DREAD_SKILLS_ROOT|DREAD_PSTACK_VERSION|DREAD_PSTACK_REVISION)
+        if ! grep -q "^${key}=" "$ENV_FILE"; then
+          printf '%s\\n' "$setting" >> "$ENV_FILE"
+        fi
+        ;;
+      *) continue ;;
+    esac
+  done < "$PREFIX/.env"
 fi
 if ! grep -q '^DREAD_API_TOKEN=' "$ENV_FILE"; then
   printf 'DREAD_API_TOKEN=%s\n' "$(openssl rand -hex 32)" >> "$ENV_FILE"
