@@ -5861,14 +5861,9 @@ mod tests {
         let defaults = resource_limits_from_values(None, None, None, None, None).unwrap();
         assert_eq!(defaults, ResourceLimits::default());
 
-        let configured = resource_limits_from_values(
-            Some("4"),
-            Some("3"),
-            Some("5"),
-            Some("1"),
-            Some("2"),
-        )
-        .unwrap();
+        let configured =
+            resource_limits_from_values(Some("4"), Some("3"), Some("5"), Some("1"), Some("2"))
+                .unwrap();
         assert_eq!(
             configured,
             ResourceLimits {
