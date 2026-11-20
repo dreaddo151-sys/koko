@@ -135,8 +135,6 @@ grep -Fq 'OnUnitActiveSec=60s' "$WATCHDOG_TIMER_FILE"
 [[ "$(stat -c '%a' "$WATCHDOG_TIMER_FILE")" == 600 ]]
 [[ "$(stat -c '%a' "$HOME/.config/dread-universal/dread.env")" == 600 ]]
 [[ "$(cat "$STATE")" == active ]]
-grep -q 'operator-watchdog-override' "$HOME/.config/systemd/user/dread-watchdog.service"
-grep -q 'operator-watchdog-timer-override' "$HOME/.config/systemd/user/dread-watchdog.timer"
 
 printf 'keep-backup-marker\n' > "$PREFIX/previous-release-marker"
 # Preserve operator-managed watchdog policy through a normal upgrade.
@@ -149,6 +147,8 @@ BUNDLE2="$(make_bundle v2)"
 run_installer "$BUNDLE2"
 [[ "$("$PREFIX/bin/dread-universal")" == v2 ]]
 [[ "$(cat "$STATE")" == active ]]
+grep -q 'operator-watchdog-override' "$HOME/.config/systemd/user/dread-watchdog.service"
+grep -q 'operator-watchdog-timer-override' "$HOME/.config/systemd/user/dread-watchdog.timer"
 grep -q '^DREAD_COMFYUI_URL=http://127.0.0.1:8189$' "$HOME/.config/dread-universal/dread.env"
 grep -q '^DREAD_COMFYUI_USER_ROOT=/custom/comfyui-user$' "$HOME/.config/dread-universal/dread.env"
 backup_marker="$(find "$HOME/.local/opt" -maxdepth 2 -type f -name previous-release-marker -print -quit)"
