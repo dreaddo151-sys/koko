@@ -20,6 +20,7 @@ type StorageDevice = { source: string; filesystem: string; mount_point: string; 
 type StoragePartition = { name: string; filesystem: string | null; mount_points: string[] };
 type PhysicalStorageDevice = { name: string; model: string | null; transport: string | null; size_mib: number | null; partitions: StoragePartition[] };
 type HostProfile = { os: string; architecture: string; distribution: string | null; distribution_version: string | null; kernel_release: string | null; cpu_model: string | null; cpu_physical_cores: number | null; cpu_logical_threads: number | null; cpu_sockets: number | null; cpu_cores_per_socket: number | null; cpu_threads_per_core: number | null; cpu_numa_nodes: number | null; cuda_version: string | null; cuda_toolkit_version: string | null; cuda_toolkits: {version: string; compiler_path: string}[]; cpu_threads: number; memory_total_mib: number | null; memory_available_mib: number | null; root_disk_total_mib: number | null; root_disk_available_mib: number | null; storage_devices: StorageDevice[]; physical_storage_devices: PhysicalStorageDevice[]; gpu_devices: GpuDevice[]; llama_server: string | null; nvidia_smi_available: boolean; rocm_smi_available: boolean; xpu_smi_available: boolean; inference_backend: string };
+type SupervisorTelemetry = { source: string; read_only: boolean; sampled_at_unix_ms: number; devices: { index: number | null; name: string; utilization_percent: number | null; memory_used_mib: number | null; memory_total_mib: number | null; temperature_c: number | null; power_w: number | null; pcie_generation: number | null; pcie_width: number | null }[] };
 
 type GgufMetadata = { version: number; tensor_count: number; metadata_count: number; model_name: string | null; architecture: string | null; context_length: number | null; file_type_code: number | null; quantization_version: number | null };
 type LocalModel = { id: string; name: string; model_kind: string; format: string; root: string; relative_path: string; size_bytes: number; status: string; metadata_status: string; metadata_error: string | null; gguf_metadata: GgufMetadata | null };
@@ -73,6 +74,8 @@ function App() {
   const [localModels,setLocalModels]=useState<LocalModel[]>([]);
   const [localWorkflows,setLocalWorkflows]=useState<LocalWorkflow[]>([]);
   const [localPlugins,setLocalPlugins]=useState<LocalPlugin[]>([]);
+  const [supervisorTelemetry,setSupervisorTelemetry]=useState<SupervisorTelemetry|null>(null);
+  const [supervisorTelemetryError,setSupervisorTelemetryError]=useState("");
   const [agentManifests,setAgentManifests]=useState<AgentManifest[]>([]);
   const [repairPlan,setRepairPlan]=useState<RepairPlan|null>(null);
   const inventoryScanInFlight=useRef(false);
@@ -102,6 +105,23 @@ function App() {
     const timer=window.setInterval(()=>void refreshTokenUsage(),30000);
     return()=>window.clearInterval(timer);
   },[refreshTokenUsage,token]);
+  const refreshSupervisorTelemetry=useCallback(async()=>{
+    if(!token){setSupervisorTelemetry(null);setSupervisorTelemetryError("");return;}
+    try{
+      const telemetry=await api<SupervisorTelemetry>("/api/gpu/telemetry",token);
+      setSupervisorTelemetry(telemetry);
+      setSupervisorTelemetryError("");
+    }catch(e){
+      setSupervisorTelemetry(null);
+      setSupervisorTelemetryError(e instanceof Error?e.message:"Supervisor telemetry unavailable");
+    }
+  },[token]);
+  useEffect(()=>{
+    if(page!=="gpu"||!token){return;}
+    void refreshSupervisorTelemetry();
+    const timer=window.setInterval(()=>void refreshSupervisorTelemetry(),30000);
+    return()=>window.clearInterval(timer);
+  },[page,token,refreshSupervisorTelemetry]);
   useEffect(()=>{if(models.length&&!models.some(x=>x.id===model))setModel(models[0].id);},[models,model]);
   useEffect(()=>{
     if(!token||!selectedMission){setMissionDetail(null);return;}
@@ -282,7 +302,7 @@ function App() {
     }catch(e){setError(e instanceof Error?e.message:"Capability removal failed");}
     finally{setBusy(false);}
   };
-  const disconnect=()=>{setToken("");setDraft("");setPage("overview");setActive("");setEvents([]);setResult(null);setTasks([]);setMissions([]);setSelectedMission("");setMissionDetail(null);setAgents([]);setCapabilities([]);setModels([]);setServices([]);setModel("");setPrompt("");setEnhancedPrompt("");setTokenUsage(null);setEnhancing(false);setLocalModels([]);setLocalWorkflows([]);setLocalPlugins([]);setAgentManifests([]);setComfyMonitor(null);setRepairPlan(null);setInventoryUpdated(null);setInventoryBusy(false);inventoryScanInFlight.current=false;setConnected(false);setSupervisorConfigured(false);};
+  const disconnect=()=>{setToken("");setDraft("");setPage("overview");setActive("");setEvents([]);setResult(null);setTasks([]);setMissions([]);setSelectedMission("");setMissionDetail(null);setAgents([]);setCapabilities([]);setModels([]);setServices([]);setModel("");setPrompt("");setEnhancedPrompt("");setTokenUsage(null);setEnhancing(false);setSupervisorTelemetry(null);setSupervisorTelemetryError("");setLocalModels([]);setLocalWorkflows([]);setLocalPlugins([]);setAgentManifests([]);setComfyMonitor(null);setRepairPlan(null);setInventoryUpdated(null);setInventoryBusy(false);inventoryScanInFlight.current=false;setConnected(false);setSupervisorConfigured(false);};
   const activeTask=tasks.find(x=>x.id===active);
   const latestWaitEvent=[...events].reverse().find(event=>event.event_type==="agent_waiting_for_confirmation");
   const pendingActionEvent=latestWaitEvent?[...events].reverse().find(event=>event.event_type==="ActionEvent"&&event.sequence<latestWaitEvent.sequence):undefined;
@@ -351,7 +371,19 @@ function App() {
           <section className="panel service-panel"><PanelTitle icon={<Radio/>} title="LOCAL SERVICE MATRIX" meta="READ-ONLY"/>{services.length?services.map(x=><div className="row" key={x.id}><div><b>{x.name}</b><small>{x.role} · {x.latency_ms??"—"} ms</small></div><Pill value={x.status}/></div>):<Empty text="Connect to load configured local services."/>}</section>
           <section className="panel agent-panel"><PanelTitle icon={<Bot/>} title="AGENT FABRIC" meta="ALLOWLISTED LOCAL / EXPLICIT"/>{agents.length?agents.map(x=><div className="row" key={x.id}><div><b>{x.name}</b><small>{x.adapter??x.id}</small></div><Pill value={x.status}/></div>):<Empty text="No known local agent endpoint responded. DREAD probes only allowlisted loopback health URLs; it does not sweep ports or launch agents."/>}<button className="link" onClick={()=>setPage("agents")}>INSPECT AGENT NETWORK <ChevronRight size={14}/></button></section>
         </div>}
-        {page==="gpu"&&<><div className="section-head"><div><label>HARDWARE / RESOURCE DOMAIN</label><h2>GPU telemetry matrix</h2><p>Read-only host samples are displayed independently of inference lease availability.</p></div><Pill value={supervisorOnline?"SUPERVISOR ONLINE":"SUPERVISOR OFFLINE"}/></div><div className="gpu-pair large">{hostProfile?.gpu_devices.length?hostProfile.gpu_devices.map((gpu,index)=><GpuCard key={`${gpu.vendor}-${index}`} index={`GPU ${index}`} gpu={gpu}/>):<Empty text="No supported GPU detected. CPU inference remains available when a local llama.cpp runtime is configured."/>}</div><div className="telemetry-note"><Activity size={13}/> Hardware telemetry is sampled by the host discovery layer. Supervisor status controls inference leases, not whether read-only GPU metrics may be displayed.</div></>}
+        {page==="gpu"&&<>
+          <div className="section-head"><div><label>HARDWARE / RESOURCE DOMAIN</label><h2>GPU telemetry matrix</h2><p>Host hardware discovery and Supervisor runtime samples are displayed separately; neither endpoint changes GPU leases.</p></div><Pill value={supervisorOnline?"SUPERVISOR ONLINE":"SUPERVISOR OFFLINE"}/></div>
+          <div className="gpu-pair large">{hostProfile?.gpu_devices.length?hostProfile.gpu_devices.map((gpu,index)=><GpuCard key={\`\${gpu.vendor}-\${index}\`} index={\`GPU \${index}\`} gpu={gpu}/>):<Empty text="No supported GPU detected. CPU inference remains available when a local llama.cpp runtime is configured."/>}</div>
+          <div className="telemetry-note"><Activity size={13}/> Host discovery is a read-only host snapshot. Supervisor telemetry is a separate authenticated nvidia-smi sample from the Python GPU Supervisor.</div>
+          <section className="panel">
+            <div className="panel-toolbar"><PanelTitle icon={<Gauge/>} title="PYTHON GPU SUPERVISOR TELEMETRY" meta={supervisorTelemetry?.read_only?"READ-ONLY SAMPLE":"NOT AVAILABLE"}/><button className="secondary" disabled={!token||!supervisorOnline} onClick={()=>void refreshSupervisorTelemetry()}><RefreshCw size={14}/>REFRESH</button></div>
+            {supervisorTelemetryError&&<p className="muted">{supervisorTelemetryError}</p>}
+            {supervisorTelemetry?<><p className="muted">{supervisorTelemetry.source} · sampled {new Date(supervisorTelemetry.sampled_at_unix_ms).toLocaleTimeString()} · no lease or model lifecycle operations</p>
+              {supervisorTelemetry.devices.length?supervisorTelemetry.devices.map(device=><div className="row" key={device.index??device.name}><div><b>GPU {device.index??"?"} · {device.name}</b><small>{device.utilization_percent===null?"LOAD N/A":device.utilization_percent+"% LOAD"} · {device.memory_used_mib===null?"VRAM N/A":\`\${device.memory_used_mib.toLocaleString()}/\${device.memory_total_mib?.toLocaleString()??"?"} MiB\`} · {device.temperature_c===null?"TEMP N/A":device.temperature_c+"°C"} · {device.power_w===null?"POWER N/A":device.power_w.toFixed(1)+" W"} · {device.pcie_generation===null?"PCIe N/A":\`PCIe Gen\${device.pcie_generation} x\${device.pcie_width??"?"}\`}</small></div><Pill value="SUPERVISOR SAMPLE"/></div>):<Empty text="Supervisor bridge returned no supported NVIDIA devices."/>}
+            </>:<Empty text={supervisorTelemetryError||"Supervisor telemetry has not been sampled. Connect the authenticated Python GPU Supervisor to view runtime telemetry."}/>}
+            <p className="muted">Refreshes every 30 seconds only while this GPU page is open. The Supervisor remains the sole GPU lease and process-lifecycle authority.</p>
+          </section>
+        </>}
         {page==="models"&&<section className="panel"><PanelTitle icon={<Layers3/>} title="LOCAL MODEL ARSENAL" meta={`${models.length} DISCOVERED`}/>{models.length?models.map(x=><div className="row" key={x.id}><div><b>{x.id}</b><small>Discovered from local GPU gateway</small></div><Pill value="AVAILABLE"/></div>):<Empty text="No models returned by the local GPU gateway. Confirm gateway and upstream model service status."/>}</section>}
 
         {page==="inventory"&&<div className="command-grid">
