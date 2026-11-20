@@ -85,9 +85,7 @@ pub fn discover_local_workflows_in(roots: &[PathBuf]) -> WorkflowInventory {
     }
 
     'roots: for configured_root in roots.iter().take(MAX_ROOTS) {
-        if inventory.scanned_entries >= MAX_ENTRIES
-            || inventory.workflows.len() >= MAX_WORKFLOWS
-        {
+        if inventory.scanned_entries >= MAX_ENTRIES || inventory.workflows.len() >= MAX_WORKFLOWS {
             inventory.truncated = true;
             break;
         }
@@ -158,18 +156,18 @@ pub fn discover_local_workflows_in(roots: &[PathBuf]) -> WorkflowInventory {
                 let entry = match entry {
                     Ok(value) => value,
                     Err(error) => {
-                        inventory.warnings.push(format!(
-                            "Could not read workflow directory entry: {error}"
-                        ));
+                        inventory
+                            .warnings
+                            .push(format!("Could not read workflow directory entry: {error}"));
                         continue;
                     }
                 };
                 let kind = match entry.file_type() {
                     Ok(value) => value,
                     Err(error) => {
-                        inventory.warnings.push(format!(
-                            "Could not inspect workflow entry: {error}"
-                        ));
+                        inventory
+                            .warnings
+                            .push(format!("Could not inspect workflow entry: {error}"));
                         continue;
                     }
                 };
@@ -218,9 +216,7 @@ pub fn discover_local_workflows_in(roots: &[PathBuf]) -> WorkflowInventory {
                 if !seen_files.insert(canonical.clone()) {
                     continue;
                 }
-                if inventory.bytes_read.saturating_add(file_meta.len())
-                    > MAX_TOTAL_WORKFLOW_BYTES
-                {
+                if inventory.bytes_read.saturating_add(file_meta.len()) > MAX_TOTAL_WORKFLOW_BYTES {
                     inventory.truncated = true;
                     inventory.warnings.push(
                         "Total workflow metadata read budget (64 MiB) reached; remaining files were not inspected".into(),
@@ -296,7 +292,9 @@ pub fn discover_local_workflows_in(roots: &[PathBuf]) -> WorkflowInventory {
         }
     }
 
-    inventory.workflows.sort_by(|left, right| left.id.cmp(&right.id));
+    inventory
+        .workflows
+        .sort_by(|left, right| left.id.cmp(&right.id));
     inventory
 }
 
@@ -387,7 +385,11 @@ mod tests {
         assert_eq!(item.node_count, 2);
         assert!(item.node_types.contains(&"VHS_VideoCombine".to_string()));
         assert_eq!(item.status, "discovered_not_validated");
-        assert!(!serde_json::to_string(item).unwrap().contains("private-value"));
+        assert!(
+            !serde_json::to_string(item)
+                .unwrap()
+                .contains("private-value")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -416,7 +418,8 @@ mod tests {
         fs::write(
             outside.join("external.json"),
             r#"{"nodes":[{"type":"KSampler"}]}"#,
-        ).unwrap();
+        )
+        .unwrap();
         symlink(outside.join("external.json"), root.join("linked.json")).unwrap();
         let inventory = discover_local_workflows_in(&[root.clone()]);
         assert!(inventory.workflows.is_empty());
