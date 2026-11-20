@@ -1040,6 +1040,46 @@ mod tests {
     }
 
     #[test]
+    fn nvidia_inventory_preserves_stable_uuid_and_pci_identity_for_multiple_gpus() {
+        let sample = concat!(
+            "0, GPU-aaaaaaaa-1111-2222-3333-444444444444, 00000000:01:00.0, NVIDIA GeForce RTX 3090, 24576, 12000, 12576, 550.90.07, 1, 1, 4, 16, 37, 52, 280.5, 8.6\n",
+            "1, GPU-bbbbbbbb-1111-2222-3333-555555555555, 00000000:14:00.0, NVIDIA GeForce RTX 3090, 24576, 8000, 16576, 550.90.07, 1, 4, 4, 16, 72, 68, 310.0, 8.6\n",
+        );
+        let parsed = parse_nvidia_csv(sample);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].device_index, Some(0));
+        assert_eq!(
+            parsed[0].device_id.as_deref(),
+            Some("GPU-aaaaaaaa-1111-2222-3333-444444444444")
+        );
+        assert_eq!(parsed[0].pci_bus_id.as_deref(), Some("00000000:01:00.0"));
+        assert_eq!(parsed[1].device_index, Some(1));
+        assert_eq!(
+            parsed[1].device_id.as_deref(),
+            Some("GPU-bbbbbbbb-1111-2222-3333-555555555555")
+        );
+        assert_eq!(parsed[1].pci_bus_id.as_deref(), Some("00000000:14:00.0"));
+        assert_ne!(parsed[0].device_id, parsed[1].device_id);
+        assert_ne!(parsed[0].pci_bus_id, parsed[1].pci_bus_id);
+        assert_eq!(parsed[1].pcie_link_width, Some(4));
+    }
+
+    #[test]
+    fn nvidia_inventory_keeps_identity_when_compute_capability_is_unavailable() {
+        let sample = "0, GPU-cccccccc-1111-2222-3333-666666666666, 00000000:0A:00.0, NVIDIA A100, 40960, 1024, 39936, 550.90.07, 4, 16, 4, 16, 5, 40, 120.0\n";
+        let parsed = parse_nvidia_csv(sample);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].device_index, Some(0));
+        assert_eq!(
+            parsed[0].device_id.as_deref(),
+            Some("GPU-cccccccc-1111-2222-3333-666666666666")
+        );
+        assert_eq!(parsed[0].pci_bus_id.as_deref(), Some("00000000:0A:00.0"));
+        assert_eq!(parsed[0].compute_capability, None);
+        assert_eq!(parsed[0].vram_mib, Some(40960));
+    }
+
+    #[test]
     fn linux_memory_and_distribution_parsers_are_read_only() {
         let meminfo = "MemTotal:       32768000 kB\nMemAvailable:   16384000 kB\n";
         assert_eq!(memory_info_mib(meminfo, "MemTotal"), Some(32_000));
