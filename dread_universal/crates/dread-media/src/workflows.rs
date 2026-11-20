@@ -72,9 +72,15 @@ fn configured_roots() -> Vec<PathBuf> {
     if let Ok(current) = env::current_dir() {
         roots.push(current.join("ComfyUI/user/default/workflows"));
     }
-    if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
+    if let Some(home) = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+    {
         roots.push(home.join("ComfyUI/user/default/workflows"));
         roots.push(home.join(".config/ComfyUI/user/default/workflows"));
+    }
+    if let Some(local_app_data) = env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+        roots.push(local_app_data.join("ComfyUI/user/default/workflows"));
     }
 
     let mut unique = BTreeSet::new();
