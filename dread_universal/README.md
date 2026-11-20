@@ -1,6 +1,7 @@
 # PROJECT DREAD UNIVERSAL
 
-**Target:** Ubuntu 24.04 LTS and later Ubuntu releases only.  
+**Product target:** Host-agnostic dual-/multi-GPU PCs; no single-workstation path or GPU-count assumptions.
+**Current validated CI baseline:** Ubuntu 24.04 x86_64 (other OS/vendor adapters require their own CI and live acceptance).  
 **Product:** A local-first autonomous AI engineering Master Hub.  
 **Controlling specification:** [docs/MASTER-PLAN.md](docs/MASTER-PLAN.md).  
 **Workstation and engineering handoff:** [docs/WORK-LOG.md](docs/WORK-LOG.md).
@@ -22,7 +23,7 @@ The workspace includes an Axum API, SQLite-backed registry/task state, authentic
 
 This is a foundation, not the completed Universal Hub. Read [docs/WORK-LOG.md](docs/WORK-LOG.md) for dated evidence and known limitations.
 
-## Ubuntu build and test
+## Current Ubuntu build and test (first validated platform)
 
 Requirements: Ubuntu 24.04+, stable Rust with rustfmt/Clippy, Node.js 22+ and npm for the web console.
 
@@ -72,6 +73,12 @@ Open `http://127.0.0.1:5173`; Vite proxies API calls to `127.0.0.1:8765`. The to
 | `DREAD_PSTACK_VERSION` | `0.15.43` | Pstack catalog version |
 | `DREAD_PSTACK_REVISION` | unverified local copy | Verified source revision |
 | `DREAD_LLM_SERVER` | PATH discovery | Optional llama-server path |
+| `DREAD_WORKSPACE` | install-relative/current workspace discovery | Workspace root; do not assume a fixed mount point |
+| `DREAD_COMFYUI_ROOT` / `COMFYUI_HOME` | discovered/configured | ComfyUI installation root |
+| `DREAD_MODEL_ROOTS` | standard ComfyUI/Hugging Face/user roots | Optional path-separated local model inventory roots |
+| `DREAD_COMFYUI_USER_ROOT` | ComfyUI `user/default` root | Optional custom ComfyUI user directory |
+| `DREAD_COMFYUI_WORKFLOW_ROOTS` | ComfyUI user workflow locations | Optional path-separated workflow inventory roots |
+| `DREAD_PLUGIN_ROOTS` | Cursor/Claude/application roots | Optional path-separated local plugin manifest roots |
 
 Never commit API or Supervisor tokens. Store them outside the repository with restrictive permissions. Bearer authentication does not authorize LAN/public exposure.
 
@@ -97,6 +104,11 @@ Never commit API or Supervisor tokens. Store them outside the repository with re
 | POST | `/api/tasks/{id}/approve` | Record approval; does not itself execute |
 | POST | `/api/tasks/{id}/run` | Queue supported approved task |
 | GET | `/api/gpu/models` | Models advertised by llama.cpp gateway |
+| GET | `/api/models/local` | Bounded local model-file inventory; candidates are never assumed loaded |
+| GET | `/api/media/comfyui/monitor` | Read-only ComfyUI system, queue and recent history monitor |
+| GET | `/api/media/workflows/discover` | Bounded metadata-only ComfyUI workflow catalog; never submits workflows |
+| GET | `/api/extensions/discover` | Read-only Cursor/Claude/generic plugin manifest inventory; results remain untrusted/disabled |
+| GET | `/api/repair/plan` | Evidence-backed diagnostic repair proposals; does not apply changes |
 | POST | `/api/gpu/v1/chat/completions` | Supervisor-managed inference |
 
 ## Agent and extension boundaries
@@ -127,9 +139,9 @@ The repository's reviewed Pstack snapshot is 0.15.43 at commit `2f87c854fe3e2fcd
 
 The read-only host profile also enumerates persistent and network-mounted filesystems using GNU `df` with bounded execution. It reports source, filesystem type, mount point, total, used and available MiB, while excluding common pseudo-filesystems (for example `tmpfs`, `proc`, `sysfs` and `overlay`). The overview console renders the discovered mounts. This is mount-level capacity discovery, not physical-disk topology, SMART health or RAID status.
 
-## Ubuntu-only CI and release
+## Current CI and release baseline
 
-GitHub Actions targets Ubuntu 24.04 only. The release workflow creates an Ubuntu x86_64 build bundle and SHA-256 manifest. A production `.deb`, systemd-integrated installer, signed updater, atomic activation and rollback remain required before calling the package an installer or updater complete.
+GitHub Actions currently validates Ubuntu 24.04 x86_64. Ubuntu is the first supported/verified packaging baseline, not the product boundary. The universal architecture must not depend on Ubuntu-specific filesystem layouts, fixed GPU counts or NVIDIA-only inventory. Add Windows/macOS and other Linux platform adapters and CI before advertising those platforms as supported. The existing release workflow creates an Ubuntu x86_64 build bundle and SHA-256 manifest. A production package, signed updater, atomic activation and verified rollback remain required before calling the package or updater complete.
 
 ## GPU ownership
 
@@ -137,7 +149,7 @@ The Python GPU Supervisor is the sole authority for GPU leases and process lifec
 
 ## Completion criteria
 
-See [docs/MASTER-PLAN.md](docs/MASTER-PLAN.md) for clean Ubuntu installation, real model/agent discovery and task execution, dual-3090 lease safety, valid image/video artifacts, legacy Hub regression coverage, self-repair/rollback drills and workstation acceptance.
+See [docs/MASTER-PLAN.md](docs/MASTER-PLAN.md) for the host-neutral dual-/multi-GPU architecture, Pstack and agent/model discovery, capability monitoring, GPU-safe task orchestration, verified media workflows, policy-controlled self-repair, signed upgrades, platform-adapter roadmap and live acceptance. The RTX 3090 workstation is one reference fixture, not a product-specific target.
 
 
 ## Ubuntu packaging
