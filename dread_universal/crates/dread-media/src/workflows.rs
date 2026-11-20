@@ -269,7 +269,7 @@ pub fn discover_local_workflows_in(roots: &[PathBuf]) -> WorkflowInventory {
                     break 'roots;
                 }
                 inventory.bytes_read = inventory.bytes_read.saturating_add(bytes.len() as u64);
-                let value: Value = match serde_json::from_slice(&bytes) {
+                let value: Value = match serde_json::from_slice::<Value>(&bytes) {
                     Ok(value) if value.is_object() => value,
                     _ => {
                         inventory.warnings.push(format!(
