@@ -7662,6 +7662,7 @@ mod tests {
     async fn prompt_enhancement_uses_supervisor_and_returns_review_only_suggestion() {
         let (router, server) = test_app().await;
         let response = router
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
