@@ -22,7 +22,9 @@ use dread_discovery::{
     discover, discover_agents, known_agent_endpoints, load_agents, load_services,
 };
 use dread_gpu::{GpuGatewayClient, GpuSupervisorClient};
-use dread_orchestrator::{ExecutionConfig, ExecutionError, ExecutionGate, MissionGraph};
+use dread_orchestrator::{
+    ExecutionConfig, ExecutionError, ExecutionGate, ExecutionResourceClass, MissionGraph,
+};
 use dread_platform::cached_host_profile;
 use dread_skills::{
     discover_agent_profiles, discover_skills, load_agent_profile_context, load_skill_context,
@@ -3307,6 +3309,33 @@ async fn execute_agent_task(
         payload,
         initial_event_cursor,
     } = execution;
+
+    // Keep provider tasks inside the same bounded execution kernel as built-in
+    // tasks. This is application-level admission only; provider sandboxing and
+    // the Python Supervisor's GPU lease authority remain separate controls.
+    let _permit = match state
+        .execution
+        .acquire_resource(ExecutionResourceClass::Agent, &mut cancellation)
+        .await
+    {
+        Ok(permit) => permit,
+        Err(error) => {
+            let status = if matches!(error, ExecutionError::Cancelled { .. }) {
+                "cancelled"
+            } else {
+                "failed"
+            };
+            finish_agent_task(
+                &state,
+                &task_id,
+                status,
+                None,
+                Some(format!("Agent task admission failed: {error:?}")),
+            );
+            return;
+        }
+    };
+
     let now = now_epoch();
     {
         let Ok(mut conn) = state.db.lock() else {
@@ -3517,7 +3546,7 @@ fn finish_agent_task(
         .optional()
         .ok()
         .flatten();
-    if !matches!(current.as_deref(), Some("running" | "cancelled")) {
+    if !matches!(current.as_deref(), Some("queued" | "running" | "cancelled")) {
         return;
     }
     let final_status = if current.as_deref() == Some("cancelled") {
@@ -3925,9 +3954,18 @@ async fn execute_approved_task(
     let runner_gpu = state.gpu.clone();
     let runner_supervisor = state.supervisor.clone();
     let runner_db = state.db.clone();
+    let resource_class = match task_type.as_str() {
+        "gpu_chat" => ExecutionResourceClass::GpuInference,
+        "service_discovery" => ExecutionResourceClass::Network,
+        _ => ExecutionResourceClass::General,
+    };
     let execution = state
         .execution
-        .run(task_id.clone(), cancellation, move |_, cancellation| {
+        .run_with_resource_class(
+            task_id.clone(),
+            resource_class,
+            cancellation,
+            move |_, cancellation| {
             let runner_type = runner_type.clone();
             let runner_payload = runner_payload.clone();
             let runner_gpu = runner_gpu.clone();
@@ -3959,7 +3997,8 @@ async fn execute_approved_task(
                     _ => Err(format!("No reviewed runner for task type '{runner_type}'")),
                 }
             }
-        })
+        },
+        )
         .await;
 
     let (status, result_json, error, attempts, elapsed_ms) = match execution {
