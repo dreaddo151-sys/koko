@@ -19,7 +19,8 @@ use dread_agents::{
     openhands::OpenHandsAgentServerAdapter,
 };
 use dread_discovery::{
-    discover, discover_agent_manifests, discover_agents, known_agent_endpoints, load_agents, load_services,
+    discover, discover_agent_manifests, discover_agents, known_agent_endpoints, load_agents,
+    load_services,
 };
 use dread_gpu::{GpuGatewayClient, GpuSupervisorClient};
 use dread_orchestrator::{ExecutionConfig, ExecutionError, ExecutionGate, MissionGraph};
@@ -686,8 +687,9 @@ async fn agents() -> Result<Json<Value>, ApiError> {
 }
 
 
-async fn discover_agent_manifest_inventory(
-) -> Result<Json<dread_discovery::AgentManifestInventory>, ApiError> {
+type AgentManifestInventoryResponse = Json<dread_discovery::AgentManifestInventory>;
+
+async fn discover_agent_manifest_inventory() -> Result<AgentManifestInventoryResponse, ApiError> {
     let inventory = tokio::task::spawn_blocking(discover_agent_manifests)
         .await
         .map_err(|error| {
@@ -4678,7 +4680,9 @@ async fn repair_plan(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
         None => observations.push(ComponentObservation {
             component_id: "python_gpu_supervisor".into(),
             state: "not_configured".into(),
-            detail: "Supervisor bridge is not configured; no attempt was made to start or replace it".into(),
+            detail:
+                "Supervisor bridge is not configured; no attempt was made to start or replace it"
+                    .into(),
         }),
     }
 
@@ -4711,9 +4715,12 @@ async fn repair_plan(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
                     AgentHealthState::Offline => "offline",
                     AgentHealthState::Unknown => "unknown",
                 };
-                (label.to_string(), value.detail.unwrap_or_else(|| {
-                    format!("Provider health state: {:?}", value.state)
-                }))
+                (
+                    label.to_string(),
+                    value
+                        .detail
+                        .unwrap_or_else(|| format!("Provider health state: {:?}", value.state)),
+                )
             }
             Err(error) => (
                 "unknown".to_string(),
@@ -4728,11 +4735,11 @@ async fn repair_plan(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
     }
 
     let plan = build_repair_plan(&observations);
-    serde_json::to_value(plan)
-        .map(Json)
-        .map_err(|error| {
-            ApiError::internal(format!("Could not serialize diagnostic repair plan: {error}"))
-        })
+    serde_json::to_value(plan).map(Json).map_err(|error| {
+        ApiError::internal(format!(
+            "Could not serialize diagnostic repair plan: {error}"
+        ))
+    })
 }
 
 async fn local_model_inventory() -> Result<Json<dread_gpu::models::LocalModelInventory>, ApiError> {
@@ -4746,9 +4753,7 @@ async fn local_model_inventory() -> Result<Json<dread_gpu::models::LocalModelInv
 
 async fn comfyui_monitor() -> Result<Json<dread_media::ComfyUiMonitor>, ApiError> {
     let client = dread_media::ComfyUiClient::from_env()
-        .map_err(|error| {
-            ApiError::internal(format!("Invalid ComfyUI configuration: {error}"))
-        })?;
+.map_err(|error| ApiError::internal(format!("Invalid ComfyUI configuration: {error}")))?;
     Ok(Json(client.monitor().await))
 }
 
@@ -4765,9 +4770,7 @@ async fn extension_discovery() -> Result<Json<dread_agents::extensions::PluginIn
 {
     let inventory = tokio::task::spawn_blocking(dread_agents::extensions::discover_local_plugins)
         .await
-        .map_err(|error| {
-            ApiError::internal(format!("Plugin discovery worker failed: {error}"))
-        })?;
+.map_err(|error| ApiError::internal(format!("Plugin discovery worker failed: {error}")))?;
     Ok(Json(inventory))
 }
 
@@ -4846,7 +4849,10 @@ fn app(state: AppState) -> Router {
         .route("/api/gpu/{*path}", axum::routing::post(gpu_inference))
         .route("/api/services", get(services))
         .route("/api/agents", get(agents))
-        .route("/api/agents/manifests/discover", get(discover_agent_manifest_inventory))
+        .route(
+            "/api/agents/manifests/discover",
+            get(discover_agent_manifest_inventory),
+        )
         .route("/api/agent-adapters", get(agent_adapter_registry))
         .route(
             "/api/capabilities",
