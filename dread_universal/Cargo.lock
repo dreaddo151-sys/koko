@@ -238,6 +238,7 @@ dependencies = [
  "dread-agents",
  "dread-discovery",
  "dread-gpu",
+ "dread-media",
  "dread-orchestrator",
  "dread-platform",
  "dread-skills",
@@ -267,6 +268,18 @@ dependencies = [
 
 [[package]]
 name = "dread-gpu"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "dread-media"
 version = "0.4.0"
 dependencies = [
  "anyhow",
