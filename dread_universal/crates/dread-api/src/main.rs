@@ -2441,12 +2441,10 @@ fn aggregate_mission_result(mission_status: &str, tasks: &[Value]) -> Value {
             .and_then(Value::as_str)
             .unwrap_or("unknown");
         *counts.entry(status.to_string()).or_default() += 1;
-        total_attempts = total_attempts.saturating_add(
-            task.get("attempts").and_then(Value::as_u64).unwrap_or(0),
-        );
-        total_elapsed_ms = total_elapsed_ms.saturating_add(
-            task.get("elapsed_ms").and_then(Value::as_u64).unwrap_or(0),
-        );
+        total_attempts = total_attempts
+            .saturating_add(task.get("attempts").and_then(Value::as_u64).unwrap_or(0));
+        total_elapsed_ms = total_elapsed_ms
+            .saturating_add(task.get("elapsed_ms").and_then(Value::as_u64).unwrap_or(0));
 
         match status {
             "failed" => failed_nodes.push(json!({
