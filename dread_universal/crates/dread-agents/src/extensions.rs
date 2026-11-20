@@ -100,9 +100,7 @@ pub fn discover_local_plugins_in(
     }
 
     for configured_root in roots.iter().take(MAX_ROOTS) {
-        if inventory.plugins.len() >= MAX_PLUGINS
-            || inventory.scanned_entries >= max_entries
-        {
+        if inventory.plugins.len() >= MAX_PLUGINS || inventory.scanned_entries >= max_entries {
             inventory.truncated = true;
             break;
         }
@@ -147,19 +145,12 @@ pub fn discover_local_plugins_in(
 
         let mut pending = vec![(root.clone(), 0usize)];
         while let Some((directory, depth)) = pending.pop() {
-            if inventory.plugins.len() >= MAX_PLUGINS
-                || inventory.scanned_entries >= max_entries
-            {
+            if inventory.plugins.len() >= MAX_PLUGINS || inventory.scanned_entries >= max_entries {
                 inventory.truncated = true;
                 break;
             }
 
-            inspect_plugin_directory(
-                &root,
-                &directory,
-                &mut inventory,
-                &mut seen_plugins,
-            );
+            inspect_plugin_directory(&root, &directory, &mut inventory, &mut seen_plugins);
 
             let entries = match fs::read_dir(&directory) {
                 Ok(value) => value,
@@ -181,18 +172,18 @@ pub fn discover_local_plugins_in(
                 let entry = match entry {
                     Ok(value) => value,
                     Err(error) => {
-                        inventory.warnings.push(format!(
-                            "Could not read plugin directory entry: {error}"
-                        ));
+                        inventory
+                            .warnings
+                            .push(format!("Could not read plugin directory entry: {error}"));
                         continue;
                     }
                 };
                 let kind = match entry.file_type() {
                     Ok(value) => value,
                     Err(error) => {
-                        inventory.warnings.push(format!(
-                            "Could not inspect plugin entry: {error}"
-                        ));
+                        inventory
+                            .warnings
+                            .push(format!("Could not inspect plugin entry: {error}"));
                         continue;
                     }
                 };
@@ -344,9 +335,9 @@ fn inspect_plugin_directory(
 fn valid_plugin_id(value: &str) -> bool {
     !value.trim().is_empty()
         && value.len() <= 160
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)
-        })
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
 }
 
 fn bounded_string(manifest: &Value, key: &str, max: usize) -> Option<String> {
@@ -411,7 +402,8 @@ mod tests {
         fs::write(
             root.join(".cursor-plugin/plugin.json"),
             r#"{"name":"direct-plugin"}"#,
-        ).unwrap();
+        )
+        .unwrap();
         let inventory = discover_local_plugins_in(&[root.clone()], 3, 100);
         assert_eq!(inventory.plugins.len(), 1);
         assert_eq!(inventory.plugins[0].ecosystem, "cursor");
@@ -440,7 +432,8 @@ mod tests {
         symlink(
             outside.join("plugin.json"),
             root.join(".claude-plugin/plugin.json"),
-        ).unwrap();
+        )
+        .unwrap();
         let inventory = discover_local_plugins_in(&[root.clone()], 3, 100);
         assert!(inventory.plugins.is_empty());
         fs::remove_dir_all(root).unwrap();
