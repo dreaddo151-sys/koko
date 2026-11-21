@@ -737,7 +737,7 @@ fn amd_number_and_unit(value: &Value) -> Option<(f64, Option<String>)> {
             if let Ok(number) = value.parse::<f64>() {
                 number
             } else {
-                let (number, suffix) = value.split_once(char::is_alphabetic)?;
+                let (number, suffix) = value.split_once(char::is_whitespace)?;
                 let number = number.trim().parse::<f64>().ok()?;
                 let suffix = suffix.trim();
                 if suffix.is_empty() {
@@ -2021,6 +2021,22 @@ mod tests {
         assert_eq!(amd_power_mw(&(750.0, Some("mW".into()))), Some(750));
         assert_eq!(
             amd_pcie_generation(&json!({"value": 32, "unit": "GT/s"})),
+            Some(5)
+        );
+        assert_eq!(
+            amd_memory_mib(&amd_number_and_unit(&json!("196300 MB")).unwrap()),
+            Some(196300)
+        );
+        assert_eq!(
+            amd_memory_mib(&amd_number_and_unit(&json!("24 GB")).unwrap()),
+            Some(24576)
+        );
+        assert_eq!(
+            amd_power_mw(&amd_number_and_unit(&json!("220.5 W")).unwrap()),
+            Some(220_500)
+        );
+        assert_eq!(
+            amd_pcie_generation(&json!("32 GT/s")),
             Some(5)
         );
     }
