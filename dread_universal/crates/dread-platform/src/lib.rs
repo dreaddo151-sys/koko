@@ -335,6 +335,257 @@ fn nvidia_devices(binary: &Path) -> Vec<GpuDevice> {
         .collect()
 }
 
+
+fn intel_string<'a>(object: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+        .filter(|value| {
+            let normalized = value.trim();
+            !normalized.is_empty()
+                && !normalized.eq_ignore_ascii_case("n/a")
+                && !normalized.eq_ignore_ascii_case("unknown")
+                && !normalized.eq_ignore_ascii_case("not supported")
+        })
+}
+
+fn intel_number(object: &Value, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| {
+        let value = object.get(*key)?;
+        if let Some(number) = value.as_f64() {
+            return number.is_finite().then_some(number);
+        }
+        let text = value.as_str()?.trim();
+        if text.is_empty()
+            || text.eq_ignore_ascii_case("n/a")
+            || text.eq_ignore_ascii_case("unknown")
+            || text.eq_ignore_ascii_case("not supported")
+        {
+            return None;
+        }
+        let numeric = text
+            .split_whitespace()
+            .next()
+            .unwrap_or(text)
+            .trim_end_matches('%');
+        numeric.parse::<f64>().ok().filter(|number| number.is_finite())
+    })
+}
+
+fn intel_nested_number(object: &Value, path: &[&str]) -> Option<f64> {
+    let value = path.iter().try_fold(object, |value, key| value.get(*key))?;
+    if let Some(number) = value.as_f64() {
+        return number.is_finite().then_some(number);
+    }
+    let text = value.as_str()?.trim();
+    if text.is_empty()
+        || text.eq_ignore_ascii_case("n/a")
+        || text.eq_ignore_ascii_case("unknown")
+        || text.eq_ignore_ascii_case("not supported")
+    {
+        return None;
+    }
+    text.split_whitespace()
+        .next()
+        .unwrap_or(text)
+        .trim_end_matches('%')
+        .parse::<f64>()
+        .ok()
+        .filter(|number| number.is_finite())
+}
+
+fn intel_u32(object: &Value, keys: &[&str]) -> Option<u32> {
+    intel_number(object, keys)
+        .filter(|value| *value >= 0.0 && *value <= f64::from(u32::MAX))
+        .map(|value| value as u32)
+}
+
+fn intel_u64(object: &Value, keys: &[&str]) -> Option<u64> {
+    intel_number(object, keys)
+        .filter(|value| *value >= 0.0 && *value <= u64::MAX as f64)
+        .map(|value| value as u64)
+}
+
+/// Parse documented Intel XPU Manager query JSON output.
+fn parse_intel_query_json(output: &str) -> Vec<GpuDevice> {
+    let Ok(report) = serde_json::from_str::<Value>(output) else {
+        return Vec::new();
+    };
+    let Some(gpus) = report.get("gpus").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    gpus.iter()
+        .filter_map(|gpu| {
+            if !gpu.is_object() {
+                return None;
+            }
+            let name = intel_string(gpu, &["product_name", "name", "device_name"])?;
+            let pci = intel_string(gpu, &["pci_bus_id"])
+                .or_else(|| gpu.pointer("/pci/bus_id").and_then(Value::as_str));
+            let uuid = intel_string(gpu, &["gpu_uuid", "uuid", "soc_uuid"]);
+            let index = intel_u32(gpu, &["device_index", "index"])
+                .or_else(|| {
+                    intel_string(gpu, &["device_id"])
+                        .and_then(|value| value.parse::<u32>().ok())
+                });
+
+            let total = intel_nested_number(gpu, &["fb_memory_usage", "total"])
+                .or_else(|| intel_number(gpu, &["memory_total_mib"]));
+            let used = intel_nested_number(gpu, &["fb_memory_usage", "used"])
+                .or_else(|| intel_number(gpu, &["memory_used_mib"]));
+            let free = intel_nested_number(gpu, &["fb_memory_usage", "free"])
+                .or_else(|| intel_number(gpu, &["memory_free_mib"]));
+
+            let pcie_gen = intel_nested_number(
+                gpu,
+                &["pci", "gpu_link_info", "pcie_generation", "current"],
+            )
+            .or_else(|| intel_number(gpu, &["pcie_generation_current"]));
+            let pcie_width = intel_nested_number(
+                gpu,
+                &["pci", "gpu_link_info", "link_width", "current"],
+            )
+            .or_else(|| intel_number(gpu, &["pcie_link_width_current"]));
+
+            let power_w = intel_nested_number(
+                gpu,
+                &["gpu_power_readings", "average_power_draw"],
+            )
+            .or_else(|| intel_number(gpu, &["power_draw_w"]));
+
+            Some(GpuDevice {
+                vendor: "intel".into(),
+                name: name.trim().to_string(),
+                device_id: uuid.map(str::to_string),
+                device_index: index,
+                pci_bus_id: pci.map(str::to_string),
+                compute_capability: None,
+                vram_mib: total.and_then(|value| {
+                    (value >= 0.0 && value <= u64::MAX as f64).then_some(value.round() as u64)
+                }),
+                vram_used_mib: used.and_then(|value| {
+                    (value >= 0.0 && value <= u64::MAX as f64).then_some(value.round() as u64)
+                }),
+                vram_free_mib: free.and_then(|value| {
+                    (value >= 0.0 && value <= u64::MAX as f64).then_some(value.round() as u64)
+                }),
+                driver_version: intel_string(&report, &["umd_version"]).map(str::to_string),
+                pcie_link_gen: pcie_gen.and_then(|value| {
+                    (value >= 0.0 && value <= f64::from(u32::MAX)).then_some(value as u32)
+                }),
+                pcie_link_width: pcie_width.and_then(|value| {
+                    (value >= 0.0 && value <= f64::from(u32::MAX)).then_some(value as u32)
+                }),
+                pcie_link_gen_max: intel_nested_number(
+                    gpu,
+                    &["pci", "gpu_link_info", "pcie_generation", "max"],
+                )
+                .and_then(|value| {
+                    (value >= 0.0 && value <= f64::from(u32::MAX)).then_some(value as u32)
+                }),
+                pcie_link_width_max: intel_nested_number(
+                    gpu,
+                    &["pci", "gpu_link_info", "link_width", "max"],
+                )
+                .and_then(|value| {
+                    (value >= 0.0 && value <= f64::from(u32::MAX)).then_some(value as u32)
+                }),
+                utilization_percent: intel_nested_number(gpu, &["utilization", "gpu"])
+                    .and_then(|value| {
+                        (value >= 0.0 && value <= 100.0).then_some(value.round() as u32)
+                    }),
+                temperature_c: intel_nested_number(gpu, &["temperature", "gpu_current_temp"])
+                    .and_then(|value| {
+                        (value >= 0.0 && value <= f64::from(u32::MAX))
+                            .then_some(value.round() as u32)
+                    }),
+                power_draw_mw: power_w.and_then(|value| {
+                    (value >= 0.0 && value <= (u64::MAX as f64 / 1000.0))
+                        .then_some((value * 1000.0).round() as u64)
+                }),
+            })
+        })
+        .collect()
+}
+
+/// Fallback for Intel XPU Manager versions that expose discovery JSON
+/// but do not support the richer query report.
+fn parse_intel_discovery_json(output: &str) -> Vec<GpuDevice> {
+    let Ok(root) = serde_json::from_str::<Value>(output) else {
+        return Vec::new();
+    };
+    let items = root
+        .get("devices")
+        .or_else(|| root.get("gpus"))
+        .and_then(Value::as_array)
+        .or_else(|| root.as_array());
+    let Some(items) = items else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|device| {
+            if !device.is_object() {
+                return None;
+            }
+            let name = intel_string(
+                device,
+                &["device_name", "Device Name", "product_name", "name"],
+            )?;
+            let pci = intel_string(
+                device,
+                &["pci_bdf_address", "PCI BDF Address", "pci_bus_id"],
+            );
+            let uuid = intel_string(
+                device,
+                &["soc_uuid", "SOC UUID", "gpu_uuid", "uuid"],
+            );
+            let index = intel_u32(device, &["device_id", "Device ID", "device_index", "index"]);
+            let memory = intel_number(
+                device,
+                &["memory_physical_size_mib", "memory_total_mib"],
+            );
+            let driver = intel_string(device, &["umd_version", "UMD Version"]);
+            Some(GpuDevice {
+                vendor: "intel".into(),
+                name: name.trim().to_string(),
+                device_id: uuid.map(str::to_string),
+                device_index: index,
+                pci_bus_id: pci.map(str::to_string),
+                compute_capability: None,
+                vram_mib: memory.and_then(|value| {
+                    (value >= 0.0 && value <= u64::MAX as f64).then_some(value.round() as u64)
+                }),
+                vram_used_mib: None,
+                vram_free_mib: None,
+                driver_version: driver.map(str::to_string),
+                pcie_link_gen: None,
+                pcie_link_width: None,
+                pcie_link_gen_max: intel_u32(device, &["pcie_generation", "PCIe Generation"]),
+                pcie_link_width_max: intel_u32(device, &["pcie_max_link_width", "PCIe Max Link Width"]),
+                utilization_percent: None,
+                temperature_c: None,
+                power_draw_mw: None,
+            })
+        })
+        .collect()
+}
+
+fn intel_devices(binary: &Path) -> Vec<GpuDevice> {
+    if let Some(output) = run_probe(binary, &["query", "--json"]) {
+        let devices = parse_intel_query_json(&output);
+        if !devices.is_empty() {
+            return devices;
+        }
+    }
+    if let Some(output) = run_probe(binary, &["discovery", "--json"]) {
+        let devices = parse_intel_discovery_json(&output);
+        if !devices.is_empty() {
+            return devices;
+        }
+    }
+    Vec::new()
+}
+
 fn amd_devices(binary: &Path) -> Vec<GpuDevice> {
     let Some(output) = run_probe(binary, &["--showproductname"]) else {
         return Vec::new();
@@ -847,6 +1098,9 @@ pub fn detect_host() -> HostProfile {
     if let Some(binary) = &amd {
         gpu_devices.extend(amd_devices(binary));
     }
+    if let Some(binary) = &intel {
+        gpu_devices.extend(intel_devices(binary));
+    }
     if cfg!(target_os = "macos")
         && let Some(binary) = find_binary(&["system_profiler"])
     {
@@ -1059,6 +1313,97 @@ mod tests {
         assert_eq!(inventory[0].compiler_path, "/usr/local/cuda-12.8/bin/nvcc");
         assert_eq!(inventory[1].version, "13.0");
         assert_eq!(inventory[1].compiler_path, "/usr/local/cuda-13.0/bin/nvcc");
+    }
+
+    #[test]
+    fn intel_query_json_discovers_multiple_devices_with_documented_identity_and_metrics() {
+        let sample = r#"{
+            "umd_version": "1.17.39980",
+            "attached_gpus": 2,
+            "gpus": [
+                {
+                    "pci_bus_id": "0000:03:00.0",
+                    "product_name": "Intel(R) Arc(TM) B580 Graphics",
+                    "gpu_uuid": "00000000-0000-0003-0000-0000e20b8086",
+                    "device_index": "0",
+                    "fb_memory_usage": {"total": "12216", "used": "218.62", "free": "11997.38"},
+                    "utilization": {"gpu": "27.50"},
+                    "temperature": {"gpu_current_temp": "52.00"},
+                    "gpu_power_readings": {"average_power_draw": "59.34"},
+                    "pci": {
+                        "gpu_link_info": {
+                            "pcie_generation": {"current": "4", "max": "5"},
+                            "link_width": {"current": "8", "max": "16"}
+                        }
+                    }
+                },
+                {
+                    "pci_bus_id": "0000:4d:00.0",
+                    "product_name": "Intel(R) Data Center GPU Max",
+                    "gpu_uuid": "00000000-0000-0004-0000-0000e20b8086",
+                    "device_index": "1",
+                    "fb_memory_usage": {"total": "65536", "used": "4096", "free": "61440"},
+                    "utilization": {"gpu": null},
+                    "temperature": {"gpu_current_temp": null},
+                    "gpu_power_readings": {"average_power_draw": null}
+                }
+            ]
+        }"#;
+        let parsed = parse_intel_query_json(sample);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].vendor, "intel");
+        assert_eq!(parsed[0].name, "Intel(R) Arc(TM) B580 Graphics");
+        assert_eq!(
+            parsed[0].device_id.as_deref(),
+            Some("00000000-0000-0003-0000-0000e20b8086")
+        );
+        assert_eq!(parsed[0].device_index, Some(0));
+        assert_eq!(parsed[0].pci_bus_id.as_deref(), Some("0000:03:00.0"));
+        assert_eq!(parsed[0].vram_mib, Some(12216));
+        assert_eq!(parsed[0].vram_used_mib, Some(219));
+        assert_eq!(parsed[0].vram_free_mib, Some(11997));
+        assert_eq!(parsed[0].driver_version.as_deref(), Some("1.17.39980"));
+        assert_eq!(parsed[0].pcie_link_gen, Some(4));
+        assert_eq!(parsed[0].pcie_link_width, Some(8));
+        assert_eq!(parsed[0].pcie_link_gen_max, Some(5));
+        assert_eq!(parsed[0].pcie_link_width_max, Some(16));
+        assert_eq!(parsed[0].utilization_percent, Some(28));
+        assert_eq!(parsed[0].temperature_c, Some(52));
+        assert_eq!(parsed[0].power_draw_mw, Some(59_340));
+        assert_eq!(parsed[1].device_index, Some(1));
+        assert_eq!(parsed[1].utilization_percent, None);
+        assert_eq!(parsed[1].temperature_c, None);
+        assert_eq!(parsed[1].power_draw_mw, None);
+    }
+
+    #[test]
+    fn intel_discovery_json_fallback_keeps_unknown_metrics_unknown() {
+        let sample = r#"[
+            {
+                "Device ID": "0",
+                "Device Name": "Intel Arc Pro",
+                "SOC UUID": "intel-soc-uuid",
+                "PCI BDF Address": "0000:03:00.0",
+                "Memory Physical Size": "16384 MiB",
+                "UMD Version": "1.2.3",
+                "PCIe Generation": "4",
+                "PCIe Max Link Width": "16"
+            }
+        ]"#;
+        let parsed = parse_intel_discovery_json(sample);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].vendor, "intel");
+        assert_eq!(parsed[0].name, "Intel Arc Pro");
+        assert_eq!(parsed[0].device_id.as_deref(), Some("intel-soc-uuid"));
+        assert_eq!(parsed[0].device_index, Some(0));
+        assert_eq!(parsed[0].pci_bus_id.as_deref(), Some("0000:03:00.0"));
+        assert_eq!(parsed[0].vram_mib, Some(16384));
+        assert_eq!(parsed[0].driver_version.as_deref(), Some("1.2.3"));
+        assert_eq!(parsed[0].pcie_link_gen_max, Some(4));
+        assert_eq!(parsed[0].pcie_link_width_max, Some(16));
+        assert_eq!(parsed[0].utilization_percent, None);
+        assert_eq!(parsed[0].temperature_c, None);
+        assert_eq!(parsed[0].power_draw_mw, None);
     }
 
     #[test]
