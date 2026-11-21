@@ -14,7 +14,8 @@ DREAD is intended to provide one coherent operator environment for autonomous en
 - Preserve ComfyUI, the Python GPU Supervisor, authenticated bridge, model files, databases, configuration and user data.
 - llama.cpp is the active inference backend. Ollama is not started or used as the active model server.
 - The Python GPU Supervisor remains the only GPU lease and process-lifecycle authority. Rust must not launch a competing llama-server or bypass the authenticated bridge.
-- GPU inventory keeps stable provider IDs (for example NVIDIA UUID) and PCI bus addresses separate from the current enumeration index. Missing identity fields are reported as unavailable; they are never synthesized from array order.
+- GPU inventory keeps stable provider IDs (NVIDIA UUID, Intel GPU UUID or vendor serial where exposed) and PCI bus addresses separate from the current enumeration index. Intel uses `xpu-smi query --json` with a bounded discovery-JSON fallback. Missing identity and telemetry fields remain unknown; they are never synthesized from array order.
+- Host adapters currently include NVIDIA `nvidia-smi`, AMD `rocm-smi`, Intel `xpu-smi` and Apple `system_profiler`; actual readings depend on the installed vendor driver and permissions.
 - Imported skills and agent prompt profiles start disabled and are untrusted reference content. Discovery/import does not execute code.
 - Changes must be backed up, reversible and verified against real postconditions.
 
@@ -122,6 +123,9 @@ Never commit API or Supervisor tokens. Store them outside the repository with re
 - `GET /api/system/profile` is the host discovery snapshot. It inventories OS/CPU/storage/GPU devices through installed host utilities and reports provider ID/PCI identity where exposed.
 - `GET /api/gpu/telemetry` is a separate read-only sample returned by the Python GPU Supervisor bridge. It includes only fields the bridge obtains from `nvidia-smi`: utilization, VRAM use/total, temperature, power and current PCIe link. It is bearer-authenticated, loopback-only through the existing bridge client, has a 1 MiB response cap and never acquires or changes a GPU lease.
 - The GPU console shows these two sources separately and polls Supervisor telemetry only while the GPU page is open (30-second interval). The Supervisor remains the single authority for GPU admission and process lifecycle.
+
+
+Intel XPU Manager CLI references: https://intel.github.io/xpumanager/2.0/xpu-smi/overview.html, https://intel.github.io/xpumanager/2.0/xpu-smi/query.html, and https://intel.github.io/xpumanager/2.0/xpu-smi/discovery.html. DREAD uses read-only query/discovery JSON only.
 
 ## Token observability and prompt enhancement
 
