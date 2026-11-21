@@ -870,8 +870,10 @@ mod tests {
 
     #[test]
     fn rejects_zero_resource_class_limit() {
-        let mut limits = ResourceLimits::default();
-        limits.media = 0;
+        let limits = ResourceLimits {
+            media: 0,
+            ..ResourceLimits::default()
+        };
         assert_eq!(
             ExecutionGate::new_with_resource_limits(config(2, 4), limits).err(),
             Some(ConfigError::ZeroResourceConcurrency(ResourceClass::Media))
