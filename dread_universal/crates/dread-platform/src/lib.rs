@@ -401,6 +401,32 @@ fn intel_nested_number(object: &Value, path: &[&str]) -> Option<f64> {
         .filter(|number| number.is_finite())
 }
 
+
+fn intel_discovery_memory_mib(object: &Value) -> Option<f64> {
+    if let Some(value) = intel_number(object, &["memory_physical_size_mib", "memory_total_mib"]) {
+        return Some(value);
+    }
+    for key in ["Memory Physical Size", "memory_physical_size"] {
+        let Some(text) = object.get(key).and_then(Value::as_str) else {
+            continue;
+        };
+        let mut parts = text.split_whitespace();
+        let amount = parts.next()?.parse::<f64>().ok()?;
+        if !amount.is_finite() || amount < 0.0 {
+            return None;
+        }
+        let unit = parts.next().unwrap_or("");
+        return match unit.to_ascii_lowercase().as_str() {
+            "mib" => Some(amount),
+            "gib" => Some(amount * 1024.0),
+            "mb" => Some(amount * 1_000_000.0 / 1_048_576.0),
+            "gb" => Some(amount * 1_000_000_000.0 / 1_048_576.0),
+            _ => None,
+        };
+    }
+    None
+}
+
 fn intel_u32(object: &Value, keys: &[&str]) -> Option<u32> {
     intel_number(object, keys)
         .filter(|value| *value >= 0.0 && *value <= f64::from(u32::MAX))
@@ -532,15 +558,7 @@ fn parse_intel_discovery_json(output: &str) -> Vec<GpuDevice> {
             );
             let uuid = intel_string(device, &["soc_uuid", "SOC UUID", "gpu_uuid", "uuid"]);
             let index = intel_u32(device, &["device_id", "Device ID", "device_index", "index"]);
-            let memory = intel_number(
-                device,
-                &[
-                    "memory_physical_size_mib",
-                    "memory_total_mib",
-                    "Memory Physical Size",
-                    "memory_physical_size",
-                ],
-            );
+            let memory = intel_discovery_memory_mib(device);
             let driver = intel_string(device, &["umd_version", "UMD Version"]);
             Some(GpuDevice {
                 vendor: "intel".into(),
@@ -1444,6 +1462,16 @@ mod tests {
         assert_eq!(parsed[1].utilization_percent, None);
         assert_eq!(parsed[1].temperature_c, None);
         assert_eq!(parsed[1].power_draw_mw, None);
+    }
+
+    #[test]
+    fn intel_discovery_memory_fallback_respects_reported_units() {
+        let mib = json!({"Memory Physical Size": "16384 MiB"});
+        let gib = json!({"Memory Physical Size": "16 GiB"});
+        let unknown = json!({"Memory Physical Size": "16"});
+        assert_eq!(intel_discovery_memory_mib(&mib), Some(16384.0));
+        assert_eq!(intel_discovery_memory_mib(&gib), Some(16384.0));
+        assert_eq!(intel_discovery_memory_mib(&unknown), None);
     }
 
     #[test]
