@@ -687,3 +687,14 @@ Separate previously recorded live evidence remains valid at its own timestamps: 
 - Formatting, strict Clippy, workspace tests, optimized release build and package smoke tests passed on the preceding commit `447cf43e34e0d423f17e6a387181cdf5cc83ab92` (PR run #1222, `44846314057`). The additional output-budget regression test is on `90ee726a5def06c843219b1be6937afb96545aac`; its push and PR CI runs #1234 (`44851596135`) and #1235 (`44851601283`) were still running when this entry was written. Do not treat the new test as validated until those exact-head runs pass.
 - The web production build has passed on the new head's push run; Rust gates and the full PR run remain pending.
 - Safety boundary: no host utility is run against the user's workstation by this code change. The test validates the Rust process wrapper in Ubuntu CI only; it does not establish process-tree termination on all platforms or live GPU-driver behavior. No workstation services, ComfyUI, Python GPU Supervisor, model, database or user output was touched.
+
+
+## Provider cancellation truthfulness — 2026-11-21
+
+- Active agent-provider tasks now transition to `cancelling` when the operator requests cancellation. The API no longer reports them as `cancelled` before the remote provider has confirmed a terminal cancelled state.
+- The worker submits the provider cancellation request once, persists an explicit `task_cancellation_unconfirmed` event if the provider refuses, returns a non-terminal state, or is temporarily unreachable, and continues polling the provider's durable status. A provider race that completes successfully is recorded as completed rather than being overwritten as cancelled.
+- Provider start requests are awaited to a definitive response before attempting cancellation, avoiding a dropped HTTP start future that could leave an accepted remote task without a recorded provider ID.
+- The console now counts `cancelling` tasks as active and displays a pending-confirmation notice instead of inviting duplicate cancellation.
+- Added a focused state-transition unit test. Exact-head Rust formatting, strict Clippy, workspace tests, release build and package smoke tests must pass before this change is considered CI-verified.
+- Scope boundary: this change covers agent-provider tasks with a registered provider identity. Built-in GPU inference cancellation remains best-effort because the current Python Supervisor bridge cannot interrupt an already-running upstream generation; do not represent that path as provider-confirmed cancellation.
+- No workstation services, ComfyUI, Python GPU Supervisor, models, database or user outputs were accessed or modified.
