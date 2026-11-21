@@ -8813,6 +8813,54 @@ mod tests {
     }
 
     #[test]
+    fn provider_completion_wins_a_race_with_pending_cancellation() {
+        let db = Arc::new(Mutex::new(open_database(":memory:").unwrap()));
+        let now = now_epoch();
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO tasks (id, title, task_type, payload_json, status, approval_required, created_at, updated_at, agent_provider)
+                 VALUES ('cancel-race', 'Cancel race', 'agent_task', '{}', 'cancelling', 1, ?1, ?1, 'hermes')",
+                params![now],
+            )
+            .unwrap();
+        let (events, mut receiver) = broadcast::channel(8);
+        let state = AppState {
+            db: Arc::clone(&db),
+            gpu: GpuGatewayClient::new("http://127.0.0.1:1").unwrap(),
+            supervisor: None,
+            events,
+            execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
+            agent_adapters: Arc::new(HashMap::new()),
+            cancellations: Arc::new(Mutex::new(HashMap::new())),
+            api_token: Some("test-token".into()),
+            operator_id: "test-operator".into(),
+            auth_required: true,
+        };
+
+        finish_agent_task(
+            &state,
+            "cancel-race",
+            "completed",
+            Some(json!({"answer": "provider completed before cancellation"})),
+            None,
+        );
+
+        let status: String = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM tasks WHERE id = 'cancel-race'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "completed");
+        let event = receiver.try_recv().unwrap();
+        assert_eq!(event.event_type, "task_succeeded");
+    }
+
+    #[test]
     fn timestamp_is_unix_epoch_seconds() {
         assert!(now_epoch() > 1_700_000_000);
     }
