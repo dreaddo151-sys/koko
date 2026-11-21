@@ -643,3 +643,14 @@ Separate previously recorded live evidence remains valid at its own timestamps: 
 - README, master plan and implementation matrix were updated to distinguish host discovery and Supervisor runtime telemetry and to preserve the single Supervisor GPU-lease authority.
 - Latest full green CI baseline before this telemetry change: run #1149 (`44840250093`) passed all three jobs on commit `977024fc5d05f5799e74e3604a404bfb0dbd5442`, including Rust fmt/Clippy/workspace tests/release build, Web build, installer rollback/watchdog tests, release-verifier tests, GPU single-owner guard and Ubuntu package smoke test. The subsequent telemetry code/docs are newer and must be revalidated by a new current-head run before claiming those changes pass.
 - No workstation services, GPU leases, models, configs, databases or output files were accessed or modified. PR #14 remains draft/open/unmerged.
+
+
+## Supervisor telemetry full Ubuntu CI validation — 2026-11-21
+
+- Current PR #14 head `96e0e28a0285594b3d1e5565aed66ab67e7142fc` passed GitHub Actions run #1168 (`44840949476`) across all three Ubuntu 24.04 jobs.
+- Rust job passed: `cargo fmt --all -- --check`; strict `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo test --workspace --locked`; optimized `cargo build --workspace --release --locked`; shell syntax; release-verifier negative-path tests; portable installer migration/rollback (including watchdog-unit preservation); Python bridge/importer/watchdog tests; and the static single-owner GPU boundary guard.
+- Web job passed: lockfile verification, locked dependency install and production Vite/TypeScript build.
+- Ubuntu package job passed: `.deb`/portable bundle assembly, checksum/content verification, install and packaged API + production console smoke test.
+- This validates the Supervisor telemetry changes in CI: authenticated `GET /v1/telemetry` bridge call with 4-second timeout and 1 MiB response cap; protected Rust `GET /api/gpu/telemetry`; Bearer-auth mock test; separate GPU console panel refreshing only while the GPU page is open.
+- The frontend build initially failed on the telemetry panel's escaped JSX template literals. Those were corrected; a later Rust Clippy run also caught a production-scope `HeaderMap` import used only by tests. The import was moved into the test module. Run #1168 passed the corrected current head.
+- Remaining evidence boundary: this is an Ubuntu 24.04 CI and disposable package install/smoke pass. Actual connection to the user's existing Python Supervisor, NVIDIA/AMD/Intel/Apple host runtime, multi-GPU contention, Windows/other-distro installation and real watchdog opt-in timer are still live host acceptance items. No workstation/service/model/GPU lease was touched.
