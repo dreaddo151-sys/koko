@@ -686,7 +686,8 @@ fn amd_gpu_rows(output: &str) -> Vec<Value> {
 }
 
 fn amd_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
-    path.iter().try_fold(value, |current, key| current.get(*key))
+    path.iter()
+        .try_fold(value, |current, key| current.get(*key))
 }
 
 fn amd_string(value: &Value) -> Option<String> {
@@ -742,7 +743,9 @@ fn amd_number_and_unit(value: &Value) -> Option<(f64, Option<String>)> {
                 if suffix.is_empty() {
                     return None;
                 }
-                return number.is_finite().then_some((number, Some(suffix.to_string())));
+                return number
+                    .is_finite()
+                    .then_some((number, Some(suffix.to_string())));
             }
         }
         _ => return None,
@@ -770,8 +773,7 @@ fn amd_memory_mib(value: &(f64, Option<String>)) -> Option<u64> {
         "mb" | "mib" | "" => *number,
         _ => return None,
     };
-    (mib.is_finite() && mib >= 0.0 && mib <= u64::MAX as f64)
-        .then_some(mib.round() as u64)
+    (mib.is_finite() && mib >= 0.0 && mib <= u64::MAX as f64).then_some(mib.round() as u64)
 }
 
 fn amd_power_mw(value: &(f64, Option<String>)) -> Option<u64> {
@@ -824,11 +826,7 @@ fn amd_pcie_generation(value: &Value) -> Option<u32> {
     .find_map(|(rate, generation)| ((speed - rate).abs() < 0.2).then_some(*generation))
 }
 
-fn parse_amd_smi_json(
-    list_json: &str,
-    static_json: &str,
-    metric_json: &str,
-) -> Vec<GpuDevice> {
+fn parse_amd_smi_json(list_json: &str, static_json: &str, metric_json: &str) -> Vec<GpuDevice> {
     let list_rows = amd_gpu_rows(list_json);
     let static_rows = amd_gpu_rows(static_json);
     let metric_rows = amd_gpu_rows(metric_json);
@@ -882,25 +880,17 @@ fn parse_amd_smi_json(
                     &["name"],
                 ],
             )
-            .or_else(|| {
-                amd_string_at(&list, &[&["market_name"], &["product_name"], &["name"]])
-            })?;
+            .or_else(|| amd_string_at(&list, &[&["market_name"], &["product_name"], &["name"]]))?;
 
-            let uuid = amd_string_at(
-                &list,
-                &[&["uuid"], &["gpu_uuid"], &["hip_uuid"]],
-            )
-            .or_else(|| {
-                amd_string_at(
-                    &static_info,
-                    &[&["asic", "asic_serial"], &["asic", "serial"]],
-                )
-            });
-            let pci_bus_id = amd_string_at(
-                &list,
-                &[&["bdf"], &["pci_bus_id"], &["bus", "bdf"]],
-            )
-            .or_else(|| amd_string_at(&static_info, &[&["bus", "bdf"], &["bdf"]]));
+            let uuid =
+                amd_string_at(&list, &[&["uuid"], &["gpu_uuid"], &["hip_uuid"]]).or_else(|| {
+                    amd_string_at(
+                        &static_info,
+                        &[&["asic", "asic_serial"], &["asic", "serial"]],
+                    )
+                });
+            let pci_bus_id = amd_string_at(&list, &[&["bdf"], &["pci_bus_id"], &["bus", "bdf"]])
+                .or_else(|| amd_string_at(&static_info, &[&["bus", "bdf"], &["bdf"]]));
 
             let total_vram = amd_number_at(
                 &static_info,
@@ -932,14 +922,18 @@ fn parse_amd_smi_json(
                 ],
             )
             .and_then(|value| amd_memory_mib(&value))
-            .or_else(|| total_vram.zip(used_vram).map(|(total, used)| total.saturating_sub(used)));
+            .or_else(|| {
+                total_vram
+                    .zip(used_vram)
+                    .map(|(total, used)| total.saturating_sub(used))
+            });
 
             let current_pcie_width = amd_number_at(&metrics, &[&["pcie", "width"]])
                 .map(|(number, _)| number)
                 .filter(|number| *number >= 0.0 && *number <= f64::from(u32::MAX))
                 .map(|number| number as u32);
-            let current_pcie_gen = amd_path(&metrics, &["pcie", "speed"])
-                .and_then(amd_pcie_generation);
+            let current_pcie_gen =
+                amd_path(&metrics, &["pcie", "speed"]).and_then(amd_pcie_generation);
             let maximum_pcie_width = amd_number_at(
                 &static_info,
                 &[&["bus", "max_pcie_width"], &["bus", "max_link_width"]],
@@ -947,23 +941,19 @@ fn parse_amd_smi_json(
             .map(|(number, _)| number)
             .filter(|number| *number >= 0.0 && *number <= f64::from(u32::MAX))
             .map(|number| number as u32);
-            let maximum_pcie_gen = amd_string_at(
-                &static_info,
-                &[&["bus", "pcie_interface_version"]],
-            )
-            .and_then(|value| {
-                value
-                    .to_ascii_lowercase()
-                    .split_whitespace()
-                    .last()
-                    .and_then(|value| value.parse::<u32>().ok())
-            })
-            .or_else(|| {
-                amd_string_at(&static_info, &[&["bus", "max_pcie_speed"]])
+            let maximum_pcie_gen =
+                amd_string_at(&static_info, &[&["bus", "pcie_interface_version"]])
                     .and_then(|value| {
-                        amd_pcie_generation(&Value::String(value))
+                        value
+                            .to_ascii_lowercase()
+                            .split_whitespace()
+                            .last()
+                            .and_then(|value| value.parse::<u32>().ok())
                     })
-            });
+                    .or_else(|| {
+                        amd_string_at(&static_info, &[&["bus", "max_pcie_speed"]])
+                            .and_then(|value| amd_pcie_generation(&Value::String(value)))
+                    });
 
             let driver_version = amd_string_at(
                 &static_info,
@@ -1016,8 +1006,7 @@ fn parse_amd_smi_json(
 
 fn amd_smi_devices(binary: &Path) -> Vec<GpuDevice> {
     let list = run_probe_with_timeout(binary, &["list", "--json"], 5).unwrap_or_default();
-    let static_info =
-        run_probe_with_timeout(binary, &["static", "--json"], 5).unwrap_or_default();
+    let static_info = run_probe_with_timeout(binary, &["static", "--json"], 5).unwrap_or_default();
     let metrics = run_probe_with_timeout(binary, &["metric", "--json"], 5).unwrap_or_default();
     parse_amd_smi_json(&list, &static_info, &metrics)
 }
@@ -2019,14 +2008,8 @@ mod tests {
 
     #[test]
     fn amd_memory_and_power_unit_parsers_convert_documented_units() {
-        assert_eq!(
-            amd_memory_mib(&(24560.0, Some("MB".into()))),
-            Some(24560)
-        );
-        assert_eq!(
-            amd_memory_mib(&(24.0, Some("GB".into()))),
-            Some(24576)
-        );
+        assert_eq!(amd_memory_mib(&(24560.0, Some("MB".into()))), Some(24560));
+        assert_eq!(amd_memory_mib(&(24.0, Some("GB".into()))), Some(24576));
         assert_eq!(
             amd_memory_mib(&(1_073_741_824.0, Some("B".into()))),
             Some(1024)
