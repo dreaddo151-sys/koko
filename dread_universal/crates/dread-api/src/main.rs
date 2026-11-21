@@ -3457,7 +3457,10 @@ async fn execute_agent_task_inner(
         input: payload,
         idempotency_key: format!("project-dread:{task_id}"),
     };
-    let started = tokio::select! { result = adapter.start_task(request) => result, _ = cancellation.changed() => { finish_agent_task(&state, &task_id, "cancelled", None, Some("Cancelled before provider submission".into())); return; } };
+    // Do not drop a provider start request when cancellation races with submission:
+    // the provider may have accepted the request even if the HTTP future is dropped.
+    // Resolve the idempotent start call first, then cancel using the returned provider ID.
+    let started = adapter.start_task(request).await;
     let started = match started {
         Ok(task) => task,
         Err(error) => {
@@ -3483,21 +3486,42 @@ async fn execute_agent_task_inner(
     }
     let mut cursor = initial_event_cursor;
     let mut confirmation_waiting = false;
+    let mut cancellation_submitted = false;
     loop {
-        if *cancellation.borrow() {
+        if *cancellation.borrow() && !cancellation_submitted {
+            cancellation_submitted = true;
             match adapter.cancel_task(&task_id, &provider_id).await {
-                Ok(task) => {
-                    finish_agent_task(&state, &task_id, "cancelled", task.result, task.error)
+                Ok(task) if task.state == AgentTaskState::Cancelled => {
+                    finish_agent_task(&state, &task_id, "cancelled", task.result, task.error);
+                    return;
                 }
-                Err(error) => finish_agent_task(
-                    &state,
-                    &task_id,
-                    "failed",
-                    None,
-                    Some(format!("Provider cancellation failed: {error}")),
-                ),
+                Ok(task) => {
+                    let _ = persist_task_event(
+                        &state,
+                        &task_id,
+                        "task_cancellation_unconfirmed",
+                        &json!({
+                            "provider": provider,
+                            "provider_state": format!("{:?}", task.state),
+                            "message": "Provider accepted the cancellation request but has not reported a terminal cancelled state"
+                        }),
+                        "executor",
+                    );
+                }
+                Err(error) => {
+                    let _ = persist_task_event(
+                        &state,
+                        &task_id,
+                        "task_cancellation_unconfirmed",
+                        &json!({
+                            "provider": provider,
+                            "error": error.to_string(),
+                            "message": "Provider cancellation was not confirmed; DREAD will reconcile provider status"
+                        }),
+                        "executor",
+                    );
+                }
             }
-            return;
         }
         match adapter.events(&task_id, &provider_id, cursor).await {
             Ok(events) => {
@@ -3599,14 +3623,20 @@ async fn execute_agent_task_inner(
                 }
             }
             Err(error) => {
-                finish_agent_task(
-                    &state,
-                    &task_id,
-                    "failed",
-                    None,
-                    Some(format!("Provider status polling failed: {error}")),
-                );
-                return;
+                if cancellation_submitted {
+                    // Keep the durable task in "cancelling" while the provider is
+                    // unreachable. A transport failure is not proof of cancellation.
+                    warn!(task_id = %task_id, provider = %provider, error = %error, "Provider status reconciliation is temporarily unavailable");
+                } else {
+                    finish_agent_task(
+                        &state,
+                        &task_id,
+                        "failed",
+                        None,
+                        Some(format!("Provider status polling failed: {error}")),
+                    );
+                    return;
+                }
             }
         }
         tokio::select! { _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}, _ = cancellation.changed() => {} }
@@ -3636,9 +3666,14 @@ fn finish_agent_task(
         .optional()
         .ok()
         .flatten();
-    if !matches!(current.as_deref(), Some("queued" | "running" | "cancelled")) {
+    if !matches!(
+        current.as_deref(),
+        Some("queued" | "running" | "cancelling" | "cancelled")
+    ) {
         return;
     }
+    // "cancelling" is deliberately not treated as "cancelled": only the
+    // provider's terminal state may resolve an active remote task.
     let final_status = if current.as_deref() == Some("cancelled") {
         "cancelled"
     } else {
@@ -4571,52 +4606,71 @@ async fn cancel_task(
     let tx = conn
         .transaction()
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    let changed = tx.execute(
-        "UPDATE tasks SET status = 'cancelled', updated_at = ?2 WHERE id = ?1 AND status IN ('pending_approval', 'approved', 'queued', 'running')",
-        params![id, now],
-    ).map_err(|e| ApiError::internal(e.to_string()))?;
-    if changed == 0 {
-        let exists: bool = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1)",
-                params![id],
-                |row| row.get(0),
-            )
-            .map_err(|e| ApiError::internal(e.to_string()))?;
-        if !exists {
-            return Err(ApiError::not_found("Task not found"));
+    let current: Option<(String, Option<String>)> = tx
+        .query_row(
+            "SELECT status, agent_provider FROM tasks WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let Some((current_status, agent_provider)) = current else {
+        return Err(ApiError::not_found("Task not found"));
+    };
+    let (next_status, cancellation_pending, changed) = match current_status.as_str() {
+        "cancelling" => ("cancelling", true, false),
+        "running" if agent_provider.is_some() => ("cancelling", true, true),
+        "pending_approval" | "approved" | "queued" | "running" => {
+            ("cancelled", false, true)
         }
-        return Err(ApiError {
-            status: StatusCode::CONFLICT,
-            message: "Task cannot be cancelled in its current state".into(),
-        });
+        _ => {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                message: "Task cannot be cancelled in its current state".into(),
+            });
+        }
+    };
+    if changed {
+        tx.execute(
+            "UPDATE tasks SET status = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, next_status, now],
+        )
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+        tx.execute(
+            "UPDATE missions SET status = 'blocked'
+             WHERE id IN (SELECT mission_id FROM mission_tasks WHERE task_id = ?1)",
+            params![id],
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+        let event = append_task_event(
+            &tx,
+            &id,
+            if cancellation_pending {
+                "task_cancellation_requested"
+            } else {
+                "task_cancelled"
+            },
+            &json!({"status": next_status}),
+            "operator",
+            now,
+        )?;
+        let _ = state.events.send(event);
     }
-    tx.execute(
-        "UPDATE missions SET status = 'blocked'
-         WHERE id IN (SELECT mission_id FROM mission_tasks WHERE task_id = ?1)",
-        params![id],
-    )
-    .map_err(|error| ApiError::internal(error.to_string()))?;
-    let event = append_task_event(
-        &tx,
-        &id,
-        "task_cancelled",
-        &json!({"status": "cancelled"}),
-        "operator",
-        now,
-    )?;
     let task = tx.query_row(
         "SELECT id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, approval_reason, created_at, updated_at
          FROM tasks WHERE id = ?1", params![id], task_from_row
     ).map_err(|e| ApiError::internal(e.to_string()))?;
     tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
-    let _ = state.events.send(event);
     if let Ok(cancellations) = state.cancellations.lock()
         && let Some(sender) = cancellations.get(&id)
     {
         let _ = sender.send(true);
     }
-    Ok(Json(json!({"item": task, "execution_started": false})))
+    Ok(Json(json!({
+        "item": task,
+        "execution_started": cancellation_pending,
+        "cancellation_pending": cancellation_pending
+    })))
 }
 
 async fn gpu_health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
