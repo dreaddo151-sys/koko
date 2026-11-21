@@ -1,0 +1,36 @@
+name: Format isolated Kimi Phase 6 candidate
+
+on:
+  push:
+    branches:
+      - work/kimi003-phase6-durable-execution-candidate-2026-11-22
+    paths:
+      - ".github/workflows/kimi-candidate-format.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format candidate Rust modules and export diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --manifest-path dread_universal/Cargo.toml --all
+          mkdir -p /tmp/kimi-format
+          git diff --binary -- dread_universal/crates/dread-orchestrator/src/persistence.rs \
+            dread_universal/crates/dread-orchestrator/src/reconcile.rs \
+            > /tmp/kimi-format/rustfmt.patch
+          test -s /tmp/kimi-format/rustfmt.patch
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kimi-phase6-rustfmt-patch
+          path: /tmp/kimi-format/rustfmt.patch
+          if-no-files-found: error
