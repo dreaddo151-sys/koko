@@ -345,6 +345,12 @@ struct QueuedTaskRecovery {
     provider_event_cursor: u64,
 }
 
+struct CancellingTaskRecovery {
+    id: String,
+    provider: String,
+    provider_task_id: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateTask {
     title: String,
@@ -4318,6 +4324,114 @@ async fn execute_approved_task(
     }
     if advance_mission && let Some(mission_id) = mission_id {
         dispatch_ready_mission_tasks(state.clone(), mission_id);
+    }
+}
+
+async fn reconcile_cancelling_agent_task(
+    state: AppState,
+    adapter: Arc<dyn AgentAdapter>,
+    task: CancellingTaskRecovery,
+) {
+    let task_id = task.id.clone();
+    let provider = task.provider.clone();
+    let provider_task_id = task.provider_task_id.clone();
+    let worker_state = state.clone();
+    let result = state
+        .execution
+        .run_managed_for_resources(
+            ResourceRequest::AGENT,
+            task_id.clone(),
+            watch::channel(false).1,
+            move |_cancellation| async move {
+                match adapter.cancel_task(&task_id, &provider_task_id).await {
+                    Ok(remote) if remote.state == AgentTaskState::Cancelled => {
+                        finish_agent_task(
+                            &worker_state,
+                            &task_id,
+                            "cancelled",
+                            remote.result,
+                            remote.error,
+                        );
+                        return Ok(());
+                    }
+                    Ok(remote) => {
+                        let _ = persist_task_event(
+                            &worker_state,
+                            &task_id,
+                            "task_cancellation_unconfirmed",
+                            &json!({
+                                "provider": provider,
+                                "provider_state": format!("{:?}", remote.state),
+                                "message": "Startup recovery reissued cancellation; provider has not reported terminal cancellation"
+                            }),
+                            "recovery",
+                        );
+                    }
+                    Err(error) => {
+                        let _ = persist_task_event(
+                            &worker_state,
+                            &task_id,
+                            "task_cancellation_unconfirmed",
+                            &json!({
+                                "provider": provider,
+                                "error": error.to_string(),
+                                "message": "Startup recovery could not confirm cancellation; provider status polling continues"
+                            }),
+                            "recovery",
+                        );
+                    }
+                }
+
+                loop {
+                    match adapter.task_status(&task_id, &provider_task_id).await {
+                        Ok(remote)
+                            if matches!(
+                                remote.state,
+                                AgentTaskState::Succeeded
+                                    | AgentTaskState::Failed
+                                    | AgentTaskState::Cancelled
+                            ) =>
+                        {
+                            let result = adapter
+                                .task_result(&task_id, &provider_task_id)
+                                .await
+                                .unwrap_or(remote);
+                            let status = match result.state {
+                                AgentTaskState::Succeeded => "completed",
+                                AgentTaskState::Cancelled => "cancelled",
+                                _ => "failed",
+                            };
+                            finish_agent_task(
+                                &worker_state,
+                                &task_id,
+                                status,
+                                result.result,
+                                result.error,
+                            );
+                            return Ok(());
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            warn!(
+                                task_id = %task_id,
+                                provider = %provider,
+                                error = %error,
+                                "Recovered cancellation status is temporarily unavailable"
+                            );
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            },
+        )
+        .await;
+    if let Err(error) = result {
+        warn!(
+            task_id = %task.id,
+            provider = %task.provider,
+            error = %error,
+            "Could not start cancellation reconciliation after restart; task remains unresolved"
+        );
     }
 }
 
