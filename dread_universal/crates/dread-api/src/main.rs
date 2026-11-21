@@ -5326,7 +5326,7 @@ mod tests {
     };
     use dread_agents::{
         AdapterFuture, AgentCapability, AgentDescriptor, AgentEvent, AgentHealth, AgentHealthState,
-        AgentTask,
+        AgentAdapterError, AgentTask,
     };
     #[cfg(test)]
     use futures::StreamExt;
@@ -5337,6 +5337,8 @@ mod tests {
     struct MockAgentAdapter {
         descriptor: AgentDescriptor,
         starts: Arc<Mutex<Vec<StartTaskRequest>>>,
+        cancel_error: Arc<Mutex<Option<String>>>,
+        status_running: Arc<Mutex<bool>>,
     }
 
     impl MockAgentAdapter {
@@ -5351,7 +5353,18 @@ mod tests {
                     enabled: true,
                 },
                 starts: Arc::new(Mutex::new(Vec::new())),
+                cancel_error: Arc::new(Mutex::new(None)),
+                status_running: Arc::new(Mutex::new(false)),
             }
+        }
+
+        fn reject_cancellation(&self) {
+            *self.cancel_error.lock().unwrap() =
+                Some("mock provider refused cancellation".into());
+        }
+
+        fn keep_running(&self) {
+            *self.status_running.lock().unwrap() = true;
         }
     }
 
@@ -5394,10 +5407,15 @@ mod tests {
             _provider_task_id: &'a str,
         ) -> AdapterFuture<'a, AgentTask> {
             let task_id = task_id.to_string();
+            let state = if *self.status_running.lock().unwrap() {
+                AgentTaskState::Running
+            } else {
+                AgentTaskState::Succeeded
+            };
             Box::pin(async move {
                 Ok(AgentTask {
                     task_id,
-                    state: AgentTaskState::Succeeded,
+                    state,
                     provider_task_id: Some("provider-run-123".into()),
                     result: None,
                     error: None,
@@ -5434,7 +5452,15 @@ mod tests {
             _provider_task_id: &'a str,
         ) -> AdapterFuture<'a, AgentTask> {
             let task_id = task_id.to_string();
+            let error = self.cancel_error.lock().unwrap().clone();
             Box::pin(async move {
+                if let Some(message) = error {
+                    return Err(AgentAdapterError {
+                        code: "provider_cancel_not_confirmed".into(),
+                        message,
+                        retryable: false,
+                    });
+                }
                 Ok(AgentTask {
                     task_id,
                     state: AgentTaskState::Cancelled,
