@@ -698,3 +698,13 @@ Separate previously recorded live evidence remains valid at its own timestamps: 
 - Added a focused state-transition unit test. Exact-head Rust formatting, strict Clippy, workspace tests, release build and package smoke tests must pass before this change is considered CI-verified.
 - Scope boundary: agent-provider tasks with a registered provider identity wait for provider terminal state. Built-in GPU chat now uses managed execution so an in-flight Supervisor request is not dropped on local cancellation; the task remains `cancelling` until the request returns. Ambiguous bridge failures are recorded as `task_cancellation_unconfirmed`. The current Python Supervisor bridge cannot interrupt or independently query an already-running upstream generation, so no successful cancellation is claimed.
 - No workstation services, ComfyUI, Python GPU Supervisor, models, database or user outputs were accessed or modified.
+
+
+## Restart-safe provider cancellation reconciliation — 2026-11-21
+
+- Startup recovery now finds persisted `cancelling` agent tasks with a durable provider task ID and an enabled adapter, reissues the idempotent provider cancellation request, then polls provider status until a terminal state is confirmed.
+- Recovery does not resubmit the original task. It uses the persisted provider task ID and the shared agent resource quota. Provider errors or non-terminal responses leave the task unresolved and are recorded as audit events.
+- Tasks without a durable provider ID, without an enabled adapter, or without a provider-backed cancellation contract remain `cancelling`; recovery records why it cannot safely confirm the outcome instead of guessing or marking them cancelled.
+- Added an API regression test that restarts reconciliation for a cancelling agent task, verifies terminal cancellation, and asserts that the provider task is not started a second time.
+- GPU chat cancellation remains unresolved across restart when the Supervisor bridge has no durable request ID/status endpoint. This is a known contract gap, not a successful cancellation.
+- Exact-head CI is pending for the startup-recovery additions.
