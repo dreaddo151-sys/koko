@@ -4,7 +4,6 @@
 //! Callers supply an explicitly selected runner. The existing Python GPU Supervisor
 //! remains the sole authority for GPU admission and lifecycle.
 
-
 pub mod lifecycle;
 pub mod persistence;
 pub mod reconcile;
