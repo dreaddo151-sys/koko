@@ -443,10 +443,15 @@ impl ExecutionGate {
         F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
         Fut: Future<Output = Result<Value, String>> + Send,
     {
-        self.run_inner(resources, task_id, cancellation, move |attempt, cancellation| {
-            let operation_future = operation(attempt, cancellation);
-            async move { operation_future.await.map_err(RunnerError::permanent) }
-        })
+        self.run_inner(
+            resources,
+            task_id,
+            cancellation,
+            move |attempt, cancellation| {
+                let operation_future = operation(attempt, cancellation);
+                async move { operation_future.await.map_err(RunnerError::permanent) }
+            },
+        )
         .await
     }
 
@@ -482,7 +487,8 @@ impl ExecutionGate {
         F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
         Fut: Future<Output = Result<Value, RunnerError>> + Send,
     {
-        self.run_inner(resources, task_id, cancellation, operation).await
+        self.run_inner(resources, task_id, cancellation, operation)
+            .await
     }
 
     async fn run_inner<F, Fut>(
@@ -881,9 +887,7 @@ mod tests {
             media: 1,
             agent: 1,
         };
-        let gate = Arc::new(
-            ExecutionGate::new_with_resource_limits(config(2, 6), limits).unwrap(),
-        );
+        let gate = Arc::new(ExecutionGate::new_with_resource_limits(config(2, 6), limits).unwrap());
         let release_gpu = Arc::new(Notify::new());
 
         let (first_started_tx, first_started_rx) = oneshot::channel();
@@ -954,11 +958,16 @@ mod tests {
                 ResourceRequest::CPU,
                 "cpu-discovery",
                 watch::channel(false).1,
-                move |_, _| {
-                    let started = cpu_started_tx;
-                    async move {
-                        let _ = started.send(());
-                        Ok(json!({"cpu": true}))
+                {
+                    let mut started = Some(cpu_started_tx);
+                    move |_, _| {
+                        let started = started.take();
+                        async move {
+                            if let Some(started) = started {
+                                let _ = started.send(());
+                            }
+                            Ok(json!({"cpu": true}))
+                        }
                     }
                 },
             )
