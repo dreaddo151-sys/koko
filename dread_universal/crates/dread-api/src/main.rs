@@ -5082,6 +5082,93 @@ fn validate_bind_address(addr: SocketAddr) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn parse_positive_limit(
+    name: &str,
+    raw: Option<&str>,
+    default: usize,
+    maximum: usize,
+) -> anyhow::Result<usize> {
+    let Some(raw) = raw else {
+        return Ok(default);
+    };
+    let value = raw.trim().parse::<usize>().map_err(|_| {
+        anyhow::anyhow!("{name} must be an integer from 1 through {maximum}")
+    })?;
+    anyhow::ensure!(
+        (1..=maximum).contains(&value),
+        "{name} must be an integer from 1 through {maximum}"
+    );
+    Ok(value)
+}
+
+fn positive_limit_from_env(
+    name: &str,
+    default: usize,
+    maximum: usize,
+) -> anyhow::Result<usize> {
+    let raw = match env::var(name) {
+        Ok(value) => Some(value),
+        Err(env::VarError::NotPresent) => None,
+        Err(error) => return Err(error.into()),
+    };
+    parse_positive_limit(name, raw.as_deref(), default, maximum)
+}
+
+fn execution_settings_from_env() -> anyhow::Result<(ExecutionConfig, ResourceLimits)> {
+    const MAX_CONCURRENCY: usize = 128;
+    const MAX_ADMITTED: usize = 1024;
+
+    let defaults = ExecutionConfig::default();
+    let max_concurrency = positive_limit_from_env(
+        "DREAD_EXECUTION_MAX_CONCURRENCY",
+        defaults.max_concurrency,
+        MAX_CONCURRENCY,
+    )?;
+    let max_admitted = positive_limit_from_env(
+        "DREAD_EXECUTION_MAX_ADMITTED",
+        defaults.max_admitted,
+        MAX_ADMITTED,
+    )?;
+    anyhow::ensure!(
+        max_admitted >= max_concurrency,
+        "DREAD_EXECUTION_MAX_ADMITTED must be at least DREAD_EXECUTION_MAX_CONCURRENCY"
+    );
+    let execution = ExecutionConfig {
+        max_concurrency,
+        max_admitted,
+        ..defaults
+    };
+
+    let limits = ResourceLimits {
+        cpu: positive_limit_from_env(
+            "DREAD_RESOURCE_CPU_CONCURRENCY",
+            ResourceLimits::default().cpu,
+            MAX_CONCURRENCY,
+        )?,
+        gpu: positive_limit_from_env(
+            "DREAD_RESOURCE_GPU_CONCURRENCY",
+            ResourceLimits::default().gpu,
+            MAX_CONCURRENCY,
+        )?,
+        model: positive_limit_from_env(
+            "DREAD_RESOURCE_MODEL_CONCURRENCY",
+            ResourceLimits::default().model,
+            MAX_CONCURRENCY,
+        )?,
+        media: positive_limit_from_env(
+            "DREAD_RESOURCE_MEDIA_CONCURRENCY",
+            ResourceLimits::default().media,
+            MAX_CONCURRENCY,
+        )?,
+        agent: positive_limit_from_env(
+            "DREAD_RESOURCE_AGENT_CONCURRENCY",
+            ResourceLimits::default().agent,
+            MAX_CONCURRENCY,
+        )?,
+    };
+    Ok((execution, limits))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -5126,16 +5213,14 @@ async fn main() -> anyhow::Result<()> {
     let db = open_database(&db_path)?;
     let agent_adapters = Arc::new(load_agent_adapters_from_env()?);
     let (events, _) = broadcast::channel(256);
+    let (execution_config, resource_limits) = execution_settings_from_env()?;
     let state = AppState {
         db: Arc::new(Mutex::new(db)),
         gpu: GpuGatewayClient::from_env()?,
         supervisor,
         events,
-        execution: ExecutionGate::new_with_resource_limits(
-            ExecutionConfig::default(),
-            ResourceLimits::default(),
-        )
-        .map_err(|error| anyhow::anyhow!("Invalid execution configuration: {error:?}"))?,
+        execution: ExecutionGate::new_with_resource_limits(execution_config, resource_limits)
+            .map_err(|error| anyhow::anyhow!("Invalid execution configuration: {error:?}"))?,
         agent_adapters,
         cancellations: Arc::new(Mutex::new(HashMap::new())),
         api_token,
@@ -5994,6 +6079,15 @@ mod tests {
     async fn test_app() -> (Router, tokio::task::JoinHandle<()>) {
         let (router, _receiver, server) = test_app_with_events().await;
         (router, server)
+    }
+
+    #[test]
+    fn execution_limit_settings_apply_defaults_and_reject_out_of_range_values() {
+        assert_eq!(parse_positive_limit("LIMIT", None, 3, 16).unwrap(), 3);
+        assert_eq!(parse_positive_limit("LIMIT", Some(" 4 "), 3, 16).unwrap(), 4);
+        assert!(parse_positive_limit("LIMIT", Some("0"), 3, 16).is_err());
+        assert!(parse_positive_limit("LIMIT", Some("17"), 3, 16).is_err());
+        assert!(parse_positive_limit("LIMIT", Some("many"), 3, 16).is_err());
     }
 
     #[test]
