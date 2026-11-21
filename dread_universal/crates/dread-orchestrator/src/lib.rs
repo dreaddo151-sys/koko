@@ -14,7 +14,7 @@ use std::{
 };
 
 use serde_json::Value;
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 const CANCELLATION_CLEANUP_GRACE: Duration = Duration::from_secs(5);
 
@@ -47,6 +47,7 @@ impl Default for ExecutionConfig {
 pub enum ConfigError {
     ZeroConcurrency,
     AdmissionBelowConcurrency,
+    ZeroResourceConcurrency(ResourceClass),
     ZeroAttempts,
     ZeroTimeout,
     MaxRetryBackoffBelowInitial,
@@ -77,6 +78,7 @@ impl RunnerError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionError {
     InvalidTaskId,
+    InvalidResourceRequest,
     AdmissionFull { limit: usize },
     Cancelled { attempts: u8 },
     TimedOut { attempts: u8 },
@@ -95,6 +97,7 @@ pub struct ExecutionResult {
 #[derive(Clone)]
 pub struct ExecutionGate {
     semaphore: Arc<Semaphore>,
+    resource_semaphores: [Arc<Semaphore>; 5],
     admitted: Arc<AtomicUsize>,
     config: ExecutionConfig,
 }
@@ -111,6 +114,13 @@ impl Drop for AdmissionGuard {
 
 impl ExecutionGate {
     pub fn new(config: ExecutionConfig) -> Result<Self, ConfigError> {
+        Self::new_with_resource_limits(config, ResourceLimits::default())
+    }
+
+    pub fn new_with_resource_limits(
+        config: ExecutionConfig,
+        resource_limits: ResourceLimits,
+    ) -> Result<Self, ConfigError> {
         if config.max_concurrency == 0 {
             return Err(ConfigError::ZeroConcurrency);
         }
@@ -126,8 +136,18 @@ impl ExecutionGate {
         if config.max_retry_backoff < config.retry_backoff {
             return Err(ConfigError::MaxRetryBackoffBelowInitial);
         }
+        for class in ResourceClass::ALL {
+            if resource_limits.for_class(class) == 0 {
+                return Err(ConfigError::ZeroResourceConcurrency(class));
+            }
+        }
         Ok(Self {
             semaphore: Arc::new(Semaphore::new(config.max_concurrency)),
+            resource_semaphores: std::array::from_fn(|index| {
+                Arc::new(Semaphore::new(
+                    resource_limits.for_class(ResourceClass::ALL[index]),
+                ))
+            }),
             admitted: Arc::new(AtomicUsize::new(0)),
             config,
         })
@@ -135,6 +155,10 @@ impl ExecutionGate {
 
     pub fn admitted_count(&self) -> usize {
         self.admitted.load(Ordering::Acquire)
+    }
+
+    pub fn available_resource_permits(&self, class: ResourceClass) -> usize {
+        self.resource_semaphores[class.index()].available_permits()
     }
 
     async fn wait_before_retry(
@@ -186,6 +210,59 @@ impl ExecutionGate {
         })
     }
 
+    /// Acquire each requested resource in enum order, then the shared global
+    /// concurrency permit. Waiting for a busy resource class does not consume a
+    /// global running slot, and cancellation drops every permit already acquired.
+    async fn acquire_permits(
+        &self,
+        request: ResourceRequest,
+        cancellation: &mut watch::Receiver<bool>,
+    ) -> Result<(Vec<OwnedSemaphorePermit>, OwnedSemaphorePermit), ExecutionError> {
+        if request.is_empty() {
+            return Err(ExecutionError::InvalidResourceRequest);
+        }
+
+        let mut resources = Vec::new();
+        for class in ResourceClass::ALL {
+            if !request.includes(class) {
+                continue;
+            }
+            let permit = loop {
+                if *cancellation.borrow() {
+                    return Err(ExecutionError::Cancelled { attempts: 0 });
+                }
+                tokio::select! {
+                    permit = Arc::clone(&self.resource_semaphores[class.index()]).acquire_owned() => {
+                        break permit.map_err(|_| ExecutionError::SchedulerClosed)?;
+                    }
+                    changed = cancellation.changed() => {
+                        if changed.is_err() || *cancellation.borrow() {
+                            return Err(ExecutionError::Cancelled { attempts: 0 });
+                        }
+                    }
+                }
+            };
+            resources.push(permit);
+        }
+
+        let global = loop {
+            if *cancellation.borrow() {
+                return Err(ExecutionError::Cancelled { attempts: 0 });
+            }
+            tokio::select! {
+                permit = Arc::clone(&self.semaphore).acquire_owned() => {
+                    break permit.map_err(|_| ExecutionError::SchedulerClosed)?;
+                }
+                changed = cancellation.changed() => {
+                    if changed.is_err() || *cancellation.borrow() {
+                        return Err(ExecutionError::Cancelled { attempts: 0 });
+                    }
+                }
+            }
+        };
+        Ok((resources, global))
+    }
+
     /// Run a long-lived managed operation under the shared admission and concurrency limits.
     ///
     /// This is intended for provider workers whose own lifecycle polls for terminal
@@ -196,6 +273,24 @@ impl ExecutionGate {
     /// after it has confirmed or completed provider-side cleanup.
     pub async fn run_managed<T, F, Fut>(
         &self,
+        task_id: impl Into<String>,
+        cancellation: watch::Receiver<bool>,
+        operation: F,
+    ) -> Result<T, ExecutionError>
+    where
+        T: Send,
+        F: FnOnce(watch::Receiver<bool>) -> Fut + Send,
+        Fut: Future<Output = Result<T, String>> + Send,
+    {
+        self.run_managed_for_resources(ResourceRequest::AGENT, task_id, cancellation, operation)
+            .await
+    }
+
+    /// Run a long-lived provider operation under trusted resource-class and global limits.
+    /// The runner must observe cancellation and finish provider cleanup before returning.
+    pub async fn run_managed_for_resources<T, F, Fut>(
+        &self,
+        resources: ResourceRequest,
         task_id: impl Into<String>,
         mut cancellation: watch::Receiver<bool>,
         operation: F,
@@ -211,22 +306,8 @@ impl ExecutionGate {
         }
 
         let _admission = self.try_admit()?;
-        let _permit = loop {
-            if *cancellation.borrow() {
-                return Err(ExecutionError::Cancelled { attempts: 0 });
-            }
-            tokio::select! {
-                permit = Arc::clone(&self.semaphore).acquire_owned() => {
-                    break permit.map_err(|_| ExecutionError::SchedulerClosed)?;
-                }
-                changed = cancellation.changed() => {
-                    if changed.is_err() || *cancellation.borrow() {
-                        return Err(ExecutionError::Cancelled { attempts: 0 });
-                    }
-                }
-            }
-        };
-
+        let (_resource_permits, _global_permit) =
+            self.acquire_permits(resources, &mut cancellation).await?;
         operation(cancellation.clone())
             .await
             .map_err(|message| ExecutionError::RunnerFailed {
@@ -243,13 +324,29 @@ impl ExecutionGate {
         &self,
         task_id: impl Into<String>,
         cancellation: watch::Receiver<bool>,
+        operation: F,
+    ) -> Result<ExecutionResult, ExecutionError>
+    where
+        F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
+        Fut: Future<Output = Result<Value, String>> + Send,
+    {
+        self.run_for_resources(ResourceRequest::CPU, task_id, cancellation, operation)
+            .await
+    }
+
+    /// Run a reviewed operation using only the resource classes chosen by trusted code.
+    pub async fn run_for_resources<F, Fut>(
+        &self,
+        resources: ResourceRequest,
+        task_id: impl Into<String>,
+        cancellation: watch::Receiver<bool>,
         mut operation: F,
     ) -> Result<ExecutionResult, ExecutionError>
     where
         F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
         Fut: Future<Output = Result<Value, String>> + Send,
     {
-        self.run_inner(task_id, cancellation, move |attempt, cancellation| {
+        self.run_inner(resources, task_id, cancellation, move |attempt, cancellation| {
             let operation_future = operation(attempt, cancellation);
             async move { operation_future.await.map_err(RunnerError::permanent) }
         })
@@ -268,11 +365,32 @@ impl ExecutionGate {
         F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
         Fut: Future<Output = Result<Value, RunnerError>> + Send,
     {
-        self.run_inner(task_id, cancellation, operation).await
+        self.run_with_retryable_errors_for_resources(
+            ResourceRequest::CPU,
+            task_id,
+            cancellation,
+            operation,
+        )
+        .await
+    }
+
+    pub async fn run_with_retryable_errors_for_resources<F, Fut>(
+        &self,
+        resources: ResourceRequest,
+        task_id: impl Into<String>,
+        cancellation: watch::Receiver<bool>,
+        operation: F,
+    ) -> Result<ExecutionResult, ExecutionError>
+    where
+        F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
+        Fut: Future<Output = Result<Value, RunnerError>> + Send,
+    {
+        self.run_inner(resources, task_id, cancellation, operation).await
     }
 
     async fn run_inner<F, Fut>(
         &self,
+        resources: ResourceRequest,
         task_id: impl Into<String>,
         mut cancellation: watch::Receiver<bool>,
         mut operation: F,
@@ -286,22 +404,8 @@ impl ExecutionGate {
             return Err(ExecutionError::InvalidTaskId);
         }
         let _admission = self.try_admit()?;
-
-        let _permit = loop {
-            if *cancellation.borrow() {
-                return Err(ExecutionError::Cancelled { attempts: 1 });
-            }
-            tokio::select! {
-                permit = Arc::clone(&self.semaphore).acquire_owned() => {
-                    break permit.map_err(|_| ExecutionError::SchedulerClosed)?;
-                }
-                changed = cancellation.changed() => {
-                    if changed.is_err() || *cancellation.borrow() {
-                        return Err(ExecutionError::Cancelled { attempts: 0 });
-                    }
-                }
-            }
-        };
+        let (_resource_permits, _global_permit) =
+            self.acquire_permits(resources, &mut cancellation).await?;
 
         let started = Instant::now();
         let mut attempts = 0;
