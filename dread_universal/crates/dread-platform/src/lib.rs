@@ -8,7 +8,7 @@ pub mod repair;
 use serde::Serialize;
 use serde_json::Value;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
     process::Command,
@@ -673,7 +673,355 @@ fn intel_devices(binary: &Path) -> Vec<GpuDevice> {
     Vec::new()
 }
 
-fn amd_devices(binary: &Path) -> Vec<GpuDevice> {
+fn amd_gpu_rows(output: &str) -> Vec<Value> {
+    let Ok(root) = serde_json::from_str::<Value>(output) else {
+        return Vec::new();
+    };
+    root.get("gpu_data")
+        .or_else(|| root.get("gpus"))
+        .and_then(Value::as_array)
+        .or_else(|| root.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn amd_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    path.iter().try_fold(value, |current, key| current.get(*key))
+}
+
+fn amd_string(value: &Value) -> Option<String> {
+    let text = match value {
+        Value::String(value) => value.trim().to_string(),
+        Value::Number(value) => value.to_string(),
+        _ => return None,
+    };
+    if text.is_empty()
+        || text.eq_ignore_ascii_case("n/a")
+        || text.eq_ignore_ascii_case("unknown")
+        || text.eq_ignore_ascii_case("not supported")
+    {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn amd_string_at(value: &Value, paths: &[&[&str]]) -> Option<String> {
+    paths
+        .iter()
+        .find_map(|path| amd_path(value, path).and_then(amd_string))
+}
+
+fn amd_number_and_unit(value: &Value) -> Option<(f64, Option<String>)> {
+    let (raw, unit) = if let Some(object) = value.as_object() {
+        (
+            object.get("value")?,
+            object.get("unit").and_then(amd_string),
+        )
+    } else {
+        (value, None)
+    };
+
+    let number = match raw {
+        Value::Number(value) => value.as_f64()?,
+        Value::String(value) => {
+            let value = value.trim();
+            if value.is_empty()
+                || value.eq_ignore_ascii_case("n/a")
+                || value.eq_ignore_ascii_case("unknown")
+                || value.eq_ignore_ascii_case("not supported")
+            {
+                return None;
+            }
+            if let Ok(number) = value.parse::<f64>() {
+                number
+            } else {
+                let (number, suffix) = value.split_once(char::is_alphabetic)?;
+                let number = number.trim().parse::<f64>().ok()?;
+                let suffix = suffix.trim();
+                if suffix.is_empty() {
+                    return None;
+                }
+                return number.is_finite().then_some((number, Some(suffix.to_string())));
+            }
+        }
+        _ => return None,
+    };
+    number.is_finite().then_some((number, unit))
+}
+
+fn amd_number_at(value: &Value, paths: &[&[&str]]) -> Option<(f64, Option<String>)> {
+    paths
+        .iter()
+        .find_map(|path| amd_path(value, path).and_then(amd_number_and_unit))
+}
+
+fn amd_memory_mib(value: &(f64, Option<String>)) -> Option<u64> {
+    let (number, unit) = value;
+    if *number < 0.0 {
+        return None;
+    }
+    let unit = unit.as_deref().unwrap_or("MB").to_ascii_lowercase();
+    let mib = match unit.as_str() {
+        "b" | "byte" | "bytes" => number / (1024.0 * 1024.0),
+        "kb" | "kib" => number / 1024.0,
+        "gb" | "gib" => number * 1024.0,
+        "tb" | "tib" => number * 1024.0 * 1024.0,
+        "mb" | "mib" | "" => *number,
+        _ => return None,
+    };
+    (mib.is_finite() && mib >= 0.0 && mib <= u64::MAX as f64)
+        .then_some(mib.round() as u64)
+}
+
+fn amd_power_mw(value: &(f64, Option<String>)) -> Option<u64> {
+    let (number, unit) = value;
+    if *number < 0.0 {
+        return None;
+    }
+    let watts = match unit.as_deref().unwrap_or("W").to_ascii_lowercase().as_str() {
+        "w" | "watt" | "watts" => *number,
+        "mw" | "milliwatt" | "milliwatts" => *number / 1000.0,
+        _ => return None,
+    };
+    (watts.is_finite() && watts <= u64::MAX as f64 / 1000.0)
+        .then_some((watts * 1000.0).round() as u64)
+}
+
+fn amd_percent(value: &(f64, Option<String>)) -> Option<u32> {
+    let (number, unit) = value;
+    if unit
+        .as_deref()
+        .is_some_and(|unit| unit != "%" && !unit.eq_ignore_ascii_case("percent"))
+    {
+        return None;
+    }
+    (0.0..=100.0)
+        .contains(number)
+        .then_some(number.round() as u32)
+}
+
+fn amd_pcie_generation(value: &Value) -> Option<u32> {
+    let text = amd_string(value)?;
+    let lower = text.to_ascii_lowercase();
+    if let Some(generation) = lower
+        .strip_prefix("gen")
+        .and_then(|suffix| suffix.trim().parse::<u32>().ok())
+    {
+        return Some(generation);
+    }
+    let (speed, _) = amd_number_and_unit(value)?;
+    [
+        (2.5, 1),
+        (5.0, 2),
+        (8.0, 3),
+        (16.0, 4),
+        (32.0, 5),
+        (64.0, 6),
+    ]
+    .iter()
+    .find_map(|(rate, generation)| ((speed - rate).abs() < 0.2).then_some(*generation))
+}
+
+fn parse_amd_smi_json(
+    list_json: &str,
+    static_json: &str,
+    metric_json: &str,
+) -> Vec<GpuDevice> {
+    let list_rows = amd_gpu_rows(list_json);
+    let static_rows = amd_gpu_rows(static_json);
+    let metric_rows = amd_gpu_rows(metric_json);
+
+    let mut records = BTreeMap::<u32, (Option<Value>, Option<Value>, Option<Value>)>::new();
+    for row in list_rows {
+        let Some(index) = amd_number_at(&row, &[&["gpu"], &["gpu_index"], &["id"]])
+            .map(|(number, _)| number)
+            .filter(|number| *number >= 0.0 && *number <= f64::from(u32::MAX))
+            .map(|number| number as u32)
+        else {
+            continue;
+        };
+        records.entry(index).or_default().0 = Some(row);
+    }
+    for row in static_rows {
+        let Some(index) = amd_number_at(&row, &[&["gpu"], &["gpu_index"], &["id"]])
+            .map(|(number, _)| number)
+            .filter(|number| *number >= 0.0 && *number <= f64::from(u32::MAX))
+            .map(|number| number as u32)
+        else {
+            continue;
+        };
+        records.entry(index).or_default().1 = Some(row);
+    }
+    for row in metric_rows {
+        let Some(index) = amd_number_at(&row, &[&["gpu"], &["gpu_index"], &["id"]])
+            .map(|(number, _)| number)
+            .filter(|number| *number >= 0.0 && *number <= f64::from(u32::MAX))
+            .map(|number| number as u32)
+        else {
+            continue;
+        };
+        records.entry(index).or_default().2 = Some(row);
+    }
+
+    records
+        .into_iter()
+        .filter_map(|(index, (list, static_info, metrics))| {
+            let list = list.unwrap_or(Value::Null);
+            let static_info = static_info.unwrap_or(Value::Null);
+            let metrics = metrics.unwrap_or(Value::Null);
+
+            let name = amd_string_at(
+                &static_info,
+                &[
+                    &["asic", "market_name"],
+                    &["board", "product_name"],
+                    &["asic", "product_name"],
+                    &["product_name"],
+                    &["name"],
+                ],
+            )
+            .or_else(|| {
+                amd_string_at(&list, &[&["market_name"], &["product_name"], &["name"]])
+            })?;
+
+            let uuid = amd_string_at(
+                &list,
+                &[&["uuid"], &["gpu_uuid"], &["hip_uuid"]],
+            )
+            .or_else(|| {
+                amd_string_at(
+                    &static_info,
+                    &[&["asic", "asic_serial"], &["asic", "serial"]],
+                )
+            });
+            let pci_bus_id = amd_string_at(
+                &list,
+                &[&["bdf"], &["pci_bus_id"], &["bus", "bdf"]],
+            )
+            .or_else(|| amd_string_at(&static_info, &[&["bus", "bdf"], &["bdf"]]));
+
+            let total_vram = amd_number_at(
+                &static_info,
+                &[&["vram", "size"], &["vram", "total"], &["vram_size"]],
+            )
+            .and_then(|value| amd_memory_mib(&value))
+            .or_else(|| {
+                amd_number_at(
+                    &metrics,
+                    &[&["mem_usage", "total_vram"], &["memory", "total_vram"]],
+                )
+                .and_then(|value| amd_memory_mib(&value))
+            });
+            let used_vram = amd_number_at(
+                &metrics,
+                &[
+                    &["mem_usage", "used_vram"],
+                    &["mem_usage", "vram_used"],
+                    &["memory", "used_vram"],
+                ],
+            )
+            .and_then(|value| amd_memory_mib(&value));
+            let free_vram = amd_number_at(
+                &metrics,
+                &[
+                    &["mem_usage", "free_vram"],
+                    &["mem_usage", "vram_free"],
+                    &["memory", "free_vram"],
+                ],
+            )
+            .and_then(|value| amd_memory_mib(&value))
+            .or_else(|| total_vram.zip(used_vram).map(|(total, used)| total.saturating_sub(used)));
+
+            let current_pcie_width = amd_number_at(&metrics, &[&["pcie", "width"]])
+                .map(|(number, _)| number)
+                .filter(|number| *number >= 0.0 && *number <= f64::from(u32::MAX))
+                .map(|number| number as u32);
+            let current_pcie_gen = amd_path(&metrics, &["pcie", "speed"])
+                .and_then(amd_pcie_generation);
+            let maximum_pcie_width = amd_number_at(
+                &static_info,
+                &[&["bus", "max_pcie_width"], &["bus", "max_link_width"]],
+            )
+            .map(|(number, _)| number)
+            .filter(|number| *number >= 0.0 && *number <= f64::from(u32::MAX))
+            .map(|number| number as u32);
+            let maximum_pcie_gen = amd_string_at(
+                &static_info,
+                &[&["bus", "pcie_interface_version"]],
+            )
+            .and_then(|value| {
+                value
+                    .to_ascii_lowercase()
+                    .split_whitespace()
+                    .last()
+                    .and_then(|value| value.parse::<u32>().ok())
+            })
+            .or_else(|| {
+                amd_string_at(&static_info, &[&["bus", "max_pcie_speed"]])
+                    .and_then(|value| {
+                        amd_pcie_generation(&Value::String(value))
+                    })
+            });
+
+            let driver_version = amd_string_at(
+                &static_info,
+                &[&["driver", "version"], &["driver", "amdgpu_version"]],
+            );
+            let utilization_percent = amd_number_at(
+                &metrics,
+                &[&["usage", "gfx_activity"], &["usage", "gfx_utilization"]],
+            )
+            .and_then(|value| amd_percent(&value));
+            let temperature_c = amd_number_at(
+                &metrics,
+                &[
+                    &["temperature", "hotspot"],
+                    &["temperature", "edge"],
+                    &["temperature", "gpu_hotspot"],
+                ],
+            )
+            .map(|(number, _)| number)
+            .filter(|number| *number >= 0.0 && *number <= f64::from(u32::MAX))
+            .map(|number| number.round() as u32);
+            let power_draw_mw = amd_number_at(
+                &metrics,
+                &[&["power", "socket_power"], &["power", "average_power"]],
+            )
+            .and_then(|value| amd_power_mw(&value));
+
+            Some(GpuDevice {
+                vendor: "amd".into(),
+                name,
+                device_id: uuid,
+                device_index: Some(index),
+                pci_bus_id,
+                compute_capability: None,
+                vram_mib: total_vram,
+                vram_used_mib: used_vram,
+                vram_free_mib: free_vram,
+                driver_version,
+                pcie_link_gen: current_pcie_gen,
+                pcie_link_width: current_pcie_width,
+                pcie_link_gen_max: maximum_pcie_gen,
+                pcie_link_width_max: maximum_pcie_width,
+                utilization_percent,
+                temperature_c,
+                power_draw_mw,
+            })
+        })
+        .collect()
+}
+
+fn amd_smi_devices(binary: &Path) -> Vec<GpuDevice> {
+    let list = run_probe_with_timeout(binary, &["list", "--json"], 5).unwrap_or_default();
+    let static_info =
+        run_probe_with_timeout(binary, &["static", "--json"], 5).unwrap_or_default();
+    let metrics = run_probe_with_timeout(binary, &["metric", "--json"], 5).unwrap_or_default();
+    parse_amd_smi_json(&list, &static_info, &metrics)
+}
+
+fn amd_rocm_smi_devices(binary: &Path) -> Vec<GpuDevice> {
     let Some(output) = run_probe(binary, &["--showproductname"]) else {
         return Vec::new();
     };
@@ -1167,6 +1515,11 @@ pub fn detect_host() -> HostProfile {
     } else {
         &["nvidia-smi"]
     });
+    let amd_smi = find_binary(if cfg!(windows) {
+        &["amd-smi.exe", "amd-smi"]
+    } else {
+        &["amd-smi"]
+    });
     let amd = find_binary(if cfg!(windows) {
         &["rocm-smi.exe", "rocm-smi"]
     } else {
@@ -1182,8 +1535,13 @@ pub fn detect_host() -> HostProfile {
     if let Some(binary) = &nvidia {
         gpu_devices.extend(nvidia_devices(binary));
     }
-    if let Some(binary) = &amd {
-        gpu_devices.extend(amd_devices(binary));
+    let amd_inventory = amd_smi.as_ref().map(amd_smi_devices).unwrap_or_default();
+    if amd_inventory.is_empty() {
+        if let Some(binary) = &amd {
+            gpu_devices.extend(amd_rocm_smi_devices(binary));
+        }
+    } else {
+        gpu_devices.extend(amd_inventory);
     }
     if let Some(binary) = &intel {
         gpu_devices.extend(intel_devices(binary));
