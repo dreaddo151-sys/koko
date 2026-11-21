@@ -6880,6 +6880,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_recovery_reconciles_cancelling_provider_tasks_without_resubmitting() {
+        let db = Arc::new(Mutex::new(open_database(":memory:").unwrap()));
+        let now = now_epoch();
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO tasks (id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, created_at, updated_at, agent_provider, provider_task_id, provider_event_cursor)
+                 VALUES ('recovered-cancellation', 'Recovered cancellation', 'agent_task', 'hermes.capability', '{}', 'cancelling', 1, 'test-operator', ?1, ?1, 'hermes', 'provider-run-123', 4)",
+                params![now],
+            )
+            .unwrap();
+
+        let adapter = Arc::new(MockAgentAdapter::new());
+        let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
+        adapters.insert("hermes".into(), adapter.clone());
+        let (events, _) = broadcast::channel(64);
+        let state = AppState {
+            db: Arc::clone(&db),
+            gpu: GpuGatewayClient::new("http://127.0.0.1:1").unwrap(),
+            supervisor: None,
+            events,
+            execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
+            agent_adapters: Arc::new(adapters),
+            cancellations: Arc::new(Mutex::new(HashMap::new())),
+            api_token: Some("test-token".into()),
+            operator_id: "test-operator".into(),
+            auth_required: true,
+        };
+
+        assert_eq!(recover_task_queue(&state).unwrap(), 1);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let status: String = db
+                    .lock()
+                    .unwrap()
+                    .query_row(
+                        "SELECT status FROM tasks WHERE id = 'recovered-cancellation'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                if status == "cancelled" {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("startup recovery should confirm provider cancellation");
+
+        assert!(
+            adapter.starts.lock().unwrap().is_empty(),
+            "recovery must reconcile the provider ID, not resubmit the task"
+        );
+        let recovery_events: i64 = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM task_events WHERE task_id = 'recovered-cancellation' AND event_type = 'task_cancellation_recovery_started'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recovery_events, 1);
+    }
+
+    #[tokio::test]
     async fn websocket_handshake_replays_events_and_reconnects_from_sequence_cursor() {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
