@@ -773,6 +773,8 @@ The PR #9 token/prompt work lived on the older Run 81 branch and was absent from
 - Full Ubuntu CI run #1216 (`44844349840`) passed on PR #14 head `a744380500758298b1cc7be8c6fa563535e50908`; physical AMD GPU/driver acceptance and actual multi-GPU contention remain separate open acceptance gates.
 - Official AMD SMI CLI references: https://rocmdocs.amd.com/projects/amdsmi/en/develop/how-to/amdsmi-cli-tool.html and https://rocmdocs.amd.com/projects/amdsmi/en/develop/reference/changelog.html.
 
+<a id="intel-xpu-inventory-adapter"></a>
+
 ### Intel XPU inventory adapter — 2026-11-21
 
 - `detect_host()` now calls the installed `xpu-smi` adapter, rather than reporting only the presence of the utility while leaving Intel devices absent from `gpu_devices`.
