@@ -43,6 +43,103 @@ impl Default for ExecutionConfig {
     }
 }
 
+/// Independently bounded resource dimensions for trusted scheduler admission.
+///
+/// These quotas limit DREAD's own worker concurrency. They do not replace provider
+/// admission or hardware ownership; the Python GPU Supervisor remains authoritative
+/// for actual GPU process and lease lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceClass {
+    Cpu,
+    Gpu,
+    Model,
+    Media,
+    Agent,
+}
+
+impl ResourceClass {
+    const ALL: [Self; 5] = [Self::Cpu, Self::Gpu, Self::Model, Self::Media, Self::Agent];
+
+    const fn bit(self) -> u8 {
+        match self {
+            Self::Cpu => 0b00001,
+            Self::Gpu => 0b00010,
+            Self::Model => 0b00100,
+            Self::Media => 0b01000,
+            Self::Agent => 0b10000,
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Cpu => 0,
+            Self::Gpu => 1,
+            Self::Model => 2,
+            Self::Media => 3,
+            Self::Agent => 4,
+        }
+    }
+}
+
+/// Resource dimensions selected by trusted runner routing, never by an API payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceRequest(u8);
+
+impl ResourceRequest {
+    pub const CPU: Self = Self(ResourceClass::Cpu.bit());
+    pub const GPU: Self = Self(ResourceClass::Gpu.bit());
+    pub const MODEL: Self = Self(ResourceClass::Model.bit());
+    pub const MEDIA: Self = Self(ResourceClass::Media.bit());
+    pub const AGENT: Self = Self(ResourceClass::Agent.bit());
+    /// Local model inference requires both the GPU and model class budgets.
+    pub const GPU_MODEL: Self = Self(ResourceClass::Gpu.bit() | ResourceClass::Model.bit());
+    /// Reserved for reviewed media runners; this does not acquire a hardware lease.
+    pub const GPU_MEDIA: Self = Self(ResourceClass::Gpu.bit() | ResourceClass::Media.bit());
+
+    fn includes(self, class: ResourceClass) -> bool {
+        self.0 & class.bit() != 0
+    }
+
+    fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+/// Per-class execution ceilings. The global ExecutionConfig cap still applies across
+/// all classes; tasks requesting multiple classes acquire each permit in stable order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceLimits {
+    pub cpu: usize,
+    pub gpu: usize,
+    pub model: usize,
+    pub media: usize,
+    pub agent: usize,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            cpu: 2,
+            gpu: 1,
+            model: 1,
+            media: 1,
+            agent: 1,
+        }
+    }
+}
+
+impl ResourceLimits {
+    const fn for_class(self, class: ResourceClass) -> usize {
+        match class {
+            ResourceClass::Cpu => self.cpu,
+            ResourceClass::Gpu => self.gpu,
+            ResourceClass::Model => self.model,
+            ResourceClass::Media => self.media,
+            ResourceClass::Agent => self.agent,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
     ZeroConcurrency,
