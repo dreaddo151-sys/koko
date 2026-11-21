@@ -52,7 +52,7 @@ const mib = (value: number | null) => value === null ? "NOT REPORTED" : `${(valu
 
 function Pill({value}:{value:string}) {
   const s = value.toLowerCase();
-  const tone = ["online","ok","completed","approved","ready"].includes(s) ? "good" : ["running","queued","pending_approval","waiting_for_confirmation"].includes(s) ? "warm" : ["failed","offline","cancelled","degraded","locked"].includes(s) ? "bad" : "";
+  const tone = ["online","ok","completed","approved","ready"].includes(s) ? "good" : ["running","queued","cancelling","pending_approval","waiting_for_confirmation"].includes(s) ? "warm" : ["failed","offline","cancelled","degraded","locked"].includes(s) ? "bad" : "";
   return <span className={`pill ${tone}`}><i />{value.replaceAll("_"," ")}</span>;
 }
 function App() {
@@ -179,7 +179,7 @@ function App() {
     const timer=window.setInterval(()=>void refreshInventory(),30000);
     return()=>window.clearInterval(timer);
   },[page,token,refreshInventory]);
-  const stats=useMemo(()=>({active:tasks.filter(x=>["queued","running"].includes(x.status)).length,pending:tasks.filter(x=>x.status==="pending_approval").length,done:tasks.filter(x=>x.status==="completed").length}),[tasks]);
+  const stats=useMemo(()=>({active:tasks.filter(x=>["queued","running","cancelling"].includes(x.status)).length,pending:tasks.filter(x=>x.status==="pending_approval").length,done:tasks.filter(x=>x.status==="completed").length}),[tasks]);
   const onlineServices=services.filter(x=>x.status==="ONLINE").length;
   const comfy=services.find(x=>x.id==="comfyui");
   const connect=()=>{if(!draft.trim()){setError("Enter DREAD_API_TOKEN.");return;}setToken(draft.trim());setDraft("");};
@@ -475,6 +475,7 @@ function App() {
           </div>
           {!pendingActionId&&<p className="agent-confirmation-warning">The provider action identifier is missing. Refresh the trace; decisions remain disabled.</p>}
         </div>}
+        {activeTask.status==="cancelling"&&<div className="agent-confirmation-status pending"><b>REMOTE CANCELLATION PENDING</b><p>DREAD requested cancellation from the provider. The task remains active until the provider reports a terminal state; do not retry the request.</p></div>}
         {activeTask.status==="running"&&confirmationSubmissionPending&&<div className="agent-confirmation-status pending"><b>OPENHANDS DECISION SUBMITTED</b><p>DREAD has reserved this action and sent the decision to the provider. Wait for the provider state to update; do not retry.</p></div>}
         {activeTask.status==="running"&&confirmationOutcomeUncertain&&<div className="agent-confirmation-status uncertain"><b>OPENHANDS DECISION OUTCOME UNCERTAIN</b><p>The provider did not confirm receipt. This action is locked against duplicate submission. Inspect the provider session or cancel the task; do not retry.</p></div>}
         <div className="events">{events.map(x=><div className="event" key={x.sequence}><code>#{x.sequence}</code><span>{x.event_type.replaceAll("_"," ")}</span><small>{clock(x.created_at)}</small></div>)}{!events.length&&<Empty text="No mission events yet."/>}</div>{result&&<div className="result"><b>EXECUTION RESULT</b><pre>{JSON.stringify(result.result??result.error??result,null,2)}</pre></div>}</>:<Empty text="Select a mission to inspect its audit events and result."/>}</section></div>}
