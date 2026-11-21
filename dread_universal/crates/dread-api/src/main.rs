@@ -4189,8 +4189,9 @@ async fn execute_approved_task(
         };
         let cancellation_before_start =
             current_status == "cancelling" && status == "cancelled" && attempts == 0;
-        let cancellation_unconfirmed =
-            current_status == "cancelling" && status == "cancelled" && attempts > 0;
+        let cancellation_unconfirmed = current_status == "cancelling"
+            && attempts > 0
+            && matches!(status, "cancelled" | "failed");
         let final_status = if current_status == "cancelled" {
             "cancelled"
         } else if current_status == "running" {
@@ -4199,13 +4200,18 @@ async fn execute_approved_task(
             "cancelled"
         } else if cancellation_unconfirmed {
             "cancelling"
-        } else if current_status == "cancelling" && matches!(status, "completed" | "failed") {
+        } else if current_status == "cancelling" && status == "completed" {
+            status
+        } else if current_status == "cancelling" && status == "failed" && attempts == 0 {
             status
         } else {
             return;
         };
         let final_error = if cancellation_unconfirmed {
-            Some("The DREAD request was cancelled, but the Python GPU Supervisor bridge cannot confirm that upstream inference stopped. The task remains in cancelling state for operator reconciliation.".to_string())
+            Some(format!(
+                "Cancellation outcome is unconfirmed: the Python GPU Supervisor bridge cannot confirm whether upstream inference stopped. Last DREAD runner outcome: {}. The task remains in cancelling state for operator reconciliation.",
+                error.as_deref().unwrap_or("no additional error details")
+            ))
         } else {
             error.clone()
         };
