@@ -862,6 +862,222 @@ mod tests {
         assert_eq!(gate.admitted_count(), 0);
     }
 
+    #[test]
+    fn rejects_zero_resource_class_limit() {
+        let mut limits = ResourceLimits::default();
+        limits.media = 0;
+        assert_eq!(
+            ExecutionGate::new_with_resource_limits(config(2, 4), limits).err(),
+            Some(ConfigError::ZeroResourceConcurrency(ResourceClass::Media))
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_quotas_do_not_occupy_global_slots_while_waiting() {
+        let limits = ResourceLimits {
+            cpu: 2,
+            gpu: 1,
+            model: 1,
+            media: 1,
+            agent: 1,
+        };
+        let gate = Arc::new(
+            ExecutionGate::new_with_resource_limits(config(2, 6), limits).unwrap(),
+        );
+        let release_gpu = Arc::new(Notify::new());
+
+        let (first_started_tx, first_started_rx) = oneshot::channel();
+        let first_gate = Arc::clone(&gate);
+        let first_release = Arc::clone(&release_gpu);
+        let first = tokio::spawn(async move {
+            let mut started = Some(first_started_tx);
+            first_gate
+                .run_for_resources(
+                    ResourceRequest::GPU_MODEL,
+                    "gpu-model-1",
+                    watch::channel(false).1,
+                    move |_, _| {
+                        let started = started.take();
+                        let release = Arc::clone(&first_release);
+                        async move {
+                            if let Some(started) = started {
+                                let _ = started.send(());
+                            }
+                            release.notified().await;
+                            Ok(json!({"gpu": 1}))
+                        }
+                    },
+                )
+                .await
+        });
+        first_started_rx.await.unwrap();
+
+        let (second_started_tx, mut second_started_rx) = oneshot::channel();
+        let second_gate = Arc::clone(&gate);
+        let second = tokio::spawn(async move {
+            let mut started = Some(second_started_tx);
+            second_gate
+                .run_for_resources(
+                    ResourceRequest::GPU_MODEL,
+                    "gpu-model-2",
+                    watch::channel(false).1,
+                    move |_, _| {
+                        let started = started.take();
+                        async move {
+                            if let Some(started) = started {
+                                let _ = started.send(());
+                            }
+                            Ok(json!({"gpu": 2}))
+                        }
+                    },
+                )
+                .await
+        });
+
+        for _ in 0..50 {
+            if gate.admitted_count() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        assert_eq!(gate.admitted_count(), 2);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut second_started_rx)
+                .await
+                .is_err(),
+            "a second GPU/model task must wait behind the GPU and model class ceilings"
+        );
+
+        let (cpu_started_tx, cpu_started_rx) = oneshot::channel();
+        let cpu_result = gate
+            .run_for_resources(
+                ResourceRequest::CPU,
+                "cpu-discovery",
+                watch::channel(false).1,
+                move |_, _| {
+                    let started = cpu_started_tx;
+                    async move {
+                        let _ = started.send(());
+                        Ok(json!({"cpu": true}))
+                    }
+                },
+            )
+            .await;
+        assert!(cpu_result.is_ok());
+        cpu_started_rx.await.unwrap();
+
+        release_gpu.notify_one();
+        assert!(first.await.unwrap().is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), &mut second_started_rx)
+                .await
+                .unwrap()
+                .is_ok()
+        );
+        assert!(second.await.unwrap().is_ok());
+        assert_eq!(gate.admitted_count(), 0);
+        assert_eq!(gate.available_resource_permits(ResourceClass::Gpu), 1);
+        assert_eq!(gate.available_resource_permits(ResourceClass::Model), 1);
+    }
+
+    #[tokio::test]
+    async fn cancellation_while_waiting_for_resource_releases_admission() {
+        let gate = Arc::new(
+            ExecutionGate::new_with_resource_limits(
+                config(2, 4),
+                ResourceLimits {
+                    cpu: 2,
+                    gpu: 1,
+                    model: 1,
+                    media: 1,
+                    agent: 1,
+                },
+            )
+            .unwrap(),
+        );
+        let release_gpu = Arc::new(Notify::new());
+        let (started_tx, started_rx) = oneshot::channel();
+        let first_gate = Arc::clone(&gate);
+        let first_release = Arc::clone(&release_gpu);
+        let first = tokio::spawn(async move {
+            let mut started = Some(started_tx);
+            first_gate
+                .run_for_resources(
+                    ResourceRequest::GPU_MODEL,
+                    "gpu-holder",
+                    watch::channel(false).1,
+                    move |_, _| {
+                        let started = started.take();
+                        let release = Arc::clone(&first_release);
+                        async move {
+                            if let Some(started) = started {
+                                let _ = started.send(());
+                            }
+                            release.notified().await;
+                            Ok(json!({"held": true}))
+                        }
+                    },
+                )
+                .await
+        });
+        started_rx.await.unwrap();
+
+        let (cancel, cancellation) = watch::channel(false);
+        let second_gate = Arc::clone(&gate);
+        let second = tokio::spawn(async move {
+            second_gate
+                .run_for_resources(
+                    ResourceRequest::GPU_MODEL,
+                    "gpu-waiter",
+                    cancellation,
+                    |_, _| async { Ok(json!({"should_not_run": true})) },
+                )
+                .await
+        });
+        for _ in 0..50 {
+            if gate.admitted_count() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        assert_eq!(gate.admitted_count(), 2);
+        cancel.send(true).unwrap();
+        assert_eq!(
+            second.await.unwrap(),
+            Err(ExecutionError::Cancelled { attempts: 0 })
+        );
+        assert_eq!(gate.admitted_count(), 1);
+
+        release_gpu.notify_one();
+        assert!(first.await.unwrap().is_ok());
+        assert_eq!(gate.admitted_count(), 0);
+
+        let retry = gate
+            .run_for_resources(
+                ResourceRequest::GPU_MODEL,
+                "gpu-after-cancel",
+                watch::channel(false).1,
+                |_, _| async { Ok(json!({"ok": true})) },
+            )
+            .await;
+        assert!(retry.is_ok());
+    }
+
+    #[tokio::test]
+    async fn resource_request_must_not_be_empty() {
+        let gate = ExecutionGate::new(config(1, 2)).unwrap();
+        let result = gate
+            .run_for_resources(
+                ResourceRequest(0),
+                "empty-resource-set",
+                watch::channel(false).1,
+                |_, _| async { Ok(json!({"unexpected": true})) },
+            )
+            .await;
+        assert_eq!(result, Err(ExecutionError::InvalidResourceRequest));
+        assert_eq!(gate.admitted_count(), 0);
+    }
+
     #[tokio::test]
     async fn enforces_execution_concurrency_limit() {
         let gate = Arc::new(ExecutionGate::new(config(1, 2)).unwrap());
