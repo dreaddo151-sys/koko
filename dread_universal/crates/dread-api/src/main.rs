@@ -4753,7 +4753,19 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
         let _ = state.events.send(event);
     }
 
-    let recovered_count = resumable.len();
+    let recovered_count = resumable.len() + cancelling.len();
+    for task in cancelling {
+        let adapter = state
+            .agent_adapters
+            .get(&task.provider)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Recovered cancellation adapter disappeared"))?;
+        tokio::spawn(reconcile_cancelling_agent_task(
+            state.clone(),
+            adapter,
+            task,
+        ));
+    }
     for task in resumable {
         let (cancel_sender, cancel_receiver) = watch::channel(false);
         state
