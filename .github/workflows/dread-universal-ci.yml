@@ -34,25 +34,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: dread_universal -> target
-      - name: Temporarily format and export the isolated Kimi candidate
-        if: github.ref == 'refs/heads/work/kimi003-phase6-durable-execution-candidate-2026-11-22'
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo fmt --all
-          mkdir -p /tmp/kimi-format
-          git diff --binary -- dread_universal/crates/dread-orchestrator/src/lifecycle.rs \
-            dread_universal/crates/dread-orchestrator/src/persistence.rs \
-            dread_universal/crates/dread-orchestrator/src/reconcile.rs \
-            > /tmp/kimi-format/rustfmt.patch
-          test -s /tmp/kimi-format/rustfmt.patch
-      - name: Upload temporary Kimi rustfmt patch
-        if: github.ref == 'refs/heads/work/kimi003-phase6-durable-execution-candidate-2026-11-22'
-        uses: actions/upload-artifact@v4
-        with:
-          name: kimi-phase6-rustfmt-patch
-          path: /tmp/kimi-format/rustfmt.patch
-          if-no-files-found: error
       - name: Verify formatting
         run: cargo fmt --all -- --check
       - name: Lint

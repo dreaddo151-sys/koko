@@ -11,14 +11,13 @@ use std::{future::Future, pin::Pin};
 use rusqlite::Connection;
 use serde_json::json;
 
-use crate::persistence::{
-    mark_reconciliation_required, pending_verification_results,
-    record_independent_verification, record_provider_ack, record_provider_active,
-    record_provider_terminal, release_startup_dispatch_barrier,
-    schedule_retry_after_definite_failure, unresolved_attempts, AttemptRecord,
-    ExecutionAuthority, PersistenceError, ProviderEvidence,
-};
 use crate::lifecycle::RetryDecision;
+use crate::persistence::{
+    AttemptRecord, ExecutionAuthority, PersistenceError, ProviderEvidence,
+    mark_reconciliation_required, pending_verification_results, record_independent_verification,
+    record_provider_ack, record_provider_active, record_provider_terminal,
+    release_startup_dispatch_barrier, schedule_retry_after_definite_failure, unresolved_attempts,
+};
 
 pub type ReconciliationFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ProviderObservation, String>> + Send + 'a>>;
@@ -195,13 +194,7 @@ pub async fn reconcile_startup<S: ProviderReconciliationSource>(
                     report.unresolved += 1;
                     continue;
                 }
-                record_provider_active(
-                    connection,
-                    &attempt.request_id,
-                    &evidence,
-                    authority,
-                    now,
-                )?;
+                record_provider_active(connection, &attempt.request_id, &evidence, authority, now)?;
                 report.provider_active_confirmed += 1;
             }
             ProviderObservation::Succeeded {
@@ -321,7 +314,8 @@ pub async fn reconcile_startup<S: ProviderReconciliationSource>(
                         "attempt_id": attempt.attempt_id,
                         "provider_id": attempt.provider_id,
                         "provider_execution_id": attempt.provider_execution_id,
-                    }).to_string(),
+                    })
+                    .to_string(),
                     now,
                 )?;
                 report.unresolved += 1;
@@ -350,13 +344,15 @@ pub async fn reconcile_startup<S: ProviderReconciliationSource>(
     // This opens only when no unresolved remote operation remains OR every
     // active one has had its local worker registered by the API. Reconciliation
     // itself never claims that spawning a worker has already happened.
-    report.startup_dispatch_barrier_open =
-        release_startup_dispatch_barrier(connection, now)?;
+    report.startup_dispatch_barrier_open = release_startup_dispatch_barrier(connection, now)?;
     if !report.startup_dispatch_barrier_open {
         report.unresolved = report.unresolved.max(
-            unresolved_attempts(connection)?.iter()
-                .filter(|attempt| attempt.recovery_attached_at.is_none()
-                    && attempt.dispatch_state != "provider_succeeded")
+            unresolved_attempts(connection)?
+                .iter()
+                .filter(|attempt| {
+                    attempt.recovery_attached_at.is_none()
+                        && attempt.dispatch_state != "provider_succeeded"
+                })
                 .count(),
         );
     }

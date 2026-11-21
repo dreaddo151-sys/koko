@@ -31,7 +31,10 @@ impl MissionState {
     }
 
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled | Self::Blocked)
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Blocked
+        )
     }
 
     pub fn can_transition_to(self, next: Self) -> bool {
@@ -41,9 +44,16 @@ impl MissionState {
         }
         matches!(
             (self, next),
-            (Ready, Running | ReconciliationRequired | Failed | Cancelled | Blocked)
-                | (Running, ReconciliationRequired | Succeeded | Failed | Cancelled | Blocked)
-                | (ReconciliationRequired, Running | Succeeded | Failed | Cancelled | Blocked)
+            (
+                Ready,
+                Running | ReconciliationRequired | Failed | Cancelled | Blocked
+            ) | (
+                Running,
+                ReconciliationRequired | Succeeded | Failed | Cancelled | Blocked
+            ) | (
+                ReconciliationRequired,
+                Running | Succeeded | Failed | Cancelled | Blocked
+            )
         )
     }
 }
@@ -107,7 +117,10 @@ impl TaskState {
     }
 
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled | Self::Blocked)
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Blocked
+        )
     }
 
     /// True while the remote provider outcome is not yet known. Provider
@@ -141,12 +154,40 @@ impl TaskState {
             (self, next),
             (Pending, Ready | Cancelled | Blocked)
                 | (Ready, Dispatching | CancelRequested | Cancelled | Blocked)
-                | (RetryScheduled, Ready | Dispatching | CancelRequested | Cancelled | Blocked)
-                | (Dispatching, Running | CancelRequested | ReconciliationRequired | RetryScheduled | ProviderSucceeded | Failed)
-                | (Running, CancelRequested | Cancelling | ReconciliationRequired | ProviderSucceeded | RetryScheduled | Failed)
-                | (CancelRequested, Cancelling | ReconciliationRequired | ProviderSucceeded | Failed | Cancelled)
-                | (Cancelling, ReconciliationRequired | ProviderSucceeded | Failed | Cancelled)
-                | (ReconciliationRequired, Running | CancelRequested | Cancelling | ProviderSucceeded | Failed | Cancelled)
+                | (
+                    RetryScheduled,
+                    Ready | Dispatching | CancelRequested | Cancelled | Blocked
+                )
+                | (
+                    Dispatching,
+                    Running
+                        | CancelRequested
+                        | ReconciliationRequired
+                        | RetryScheduled
+                        | ProviderSucceeded
+                        | Failed
+                )
+                | (
+                    Running,
+                    CancelRequested
+                        | Cancelling
+                        | ReconciliationRequired
+                        | ProviderSucceeded
+                        | RetryScheduled
+                        | Failed
+                )
+                | (
+                    CancelRequested,
+                    Cancelling | ReconciliationRequired | ProviderSucceeded | Failed | Cancelled
+                )
+                | (
+                    Cancelling,
+                    ReconciliationRequired | ProviderSucceeded | Failed | Cancelled
+                )
+                | (
+                    ReconciliationRequired,
+                    Running | CancelRequested | Cancelling | ProviderSucceeded | Failed | Cancelled
+                )
                 | (ProviderSucceeded, Verifying | ReconciliationRequired)
                 | (Verifying, Succeeded | Failed | ReconciliationRequired)
         )
@@ -156,7 +197,10 @@ impl TaskState {
         if self.can_transition_to(next) {
             Ok(next)
         } else {
-            Err(LifecycleError::InvalidTransition { from: self, to: next })
+            Err(LifecycleError::InvalidTransition {
+                from: self,
+                to: next,
+            })
         }
     }
 }
@@ -247,7 +291,11 @@ pub fn classify_retry(
         }
         IdempotencyClass::Unknown => false,
     };
-    if permitted { RetryDecision::Allowed } else { RetryDecision::UnsafeContract }
+    if permitted {
+        RetryDecision::Allowed
+    } else {
+        RetryDecision::UnsafeContract
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,7 +308,12 @@ impl fmt::Display for LifecycleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidTransition { from, to } => {
-                write!(f, "invalid task transition from {} to {}", from.as_str(), to.as_str())
+                write!(
+                    f,
+                    "invalid task transition from {} to {}",
+                    from.as_str(),
+                    to.as_str()
+                )
             }
             Self::InvalidStoredState(value) => write!(f, "invalid stored lifecycle state: {value}"),
         }
@@ -322,7 +375,12 @@ mod tests {
 
     #[test]
     fn terminal_states_cannot_reopen() {
-        for terminal in [TaskState::Succeeded, TaskState::Failed, TaskState::Cancelled, TaskState::Blocked] {
+        for terminal in [
+            TaskState::Succeeded,
+            TaskState::Failed,
+            TaskState::Cancelled,
+            TaskState::Blocked,
+        ] {
             assert!(terminal.is_terminal());
             assert!(!terminal.can_transition_to(TaskState::Running));
             assert!(!terminal.can_transition_to(TaskState::Ready));

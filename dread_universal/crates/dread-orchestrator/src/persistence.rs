@@ -7,11 +7,11 @@
 //! The API must inject a trusted `ExecutionAuthority`. HTTP request data must
 //! never be used to construct `AuthorizationFacts` or `ProviderEvidence`.
 
-use rusqlite::{
-    params, Connection, OptionalExtension, Transaction, TransactionBehavior,
+use crate::lifecycle::{
+    IdempotencyClass, RemoteOutcome, RetryDecision, VerifiedRetryContract, classify_retry,
 };
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::{error::Error, fmt};
-use crate::lifecycle::{classify_retry, IdempotencyClass, RemoteOutcome, RetryDecision, VerifiedRetryContract};
 
 const MAX_ADMISSION_LIFETIME_SECONDS: i64 = 300;
 const MAX_EVENT_BYTES: usize = 1_048_576;
@@ -19,7 +19,10 @@ const MAX_EVENT_BYTES: usize = 1_048_576;
 /// Phase 6 stores task timestamps as Unix seconds; task_results.elapsed_ms is milliseconds.
 /// This preserves the canonical schema and reports whole-second precision without unit mismatch.
 fn elapsed_ms_from_epoch_seconds(started_at: i64, ended_at: i64) -> i64 {
-    ended_at.saturating_sub(started_at).max(0).saturating_mul(1_000)
+    ended_at
+        .saturating_sub(started_at)
+        .max(0)
+        .saturating_mul(1_000)
 }
 
 #[derive(Debug)]
@@ -38,7 +41,9 @@ impl fmt::Display for PersistenceError {
             Self::Invalid(message) => write!(f, "invalid execution data: {message}"),
             Self::NotFound(message) => write!(f, "execution record not found: {message}"),
             Self::Conflict(message) => write!(f, "execution state conflict: {message}"),
-            Self::Authority(message) => write!(f, "trusted authority rejected operation: {message}"),
+            Self::Authority(message) => {
+                write!(f, "trusted authority rejected operation: {message}")
+            }
         }
     }
 }
@@ -46,7 +51,9 @@ impl fmt::Display for PersistenceError {
 impl Error for PersistenceError {}
 
 impl From<rusqlite::Error> for PersistenceError {
-    fn from(value: rusqlite::Error) -> Self { Self::Sqlite(value) }
+    fn from(value: rusqlite::Error) -> Self {
+        Self::Sqlite(value)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,23 +294,67 @@ pub trait ExecutionAuthority: Send + Sync {
 /// Validate that we are attached to the Phase 6 schema. The adapter does not
 /// create or rename any canonical task/mission tables.
 pub fn validate_canonical_schema(connection: &Connection) -> Result<(), PersistenceError> {
-    require_columns(connection, "tasks", &[
-        "id", "title", "task_type", "capability_id", "payload_json", "status",
-        "approval_required", "approved_by", "approval_reason", "created_at", "updated_at",
-        "agent_provider", "provider_task_id", "provider_event_cursor",
-    ])?;
-    require_columns(connection, "task_events", &[
-        "id", "task_id", "sequence", "event_type", "payload_json", "actor", "created_at",
-    ])?;
-    require_columns(connection, "task_results", &[
-        "task_id", "result_json", "error", "attempts", "elapsed_ms", "completed_at",
-    ])?;
-    require_columns(connection, "missions", &[
-        "id", "graph_json", "execution_order_json", "status", "created_at",
-    ])?;
-    require_columns(connection, "mission_tasks", &[
-        "mission_id", "node_id", "task_id", "depends_on_json",
-    ])?;
+    require_columns(
+        connection,
+        "tasks",
+        &[
+            "id",
+            "title",
+            "task_type",
+            "capability_id",
+            "payload_json",
+            "status",
+            "approval_required",
+            "approved_by",
+            "approval_reason",
+            "created_at",
+            "updated_at",
+            "agent_provider",
+            "provider_task_id",
+            "provider_event_cursor",
+        ],
+    )?;
+    require_columns(
+        connection,
+        "task_events",
+        &[
+            "id",
+            "task_id",
+            "sequence",
+            "event_type",
+            "payload_json",
+            "actor",
+            "created_at",
+        ],
+    )?;
+    require_columns(
+        connection,
+        "task_results",
+        &[
+            "task_id",
+            "result_json",
+            "error",
+            "attempts",
+            "elapsed_ms",
+            "completed_at",
+        ],
+    )?;
+    require_columns(
+        connection,
+        "missions",
+        &[
+            "id",
+            "graph_json",
+            "execution_order_json",
+            "status",
+            "created_at",
+        ],
+    )?;
+    require_columns(
+        connection,
+        "mission_tasks",
+        &["mission_id", "node_id", "task_id", "depends_on_json"],
+    )?;
     Ok(())
 }
 
@@ -349,9 +400,18 @@ pub fn install(connection: &mut Connection, now: i64) -> Result<(), PersistenceE
     }
 
     for (version, migration_sql) in [
-        (2_i64, include_str!("../migrations/0002_trusted_retry_contract_evidence.sql")),
-        (3_i64, include_str!("../migrations/0003_independent_worker_identity.sql")),
-        (4_i64, include_str!("../migrations/0004_attempt_worker_identity.sql")),
+        (
+            2_i64,
+            include_str!("../migrations/0002_trusted_retry_contract_evidence.sql"),
+        ),
+        (
+            3_i64,
+            include_str!("../migrations/0003_independent_worker_identity.sql"),
+        ),
+        (
+            4_i64,
+            include_str!("../migrations/0004_attempt_worker_identity.sql"),
+        ),
     ] {
         let applied: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM dread_execution_schema_migrations WHERE version = ?1)",
@@ -366,46 +426,156 @@ pub fn install(connection: &mut Connection, now: i64) -> Result<(), PersistenceE
             )?;
         }
     }
-    require_columns(&tx, "dread_task_execution_contracts", &[
-        "task_id", "provider_id", "capability_id", "operation", "idempotency_key",
-        "retry_contract_id", "retry_contract_evidence_id", "retry_contract_revision",
-        "retry_contract_expires_at", "provider_registration_revision", "capability_revision",
-        "adapter_id", "adapter_version", "idempotent_operation", "provider_keys_supported",
-        "max_attempts",
-    ])?;
-    require_columns(&tx, "dread_dispatch_admissions", &[
-        "admission_id", "request_id", "task_id", "attempt_number", "requester_id",
-        "provider_id", "capability_id", "operation", "permission_scope", "idempotency_key",
-        "evidence_id", "policy_decision_id", "adapter_id", "adapter_version",
-        "provider_registration_revision", "capability_revision", "expires_at", "consumed_at",
-    ])?;
-    require_columns(&tx, "dread_task_attempts", &[
-        "attempt_id", "task_id", "attempt_number", "request_id", "admission_id",
-        "provider_id", "capability_id", "operation", "idempotency_key", "provider_execution_id",
-        "worker_id", "provider_result_json", "provider_error", "dispatch_state", "cancellation_state",
-        "outcome_json", "dispatched_at", "acknowledged_at", "terminal_at", "recovery_attached_at",
-    ])?;
-    require_columns(&tx, "dread_execution_evidence", &[
-        "evidence_id", "attempt_id", "request_id", "provider_id", "adapter_id",
-        "adapter_version", "provider_registration_revision", "provider_execution_id",
-        "evidence_kind", "verifier_id", "source_reference", "observed_at", "expires_at",
-    ])?;
-    require_columns(&tx, "dread_trusted_retry_contract_evidence", &[
-        "evidence_id", "contract_id", "provider_id", "provider_registration_revision",
-        "capability_id", "capability_revision", "adapter_id", "adapter_version",
-        "operation", "contract_revision", "idempotent_operation",
-        "provider_keys_supported", "contract_sha256", "verifier_id", "source_reference",
-        "authenticated", "observed_at", "expires_at",
-    ])?;
-    require_columns(&tx, "dread_provider_event_keys", &[
-        "provider_id", "attempt_id", "external_event_id", "event_type", "payload_json",
-        "task_event_sequence", "recorded_at",
-    ])?;
-    require_columns(&tx, "dread_verification_evidence", &[
-        "evidence_id", "attempt_id", "task_id", "verifier_id", "requester_id",
-        "provider_verifier_id", "worker_id", "passed", "source_reference", "observed_at", "expires_at",
-    ])?;
-    require_columns(&tx, "dread_execution_runtime_state", &["state_key", "state_value", "updated_at"])?;
+    require_columns(
+        &tx,
+        "dread_task_execution_contracts",
+        &[
+            "task_id",
+            "provider_id",
+            "capability_id",
+            "operation",
+            "idempotency_key",
+            "retry_contract_id",
+            "retry_contract_evidence_id",
+            "retry_contract_revision",
+            "retry_contract_expires_at",
+            "provider_registration_revision",
+            "capability_revision",
+            "adapter_id",
+            "adapter_version",
+            "idempotent_operation",
+            "provider_keys_supported",
+            "max_attempts",
+        ],
+    )?;
+    require_columns(
+        &tx,
+        "dread_dispatch_admissions",
+        &[
+            "admission_id",
+            "request_id",
+            "task_id",
+            "attempt_number",
+            "requester_id",
+            "provider_id",
+            "capability_id",
+            "operation",
+            "permission_scope",
+            "idempotency_key",
+            "evidence_id",
+            "policy_decision_id",
+            "adapter_id",
+            "adapter_version",
+            "provider_registration_revision",
+            "capability_revision",
+            "expires_at",
+            "consumed_at",
+        ],
+    )?;
+    require_columns(
+        &tx,
+        "dread_task_attempts",
+        &[
+            "attempt_id",
+            "task_id",
+            "attempt_number",
+            "request_id",
+            "admission_id",
+            "provider_id",
+            "capability_id",
+            "operation",
+            "idempotency_key",
+            "provider_execution_id",
+            "worker_id",
+            "provider_result_json",
+            "provider_error",
+            "dispatch_state",
+            "cancellation_state",
+            "outcome_json",
+            "dispatched_at",
+            "acknowledged_at",
+            "terminal_at",
+            "recovery_attached_at",
+        ],
+    )?;
+    require_columns(
+        &tx,
+        "dread_execution_evidence",
+        &[
+            "evidence_id",
+            "attempt_id",
+            "request_id",
+            "provider_id",
+            "adapter_id",
+            "adapter_version",
+            "provider_registration_revision",
+            "provider_execution_id",
+            "evidence_kind",
+            "verifier_id",
+            "source_reference",
+            "observed_at",
+            "expires_at",
+        ],
+    )?;
+    require_columns(
+        &tx,
+        "dread_trusted_retry_contract_evidence",
+        &[
+            "evidence_id",
+            "contract_id",
+            "provider_id",
+            "provider_registration_revision",
+            "capability_id",
+            "capability_revision",
+            "adapter_id",
+            "adapter_version",
+            "operation",
+            "contract_revision",
+            "idempotent_operation",
+            "provider_keys_supported",
+            "contract_sha256",
+            "verifier_id",
+            "source_reference",
+            "authenticated",
+            "observed_at",
+            "expires_at",
+        ],
+    )?;
+    require_columns(
+        &tx,
+        "dread_provider_event_keys",
+        &[
+            "provider_id",
+            "attempt_id",
+            "external_event_id",
+            "event_type",
+            "payload_json",
+            "task_event_sequence",
+            "recorded_at",
+        ],
+    )?;
+    require_columns(
+        &tx,
+        "dread_verification_evidence",
+        &[
+            "evidence_id",
+            "attempt_id",
+            "task_id",
+            "verifier_id",
+            "requester_id",
+            "provider_verifier_id",
+            "worker_id",
+            "passed",
+            "source_reference",
+            "observed_at",
+            "expires_at",
+        ],
+    )?;
+    require_columns(
+        &tx,
+        "dread_execution_runtime_state",
+        &["state_key", "state_value", "updated_at"],
+    )?;
     tx.execute(
         "INSERT INTO dread_execution_runtime_state(state_key, state_value, updated_at)
          VALUES ('startup_dispatch_barrier', 'blocked', ?1)
@@ -432,13 +602,22 @@ pub fn authorize_and_persist(
 ) -> Result<AdmissionRecord, PersistenceError> {
     validate_request(request)?;
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if let Some(existing) = tx.query_row(
-        "SELECT task_id, requester_id, attempt_number, permission_scope
+    if let Some(existing) = tx
+        .query_row(
+            "SELECT task_id, requester_id, attempt_number, permission_scope
          FROM dread_dispatch_admissions WHERE request_id = ?1",
-        [&request.request_id],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
-                 row.get::<_, u32>(2)?, row.get::<_, String>(3)?)),
-    ).optional()? {
+            [&request.request_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, u32>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()?
+    {
         if existing.0 != request.task_id
             || existing.1 != request.requester_id
             || existing.2 != request.attempt_number
@@ -473,7 +652,11 @@ pub fn authorize_and_persist(
             "authorized mission does not match canonical mission_tasks mapping".into(),
         ));
     }
-    if task.agent_provider.as_deref().is_some_and(|p| p != facts.provider_id.as_str()) {
+    if task
+        .agent_provider
+        .as_deref()
+        .is_some_and(|p| p != facts.provider_id.as_str())
+    {
         return Err(PersistenceError::Conflict(
             "authorized provider differs from the task's selected provider".into(),
         ));
@@ -487,11 +670,14 @@ pub fn authorize_and_persist(
     if request.attempt_number != latest_attempt.saturating_add(1) {
         return Err(PersistenceError::Conflict(format!(
             "attempt number must be {}, received {}",
-            latest_attempt.saturating_add(1), request.attempt_number
+            latest_attempt.saturating_add(1),
+            request.attempt_number
         )));
     }
     if request.attempt_number > facts.max_attempts {
-        return Err(PersistenceError::Conflict("verified retry contract is exhausted".into()));
+        return Err(PersistenceError::Conflict(
+            "verified retry contract is exhausted".into(),
+        ));
     }
 
     bind_or_check_contract(&tx, &request.task_id, &facts, now)?;
@@ -527,13 +713,25 @@ pub fn authorize_and_persist(
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, NULL, ?19
          )",
         params![
-            admission.admission_id, admission.request_id, admission.task_id,
-            admission.mission_id, admission.attempt_number, admission.requester_id,
-            admission.provider_id, admission.capability_id, admission.operation,
-            admission.permission_scope, admission.idempotency_key, admission.evidence_id,
-            admission.policy_decision_id, admission.adapter_id, admission.adapter_version,
-            admission.provider_registration_revision, admission.capability_revision,
-            admission.expires_at, now
+            admission.admission_id,
+            admission.request_id,
+            admission.task_id,
+            admission.mission_id,
+            admission.attempt_number,
+            admission.requester_id,
+            admission.provider_id,
+            admission.capability_id,
+            admission.operation,
+            admission.permission_scope,
+            admission.idempotency_key,
+            admission.evidence_id,
+            admission.policy_decision_id,
+            admission.adapter_id,
+            admission.adapter_version,
+            admission.provider_registration_revision,
+            admission.capability_revision,
+            admission.expires_at,
+            now
         ],
     )?;
     tx.commit()?;
@@ -571,7 +769,9 @@ pub fn prepare_dispatch(
         [], |row| row.get(0),
     ).optional()?.unwrap_or_else(|| "blocked".to_owned());
     if barrier != "open" {
-        return Err(PersistenceError::Conflict("startup reconciliation barrier is closed".into()));
+        return Err(PersistenceError::Conflict(
+            "startup reconciliation barrier is closed".into(),
+        ));
     }
 
     let admission = load_admission(&tx, request_id)?;
@@ -585,7 +785,9 @@ pub fn prepare_dispatch(
         ));
     }
     if admission.consumed_at.is_some() {
-        return Err(PersistenceError::Conflict("admission has already been consumed".into()));
+        return Err(PersistenceError::Conflict(
+            "admission has already been consumed".into(),
+        ));
     }
     if admission.expires_at <= now {
         return Err(PersistenceError::Conflict("admission has expired".into()));
@@ -597,15 +799,21 @@ pub fn prepare_dispatch(
     let task = load_canonical_task(&tx, &admission.task_id)?;
     if task.status != "queued" || task.task_type != "agent_task" {
         return Err(PersistenceError::Conflict(format!(
-            "canonical task is not queued for dispatch (status={})", task.status
+            "canonical task is not queued for dispatch (status={})",
+            task.status
         )));
     }
     ensure_mission_task_dispatchable(&tx, &task, &admission.task_id)?;
     if task.capability_id.as_deref() != Some(admission.capability_id.as_str())
         || task.mission_id != admission.mission_id
-        || task.agent_provider.as_deref().is_some_and(|p| p != admission.provider_id.as_str())
+        || task
+            .agent_provider
+            .as_deref()
+            .is_some_and(|p| p != admission.provider_id.as_str())
     {
-        return Err(PersistenceError::Conflict("canonical task scope changed after admission".into()));
+        return Err(PersistenceError::Conflict(
+            "canonical task scope changed after admission".into(),
+        ));
     }
 
     let contract = load_contract(&tx, &admission.task_id)?;
@@ -624,7 +832,9 @@ pub fn prepare_dispatch(
         ));
     }
     if admission.attempt_number > contract.max_attempts {
-        return Err(PersistenceError::Conflict("maximum execution attempts exhausted".into()));
+        return Err(PersistenceError::Conflict(
+            "maximum execution attempts exhausted".into(),
+        ));
     }
     let latest_attempt: u32 = tx.query_row(
         "SELECT COALESCE(MAX(attempt_number), 0) FROM dread_task_attempts WHERE task_id = ?1",
@@ -632,7 +842,9 @@ pub fn prepare_dispatch(
         |row| row.get(0),
     )?;
     if admission.attempt_number != latest_attempt.saturating_add(1) {
-        return Err(PersistenceError::Conflict("admission attempt is stale or out of order".into()));
+        return Err(PersistenceError::Conflict(
+            "admission attempt is stale or out of order".into(),
+        ));
     }
 
     let changed = tx.execute(
@@ -641,7 +853,9 @@ pub fn prepare_dispatch(
         params![request_id, now],
     )?;
     if changed != 1 {
-        return Err(PersistenceError::Conflict("admission consumption race".into()));
+        return Err(PersistenceError::Conflict(
+            "admission consumption race".into(),
+        ));
     }
 
     let attempt_id = format!("attempt:{}:{}", admission.task_id, admission.attempt_number);
@@ -654,10 +868,18 @@ pub fn prepare_dispatch(
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL,
                    'dispatching', 'none', NULL, ?12, NULL, NULL)",
         params![
-            attempt_id, admission.task_id, admission.mission_id, admission.attempt_number,
-            admission.request_id, admission.admission_id, admission.provider_id,
-            admission.capability_id, admission.operation, admission.idempotency_key,
-            request.worker_id, now
+            attempt_id,
+            admission.task_id,
+            admission.mission_id,
+            admission.attempt_number,
+            admission.request_id,
+            admission.admission_id,
+            admission.provider_id,
+            admission.capability_id,
+            admission.operation,
+            admission.idempotency_key,
+            request.worker_id,
+            now
         ],
     )?;
     let task_changed = tx.execute(
@@ -666,7 +888,9 @@ pub fn prepare_dispatch(
         params![admission.task_id, admission.provider_id, now],
     )?;
     if task_changed != 1 {
-        return Err(PersistenceError::Conflict("canonical task changed during dispatch".into()));
+        return Err(PersistenceError::Conflict(
+            "canonical task changed during dispatch".into(),
+        ));
     }
     if let Some(mission_id) = admission.mission_id.as_deref() {
         // Do not reopen a terminal/blocked mission. A queued mission may move
@@ -683,8 +907,10 @@ pub fn prepare_dispatch(
         "dispatch_intent_persisted",
         &format!(
             "{{\"attempt_id\":{},\"attempt_number\":{},\"request_id\":{},\"admission_id\":{}}}",
-            json_quote(&attempt_id), admission.attempt_number,
-            json_quote(&admission.request_id), json_quote(&admission.admission_id)
+            json_quote(&attempt_id),
+            admission.attempt_number,
+            json_quote(&admission.request_id),
+            json_quote(&admission.admission_id)
         ),
         "orchestrator",
         now,
@@ -712,14 +938,26 @@ pub fn record_provider_ack(
         .ok_or_else(|| PersistenceError::NotFound(request_id.to_owned()))?;
     let duplicate_ack = attempt.provider_execution_id.is_some();
     if duplicate_ack && attempt.provider_execution_id.as_deref() != Some(provider_execution_id) {
-        return Err(PersistenceError::Conflict("attempt cannot accept another provider execution ID".into()));
+        return Err(PersistenceError::Conflict(
+            "attempt cannot accept another provider execution ID".into(),
+        ));
     }
     if !duplicate_ack
-        && !matches!(attempt.dispatch_state.as_str(), "dispatching" | "reconciliation_required")
+        && !matches!(
+            attempt.dispatch_state.as_str(),
+            "dispatching" | "reconciliation_required"
+        )
     {
-        return Err(PersistenceError::Conflict("attempt is not eligible for its first provider acknowledgement".into()));
+        return Err(PersistenceError::Conflict(
+            "attempt is not eligible for its first provider acknowledgement".into(),
+        ));
     }
-    if duplicate_ack && matches!(attempt.dispatch_state.as_str(), "succeeded" | "failed" | "cancelled") {
+    if duplicate_ack
+        && matches!(
+            attempt.dispatch_state.as_str(),
+            "succeeded" | "failed" | "cancelled"
+        )
+    {
         let previously_recorded: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM dread_execution_evidence
              WHERE evidence_id = ?1 AND attempt_id = ?2 AND evidence_kind = 'acknowledged')",
@@ -736,7 +974,9 @@ pub fn record_provider_ack(
         || evidence.provider_id != attempt.provider_id
         || evidence.provider_execution_id.as_deref() != Some(provider_execution_id)
     {
-        return Err(PersistenceError::Invalid("provider acknowledgement evidence scope mismatch".into()));
+        return Err(PersistenceError::Invalid(
+            "provider acknowledgement evidence scope mismatch".into(),
+        ));
     }
     validate_evidence_scope(&tx, &attempt, evidence, now)?;
     authority
@@ -755,7 +995,9 @@ pub fn record_provider_ack(
         params![request_id, provider_execution_id, now],
     )?;
     if changed != 1 {
-        return Err(PersistenceError::Conflict("provider acknowledgement lost an update race".into()));
+        return Err(PersistenceError::Conflict(
+            "provider acknowledgement lost an update race".into(),
+        ));
     }
     let task_changed = tx.execute(
         "UPDATE tasks SET provider_task_id = ?2, updated_at = ?3 WHERE id = ?1
@@ -763,7 +1005,9 @@ pub fn record_provider_ack(
         params![attempt.task_id, provider_execution_id, now],
     )?;
     if task_changed != 1 {
-        return Err(PersistenceError::Conflict("canonical task is not active for provider acknowledgement".into()));
+        return Err(PersistenceError::Conflict(
+            "canonical task is not active for provider acknowledgement".into(),
+        ));
     }
     append_task_event(
         &tx,
@@ -771,7 +1015,9 @@ pub fn record_provider_ack(
         "provider_acknowledged",
         &format!(
             "{{\"attempt_id\":{},\"provider_execution_id\":{},\"evidence_id\":{}}}",
-            json_quote(&attempt.attempt_id), json_quote(provider_execution_id), json_quote(&evidence.evidence_id)
+            json_quote(&attempt.attempt_id),
+            json_quote(provider_execution_id),
+            json_quote(&evidence.evidence_id)
         ),
         "provider-adapter",
         now,
@@ -791,30 +1037,43 @@ pub fn record_provider_active(
     now: i64,
 ) -> Result<(), PersistenceError> {
     if evidence.evidence_kind != "active" {
-        return Err(PersistenceError::Invalid("active provider status requires active evidence".into()));
+        return Err(PersistenceError::Invalid(
+            "active provider status requires active evidence".into(),
+        ));
     }
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let attempt = load_attempt_by_request(&tx, request_id)?
         .ok_or_else(|| PersistenceError::NotFound(request_id.to_owned()))?;
     let recovered_execution_id = evidence.provider_execution_id.as_deref().ok_or_else(|| {
-        PersistenceError::Invalid("authenticated active-status evidence must include the provider execution ID".into())
+        PersistenceError::Invalid(
+            "authenticated active-status evidence must include the provider execution ID".into(),
+        )
     })?;
     validate_text("provider_execution_id", recovered_execution_id, 1024)?;
-    if attempt.provider_execution_id.as_deref().is_some_and(|existing| existing != recovered_execution_id) {
+    if attempt
+        .provider_execution_id
+        .as_deref()
+        .is_some_and(|existing| existing != recovered_execution_id)
+    {
         return Err(PersistenceError::Conflict(
             "active-status evidence cannot replace the provider execution ID already bound to this attempt".into(),
         ));
     }
-    if !matches!(attempt.dispatch_state.as_str(), "dispatching" | "acknowledged" | "running" | "reconciliation_required")
-    {
-        return Err(PersistenceError::Conflict("attempt is not eligible for active provider recovery".into()));
+    if !matches!(
+        attempt.dispatch_state.as_str(),
+        "dispatching" | "acknowledged" | "running" | "reconciliation_required"
+    ) {
+        return Err(PersistenceError::Conflict(
+            "attempt is not eligible for active provider recovery".into(),
+        ));
     }
     // When no acknowledgement receipt survived the crash, the trusted provider
     // adapter may recover the original execution ID through the stable
     // idempotency key. The active receipt itself must authenticate that exact
     // request/attempt/key before it is allowed to bind the ID here.
     validate_evidence_scope(&tx, &attempt, evidence, now)?;
-    authority.verify_provider_evidence(&tx, &attempt, evidence, now)
+    authority
+        .verify_provider_evidence(&tx, &attempt, evidence, now)
         .map_err(PersistenceError::Authority)?;
     persist_evidence(&tx, &attempt, evidence)?;
     let attempt_changed = tx.execute(
@@ -826,7 +1085,9 @@ pub fn record_provider_active(
         params![request_id, recovered_execution_id, now],
     )?;
     if attempt_changed != 1 {
-        return Err(PersistenceError::Conflict("attempt could not be reattached in its current state".into()));
+        return Err(PersistenceError::Conflict(
+            "attempt could not be reattached in its current state".into(),
+        ));
     }
     let task_changed = tx.execute(
         "UPDATE tasks SET provider_task_id = COALESCE(provider_task_id, ?2), updated_at = ?3
@@ -835,14 +1096,22 @@ pub fn record_provider_active(
         params![attempt.task_id, recovered_execution_id, now],
     )?;
     if task_changed != 1 {
-        return Err(PersistenceError::Conflict("canonical task is not active during provider reattachment".into()));
+        return Err(PersistenceError::Conflict(
+            "canonical task is not active during provider reattachment".into(),
+        ));
     }
     append_task_event(
-        &tx, &attempt.task_id, "provider_execution_reattached",
-        &format!("{{\"attempt_id\":{},\"provider_execution_id\":{},\"evidence_id\":{}}}",
-            json_quote(&attempt.attempt_id), json_quote(recovered_execution_id),
-            json_quote(&evidence.evidence_id)),
-        "reconciler", now,
+        &tx,
+        &attempt.task_id,
+        "provider_execution_reattached",
+        &format!(
+            "{{\"attempt_id\":{},\"provider_execution_id\":{},\"evidence_id\":{}}}",
+            json_quote(&attempt.attempt_id),
+            json_quote(recovered_execution_id),
+            json_quote(&evidence.evidence_id)
+        ),
+        "reconciler",
+        now,
     )?;
     tx.commit()?;
     Ok(())
@@ -860,12 +1129,14 @@ pub fn recovery_worker_attachment_candidates(
            AND recovery_attached_at IS NULL
          ORDER BY dispatched_at, request_id",
     )?;
-    let ids = statement.query_map([], |row| row.get::<_, String>(0))?
+    let ids = statement
+        .query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     ids.into_iter()
-        .map(|id| load_attempt_by_request(connection, &id)?
-            .ok_or_else(|| PersistenceError::NotFound(id)))
+        .map(|id| {
+            load_attempt_by_request(connection, &id)?.ok_or_else(|| PersistenceError::NotFound(id))
+        })
         .collect()
 }
 
@@ -903,14 +1174,22 @@ pub fn mark_recovery_worker_attached(
             [request_id], |row| row.get::<_, bool>(0),
         )?;
         if !already_attached {
-            return Err(PersistenceError::Conflict("recovery worker attachment lost an update race".into()));
+            return Err(PersistenceError::Conflict(
+                "recovery worker attachment lost an update race".into(),
+            ));
         }
     } else {
         append_task_event(
-            &tx, &attempt.task_id, "provider_recovery_worker_attached",
-            &format!("{{\"attempt_id\":{},\"provider_execution_id\":{}}}",
-                json_quote(&attempt.attempt_id), json_quote(attempt.provider_execution_id.as_deref().unwrap_or_default())),
-            "reconciler", now,
+            &tx,
+            &attempt.task_id,
+            "provider_recovery_worker_attached",
+            &format!(
+                "{{\"attempt_id\":{},\"provider_execution_id\":{}}}",
+                json_quote(&attempt.attempt_id),
+                json_quote(attempt.provider_execution_id.as_deref().unwrap_or_default())
+            ),
+            "reconciler",
+            now,
         )?;
     }
     tx.commit()?;
@@ -975,14 +1254,24 @@ pub fn append_provider_event(
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let attempt = load_attempt_by_request(&tx, request_id)?
         .ok_or_else(|| PersistenceError::NotFound(request_id.to_owned()))?;
-    authority.verify_provider_event(&tx, &attempt, external_event_id, event_type, payload_json, now)
+    authority
+        .verify_provider_event(
+            &tx,
+            &attempt,
+            external_event_id,
+            event_type,
+            payload_json,
+            now,
+        )
         .map_err(PersistenceError::Authority)?;
-    let prior: Option<(String, String, i64)> = tx.query_row(
-        "SELECT event_type, payload_json, task_event_sequence FROM dread_provider_event_keys
+    let prior: Option<(String, String, i64)> = tx
+        .query_row(
+            "SELECT event_type, payload_json, task_event_sequence FROM dread_provider_event_keys
          WHERE provider_id = ?1 AND attempt_id = ?2 AND external_event_id = ?3",
-        params![attempt.provider_id, attempt.attempt_id, external_event_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    ).optional()?;
+            params![attempt.provider_id, attempt.attempt_id, external_event_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
     if let Some((prior_type, prior_payload, sequence)) = prior {
         if prior_type != event_type || prior_payload != payload_json {
             return Err(PersistenceError::Conflict(
@@ -993,14 +1282,27 @@ pub fn append_provider_event(
         return Ok(EventAppendResult::Duplicate { sequence });
     }
     let sequence = append_task_event(
-        &tx, &attempt.task_id, event_type, payload_json, "provider-adapter", now,
+        &tx,
+        &attempt.task_id,
+        event_type,
+        payload_json,
+        "provider-adapter",
+        now,
     )?;
     tx.execute(
         "INSERT INTO dread_provider_event_keys (
             provider_id, attempt_id, external_event_id, event_type, payload_json,
             task_event_sequence, recorded_at
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![attempt.provider_id, attempt.attempt_id, external_event_id, event_type, payload_json, sequence, now],
+        params![
+            attempt.provider_id,
+            attempt.attempt_id,
+            external_event_id,
+            event_type,
+            payload_json,
+            sequence,
+            now
+        ],
     )?;
     tx.commit()?;
     Ok(EventAppendResult::Inserted { sequence })
@@ -1025,16 +1327,25 @@ pub fn schedule_retry_after_definite_failure(
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let attempt = load_attempt_by_request(&tx, request_id)?
         .ok_or_else(|| PersistenceError::NotFound(request_id.to_owned()))?;
-    if !matches!(attempt.dispatch_state.as_str(), "dispatching" | "acknowledged" | "running" | "reconciliation_required") {
-        return Err(PersistenceError::Conflict("attempt is not eligible for retry classification".into()));
+    if !matches!(
+        attempt.dispatch_state.as_str(),
+        "dispatching" | "acknowledged" | "running" | "reconciliation_required"
+    ) {
+        return Err(PersistenceError::Conflict(
+            "attempt is not eligible for retry classification".into(),
+        ));
     }
     if attempt.cancellation_state != "none" {
-        return Err(PersistenceError::Conflict("a cancellation request prevents automatic retry".into()));
+        return Err(PersistenceError::Conflict(
+            "a cancellation request prevents automatic retry".into(),
+        ));
     }
     validate_evidence_scope(&tx, &attempt, evidence, now)?;
-    authority.verify_provider_evidence(&tx, &attempt, evidence, now)
+    authority
+        .verify_provider_evidence(&tx, &attempt, evidence, now)
         .map_err(PersistenceError::Authority)?;
-    let current = authority.verify_retry_contract_for_retry(&tx, &attempt, now)
+    let current = authority
+        .verify_retry_contract_for_retry(&tx, &attempt, now)
         .map_err(PersistenceError::Authority)?;
     let contract = load_contract(&tx, &attempt.task_id)?;
     if contract.expires_at <= now
@@ -1042,7 +1353,9 @@ pub fn schedule_retry_after_definite_failure(
         || contract.provider_registration_revision <= 0
         || contract.capability_revision <= 0
     {
-        return Err(PersistenceError::Authority("retry contract has expired or invalid revision".into()));
+        return Err(PersistenceError::Authority(
+            "retry contract has expired or invalid revision".into(),
+        ));
     }
     validate_retry_contract_evidence_current(&tx, &current, &contract, now)?;
     let class = IdempotencyClass::parse(&contract.idempotency_class)
@@ -1086,13 +1399,21 @@ pub fn schedule_retry_after_definite_failure(
                 params![attempt.task_id, now],
             )?;
             if changed != 1 {
-                return Err(PersistenceError::Conflict("task is no longer eligible for a verified retry".into()));
+                return Err(PersistenceError::Conflict(
+                    "task is no longer eligible for a verified retry".into(),
+                ));
             }
             append_task_event(
-                &tx, &attempt.task_id, "task_retry_scheduled",
-                &format!("{{\"previous_attempt_id\":{},\"next_attempt_number\":{},\"stable_idempotency_key_reused\":true}}",
-                    json_quote(&attempt.attempt_id), attempt.attempt_number.saturating_add(1)),
-                "retry-policy", now,
+                &tx,
+                &attempt.task_id,
+                "task_retry_scheduled",
+                &format!(
+                    "{{\"previous_attempt_id\":{},\"next_attempt_number\":{},\"stable_idempotency_key_reused\":true}}",
+                    json_quote(&attempt.attempt_id),
+                    attempt.attempt_number.saturating_add(1)
+                ),
+                "retry-policy",
+                now,
             )?;
         }
         RetryDecision::Exhausted | RetryDecision::UnsafeContract => {
@@ -1106,7 +1427,9 @@ pub fn schedule_retry_after_definite_failure(
                 params![attempt.task_id, now],
             )?;
             if changed != 1 {
-                return Err(PersistenceError::Conflict("task is no longer eligible for retry finalization".into()));
+                return Err(PersistenceError::Conflict(
+                    "task is no longer eligible for retry finalization".into(),
+                ));
             }
             tx.execute(
                 "INSERT INTO task_results(task_id, result_json, error, attempts, elapsed_ms, completed_at)
@@ -1126,10 +1449,19 @@ pub fn schedule_retry_after_definite_failure(
                 )?;
             }
             append_task_event(
-                &tx, &attempt.task_id, "task_retry_denied",
-                &format!("{{\"attempt_id\":{},\"decision\":{}}}",
-                    json_quote(&attempt.attempt_id), json_quote(match decision { RetryDecision::Exhausted => "exhausted", _ => "unsafe_contract" })),
-                "retry-policy", now,
+                &tx,
+                &attempt.task_id,
+                "task_retry_denied",
+                &format!(
+                    "{{\"attempt_id\":{},\"decision\":{}}}",
+                    json_quote(&attempt.attempt_id),
+                    json_quote(match decision {
+                        RetryDecision::Exhausted => "exhausted",
+                        _ => "unsafe_contract",
+                    })
+                ),
+                "retry-policy",
+                now,
             )?;
         }
         RetryDecision::ReconciliationRequired => {
@@ -1139,9 +1471,15 @@ pub fn schedule_retry_after_definite_failure(
                 params![request_id, format!("{{\"evidence_id\":{},\"decision\":\"reconciliation_required\"}}", json_quote(&evidence.evidence_id))],
             )?;
             append_task_event(
-                &tx, &attempt.task_id, "task_reconciliation_required",
-                &format!("{{\"attempt_id\":{},\"reason\":\"retry outcome not safe\"}}", json_quote(&attempt.attempt_id)),
-                "retry-policy", now,
+                &tx,
+                &attempt.task_id,
+                "task_reconciliation_required",
+                &format!(
+                    "{{\"attempt_id\":{},\"reason\":\"retry outcome not safe\"}}",
+                    json_quote(&attempt.attempt_id)
+                ),
+                "retry-policy",
+                now,
             )?;
         }
     }
@@ -1162,17 +1500,24 @@ pub fn mark_reconciliation_required(
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let attempt = load_attempt_by_request(&tx, request_id)?
         .ok_or_else(|| PersistenceError::NotFound(request_id.to_owned()))?;
-    if matches!(attempt.dispatch_state.as_str(), "provider_succeeded" | "succeeded" | "failed" | "cancelled") {
-        return Err(PersistenceError::Conflict("terminal attempt cannot require reconciliation".into()));
+    if matches!(
+        attempt.dispatch_state.as_str(),
+        "provider_succeeded" | "succeeded" | "failed" | "cancelled"
+    ) {
+        return Err(PersistenceError::Conflict(
+            "terminal attempt cannot require reconciliation".into(),
+        ));
     }
-    if attempt.dispatch_state == "reconciliation_required"
-        && attempt.recovery_attached_at.is_none()
+    if attempt.dispatch_state == "reconciliation_required" && attempt.recovery_attached_at.is_none()
     {
-        let prior_reason: Option<String> = tx.query_row(
-            "SELECT outcome_json FROM dread_task_attempts WHERE request_id = ?1",
-            [request_id],
-            |row| row.get(0),
-        ).optional()?.flatten();
+        let prior_reason: Option<String> = tx
+            .query_row(
+                "SELECT outcome_json FROM dread_task_attempts WHERE request_id = ?1",
+                [request_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
         if prior_reason.as_deref() == Some(reason_json) {
             tx.commit()?;
             return Ok(());
@@ -1187,13 +1532,19 @@ pub fn mark_reconciliation_required(
         params![request_id, reason_json],
     )?;
     if changed != 1 {
-        return Err(PersistenceError::Conflict("attempt changed before reconciliation could be recorded".into()));
+        return Err(PersistenceError::Conflict(
+            "attempt changed before reconciliation could be recorded".into(),
+        ));
     }
     // Preserve the canonical task's nonterminal state. Never turn an unknown
     // provider outcome into failed, cancelled, ready, or queued.
     append_task_event(
-        &tx, &attempt.task_id, "task_reconciliation_required", reason_json,
-        "reconciler", now,
+        &tx,
+        &attempt.task_id,
+        "task_reconciliation_required",
+        reason_json,
+        "reconciler",
+        now,
     )?;
     tx.commit()?;
     Ok(())
@@ -1201,7 +1552,9 @@ pub fn mark_reconciliation_required(
 
 /// Return all attempts that startup must inspect. Acknowledged/running provider
 /// work is included, not just requests that were never acknowledged.
-pub fn unresolved_attempts(connection: &Connection) -> Result<Vec<AttemptRecord>, PersistenceError> {
+pub fn unresolved_attempts(
+    connection: &Connection,
+) -> Result<Vec<AttemptRecord>, PersistenceError> {
     let mut statement = connection.prepare(
         "SELECT request_id FROM dread_task_attempts
          WHERE dispatch_state IN ('dispatching', 'acknowledged', 'running',
@@ -1209,11 +1562,14 @@ pub fn unresolved_attempts(connection: &Connection) -> Result<Vec<AttemptRecord>
             OR cancellation_state IN ('requested', 'request_sent', 'accepted', 'cancelling', 'unknown')
          ORDER BY dispatched_at, request_id",
     )?;
-    let ids = statement.query_map([], |row| row.get::<_, String>(0))?
+    let ids = statement
+        .query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     ids.into_iter()
-        .map(|id| load_attempt_by_request(connection, &id)?.ok_or_else(|| PersistenceError::NotFound(id)))
+        .map(|id| {
+            load_attempt_by_request(connection, &id)?.ok_or_else(|| PersistenceError::NotFound(id))
+        })
         .collect()
 }
 
@@ -1231,10 +1587,16 @@ pub fn record_provider_terminal(
     now: i64,
 ) -> Result<(), PersistenceError> {
     if !matches!(outcome, "succeeded" | "failed" | "cancelled") {
-        return Err(PersistenceError::Invalid("unsupported provider terminal outcome".into()));
+        return Err(PersistenceError::Invalid(
+            "unsupported provider terminal outcome".into(),
+        ));
     }
-    if let Some(value) = result_json { validate_json_text(value)?; }
-    if let Some(value) = provider_error { validate_text("provider_error", value, 16_384)?; }
+    if let Some(value) = result_json {
+        validate_json_text(value)?;
+    }
+    if let Some(value) = provider_error {
+        validate_text("provider_error", value, 16_384)?;
+    }
     let expected_evidence = match outcome {
         "succeeded" => "succeeded",
         "failed" => "failed",
@@ -1242,14 +1604,19 @@ pub fn record_provider_terminal(
         _ => unreachable!(),
     };
     if evidence.evidence_kind != expected_evidence {
-        return Err(PersistenceError::Invalid("terminal outcome/evidence kind mismatch".into()));
+        return Err(PersistenceError::Invalid(
+            "terminal outcome/evidence kind mismatch".into(),
+        ));
     }
 
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let attempt = load_attempt_by_request(&tx, request_id)?
         .ok_or_else(|| PersistenceError::NotFound(request_id.to_owned()))?;
     let duplicate_state = match outcome {
-        "succeeded" => matches!(attempt.dispatch_state.as_str(), "provider_succeeded" | "succeeded"),
+        "succeeded" => matches!(
+            attempt.dispatch_state.as_str(),
+            "provider_succeeded" | "succeeded"
+        ),
         "failed" => attempt.dispatch_state == "failed",
         "cancelled" => attempt.dispatch_state == "cancelled",
         _ => false,
@@ -1274,17 +1641,24 @@ pub fn record_provider_terminal(
             ));
         }
         validate_evidence_scope(&tx, &attempt, evidence, now)?;
-        authority.verify_provider_evidence(&tx, &attempt, evidence, now)
+        authority
+            .verify_provider_evidence(&tx, &attempt, evidence, now)
             .map_err(PersistenceError::Authority)?;
         persist_evidence(&tx, &attempt, evidence)?;
         tx.commit()?;
         return Ok(());
     }
-    if matches!(attempt.dispatch_state.as_str(), "provider_succeeded" | "succeeded" | "failed" | "cancelled") {
-        return Err(PersistenceError::Conflict("attempt is already terminal".into()));
+    if matches!(
+        attempt.dispatch_state.as_str(),
+        "provider_succeeded" | "succeeded" | "failed" | "cancelled"
+    ) {
+        return Err(PersistenceError::Conflict(
+            "attempt is already terminal".into(),
+        ));
     }
     validate_evidence_scope(&tx, &attempt, evidence, now)?;
-    authority.verify_provider_evidence(&tx, &attempt, evidence, now)
+    authority
+        .verify_provider_evidence(&tx, &attempt, evidence, now)
         .map_err(PersistenceError::Authority)?;
     persist_evidence(&tx, &attempt, evidence)?;
 
@@ -1302,13 +1676,19 @@ pub fn record_provider_terminal(
                     evidence.provider_execution_id, now],
         )?;
         if tx.changes() != 1 {
-            return Err(PersistenceError::Conflict("provider success lost an attempt state race".into()));
+            return Err(PersistenceError::Conflict(
+                "provider success lost an attempt state race".into(),
+            ));
         }
         let payload = format!(
             "{{\"attempt_id\":{},\"evidence_id\":{},\"awaiting_independent_verification\":true,\"cancellation_race\":{}}}",
-            json_quote(&attempt.attempt_id), json_quote(&evidence.evidence_id), cancel_race
+            json_quote(&attempt.attempt_id),
+            json_quote(&evidence.evidence_id),
+            cancel_race
         );
-        let task_changed = if let Some(provider_execution_id) = evidence.provider_execution_id.as_deref() {
+        let task_changed = if let Some(provider_execution_id) =
+            evidence.provider_execution_id.as_deref()
+        {
             tx.execute(
                 "UPDATE tasks SET provider_task_id = COALESCE(provider_task_id, ?2), updated_at = ?3
                  WHERE id = ?1 AND status IN ('running', 'cancelling')",
@@ -1321,14 +1701,24 @@ pub fn record_provider_terminal(
             )?
         };
         if task_changed != 1 {
-            return Err(PersistenceError::Conflict("canonical task was not active when provider success arrived".into()));
+            return Err(PersistenceError::Conflict(
+                "canonical task was not active when provider success arrived".into(),
+            ));
         }
         append_task_event(
-            &tx, &attempt.task_id, "provider_succeeded_awaiting_verification",
-            &payload, "provider-adapter", now,
+            &tx,
+            &attempt.task_id,
+            "provider_succeeded_awaiting_verification",
+            &payload,
+            "provider-adapter",
+            now,
         )?;
     } else {
-        let final_state = if outcome == "failed" { "failed" } else { "cancelled" };
+        let final_state = if outcome == "failed" {
+            "failed"
+        } else {
+            "cancelled"
+        };
         tx.execute(
             "UPDATE dread_task_attempts SET dispatch_state = ?2, outcome_json = ?3,
                     provider_result_json = ?4, provider_error = ?5, terminal_at = ?6,
@@ -1341,7 +1731,9 @@ pub fn record_provider_terminal(
                     provider_error, now, evidence.provider_execution_id],
         )?;
         if tx.changes() != 1 {
-            return Err(PersistenceError::Conflict("provider terminal result lost an attempt state race".into()));
+            return Err(PersistenceError::Conflict(
+                "provider terminal result lost an attempt state race".into(),
+            ));
         }
         let task_changed = tx.execute(
             "UPDATE tasks SET status = ?2, provider_task_id = COALESCE(provider_task_id, ?3), updated_at = ?4
@@ -1349,7 +1741,9 @@ pub fn record_provider_terminal(
             params![attempt.task_id, final_state, evidence.provider_execution_id, now],
         )?;
         if task_changed != 1 {
-            return Err(PersistenceError::Conflict("canonical task was not active when provider terminal evidence arrived".into()));
+            return Err(PersistenceError::Conflict(
+                "canonical task was not active when provider terminal evidence arrived".into(),
+            ));
         }
         tx.execute(
             "INSERT INTO task_results(task_id, result_json, error, attempts, elapsed_ms, completed_at)
@@ -1369,12 +1763,25 @@ pub fn record_provider_terminal(
                 [mission_id],
             )?;
         }
-        let event_type = if outcome == "failed" { "task_provider_failed" } else { "task_provider_cancelled" };
+        let event_type = if outcome == "failed" {
+            "task_provider_failed"
+        } else {
+            "task_provider_cancelled"
+        };
         let payload = format!(
             "{{\"attempt_id\":{},\"evidence_id\":{},\"outcome\":{}}}",
-            json_quote(&attempt.attempt_id), json_quote(&evidence.evidence_id), json_quote(outcome)
+            json_quote(&attempt.attempt_id),
+            json_quote(&evidence.evidence_id),
+            json_quote(outcome)
         );
-        append_task_event(&tx, &attempt.task_id, event_type, &payload, "provider-adapter", now)?;
+        append_task_event(
+            &tx,
+            &attempt.task_id,
+            event_type,
+            &payload,
+            "provider-adapter",
+            now,
+        )?;
     }
     tx.commit()?;
     Ok(())
@@ -1390,9 +1797,13 @@ fn provider_success_verifier(
          ORDER BY observed_at DESC, evidence_id ASC LIMIT 1",
         [attempt_id],
         |row| row.get(0),
-    ).optional()?.ok_or_else(|| PersistenceError::Authority(
-        "provider-success evidence is missing its authenticated verifier identity".into(),
-    ))
+    )
+    .optional()?
+    .ok_or_else(|| {
+        PersistenceError::Authority(
+            "provider-success evidence is missing its authenticated verifier identity".into(),
+        )
+    })
 }
 
 /// Verify a provider success with a separate trusted verifier identity, then
@@ -1405,8 +1816,12 @@ pub fn record_independent_verification(
     authority: &dyn ExecutionAuthority,
     now: i64,
 ) -> Result<(), PersistenceError> {
-    if let Some(value) = result_json { validate_json_text(value)?; }
-    if let Some(value) = provider_error { validate_text("provider_error", value, 16_384)?; }
+    if let Some(value) = result_json {
+        validate_json_text(value)?;
+    }
+    if let Some(value) = provider_error {
+        validate_text("provider_error", value, 16_384)?;
+    }
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let attempt = load_attempt_by_request(&tx, request_id)?
         .ok_or_else(|| PersistenceError::NotFound(request_id.to_owned()))?;
@@ -1423,7 +1838,8 @@ pub fn record_independent_verification(
         // A retry after a lost API response is idempotent only when the exact
         // same independently verified evidence and final state already exist.
         if matches!(attempt.dispatch_state.as_str(), "succeeded" | "failed") {
-            let proof = authority.verify_independent_result(&tx, &attempt, result_json, provider_error, now)
+            let proof = authority
+                .verify_independent_result(&tx, &attempt, result_json, provider_error, now)
                 .map_err(PersistenceError::Authority)?;
             validate_text("verification_evidence_id", &proof.evidence_id, 1024)?;
             validate_text("verification_verifier_id", &proof.verifier_id, 512)?;
@@ -1439,7 +1855,10 @@ pub fn record_independent_verification(
                 || proof.expires_at.is_some_and(|expiry| expiry <= now)
                 || proof.observed_at > now
             {
-                return Err(PersistenceError::Authority("replayed verification proof is invalid or not scoped to the durable result".into()));
+                return Err(PersistenceError::Authority(
+                    "replayed verification proof is invalid or not scoped to the durable result"
+                        .into(),
+                ));
             }
             let prior: Option<(String, String, String, String, String, bool, String, i64, Option<i64>)> = tx.query_row(
                 "SELECT evidence_id, verifier_id, requester_id, provider_verifier_id,
@@ -1451,20 +1870,31 @@ pub fn record_independent_verification(
             ).optional()?;
             let expected_final = if proof.passed { "succeeded" } else { "failed" };
             if attempt.dispatch_state == expected_final
-                && prior.is_some_and(|row| row.0 == proof.evidence_id && row.1 == proof.verifier_id
-                    && row.2 == proof.requester_id && row.3 == provider_verifier_id
-                    && row.4 == proof.worker_id && row.5 == proof.passed
-                    && row.6 == proof.source_reference && row.7 == proof.observed_at
-                    && row.8 == proof.expires_at)
+                && prior.is_some_and(|row| {
+                    row.0 == proof.evidence_id
+                        && row.1 == proof.verifier_id
+                        && row.2 == proof.requester_id
+                        && row.3 == provider_verifier_id
+                        && row.4 == proof.worker_id
+                        && row.5 == proof.passed
+                        && row.6 == proof.source_reference
+                        && row.7 == proof.observed_at
+                        && row.8 == proof.expires_at
+                })
             {
                 tx.commit()?;
                 return Ok(());
             }
-            return Err(PersistenceError::Conflict("verification replay differs from the stored final evidence".into()));
+            return Err(PersistenceError::Conflict(
+                "verification replay differs from the stored final evidence".into(),
+            ));
         }
-        return Err(PersistenceError::Conflict("only provider_succeeded attempts can be independently verified".into()));
+        return Err(PersistenceError::Conflict(
+            "only provider_succeeded attempts can be independently verified".into(),
+        ));
     }
-    let proof = authority.verify_independent_result(&tx, &attempt, result_json, provider_error, now)
+    let proof = authority
+        .verify_independent_result(&tx, &attempt, result_json, provider_error, now)
         .map_err(PersistenceError::Authority)?;
     if proof.requester_id != admission.requester_id
         || proof.verifier_id == admission.requester_id
@@ -1477,40 +1907,63 @@ pub fn record_independent_verification(
         ));
     }
     if proof.result_json.as_deref() != result_json || proof.error.as_deref() != provider_error {
-        return Err(PersistenceError::Authority("verification proof does not cover the exact result/error payload".into()));
+        return Err(PersistenceError::Authority(
+            "verification proof does not cover the exact result/error payload".into(),
+        ));
     }
     validate_text("verification_evidence_id", &proof.evidence_id, 1024)?;
     validate_text("verification_verifier_id", &proof.verifier_id, 512)?;
     validate_text("verification_worker_id", &proof.worker_id, 512)?;
     validate_text("verification_source", &proof.source_reference, 2048)?;
     if proof.expires_at.is_some_and(|expiry| expiry <= now) || proof.observed_at > now {
-        return Err(PersistenceError::Authority("verification proof is expired or future-dated".into()));
+        return Err(PersistenceError::Authority(
+            "verification proof is expired or future-dated".into(),
+        ));
     }
     tx.execute(
         "INSERT INTO dread_verification_evidence(
             evidence_id, attempt_id, task_id, verifier_id, requester_id, provider_verifier_id,
             worker_id, passed, source_reference, observed_at, expires_at
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        params![proof.evidence_id, attempt.attempt_id, attempt.task_id, proof.verifier_id,
-                proof.requester_id, provider_verifier_id, proof.worker_id, proof.passed,
-                proof.source_reference, proof.observed_at, proof.expires_at],
+        params![
+            proof.evidence_id,
+            attempt.attempt_id,
+            attempt.task_id,
+            proof.verifier_id,
+            proof.requester_id,
+            provider_verifier_id,
+            proof.worker_id,
+            proof.passed,
+            proof.source_reference,
+            proof.observed_at,
+            proof.expires_at
+        ],
     )?;
 
     let final_status = if proof.passed { "completed" } else { "failed" };
     let attempt_changed = tx.execute(
         "UPDATE dread_task_attempts SET dispatch_state = ?2, terminal_at = ?3,
                 outcome_json = ?4 WHERE request_id = ?1 AND dispatch_state = 'provider_succeeded'",
-        params![request_id, if proof.passed { "succeeded" } else { "failed" }, now, result_json.unwrap_or("null")],
+        params![
+            request_id,
+            if proof.passed { "succeeded" } else { "failed" },
+            now,
+            result_json.unwrap_or("null")
+        ],
     )?;
     if attempt_changed != 1 {
-        return Err(PersistenceError::Conflict("provider success changed during independent verification".into()));
+        return Err(PersistenceError::Conflict(
+            "provider success changed during independent verification".into(),
+        ));
     }
     let task_changed = tx.execute(
         "UPDATE tasks SET status = ?2, updated_at = ?3 WHERE id = ?1 AND status IN ('running', 'cancelling')",
         params![attempt.task_id, final_status, now],
     )?;
     if task_changed != 1 {
-        return Err(PersistenceError::Conflict("canonical task was not in a verifiable active state".into()));
+        return Err(PersistenceError::Conflict(
+            "canonical task was not in a verifiable active state".into(),
+        ));
     }
     tx.execute(
         "INSERT INTO task_results(task_id, result_json, error, attempts, elapsed_ms, completed_at)
@@ -1519,8 +1972,12 @@ pub fn record_independent_verification(
              error=excluded.error, attempts=excluded.attempts,
              elapsed_ms=excluded.elapsed_ms, completed_at=excluded.completed_at",
         params![
-            attempt.task_id, result_json, provider_error, attempt.attempt_number,
-            elapsed_ms_from_epoch_seconds(attempt.dispatched_at, now), now
+            attempt.task_id,
+            result_json,
+            provider_error,
+            attempt.attempt_number,
+            elapsed_ms_from_epoch_seconds(attempt.dispatched_at, now),
+            now
         ],
     )?;
 
@@ -1550,12 +2007,22 @@ pub fn record_independent_verification(
     }
     let payload = format!(
         "{{\"attempt_id\":{},\"verification_evidence_id\":{},\"passed\":{},\"cancellation_race\":{}}}",
-        json_quote(&attempt.attempt_id), json_quote(&proof.evidence_id), proof.passed, cancellation_race
+        json_quote(&attempt.attempt_id),
+        json_quote(&proof.evidence_id),
+        proof.passed,
+        cancellation_race
     );
     append_task_event(
-        &tx, &attempt.task_id,
-        if proof.passed { "task_independently_verified" } else { "task_verification_failed" },
-        &payload, "independent-verifier", now,
+        &tx,
+        &attempt.task_id,
+        if proof.passed {
+            "task_independently_verified"
+        } else {
+            "task_verification_failed"
+        },
+        &payload,
+        "independent-verifier",
+        now,
     )?;
     tx.commit()?;
     Ok(())
@@ -1571,10 +2038,15 @@ pub fn pending_verification_results(
          FROM dread_task_attempts WHERE dispatch_state = 'provider_succeeded'
          ORDER BY dispatched_at, request_id",
     )?;
-    let rows = statement.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,
-            row.get::<_, Option<String>>(2)?))
-    })?.collect::<Result<Vec<_>, _>>()?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
@@ -1589,9 +2061,13 @@ pub fn request_cancellation(
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let attempt = load_attempt_by_request(&tx, request_id)?
         .ok_or_else(|| PersistenceError::NotFound(request_id.to_owned()))?;
-    if matches!(attempt.dispatch_state.as_str(), "provider_succeeded" | "succeeded" | "failed" | "cancelled") {
+    if matches!(
+        attempt.dispatch_state.as_str(),
+        "provider_succeeded" | "succeeded" | "failed" | "cancelled"
+    ) {
         return Err(PersistenceError::Conflict(
-            "provider has already reported a terminal result; cancellation cannot replace it".into(),
+            "provider has already reported a terminal result; cancellation cannot replace it"
+                .into(),
         ));
     }
     if attempt.cancellation_state != "none" {
@@ -1603,7 +2079,9 @@ pub fn request_cancellation(
         [request_id],
     )?;
     if attempt_changed != 1 {
-        return Err(PersistenceError::Conflict("cancellation request lost an update race".into()));
+        return Err(PersistenceError::Conflict(
+            "cancellation request lost an update race".into(),
+        ));
     }
     let task_changed = tx.execute(
         "UPDATE tasks SET status = 'cancelling', updated_at = ?2 WHERE id = ?1
@@ -1611,12 +2089,17 @@ pub fn request_cancellation(
         params![attempt.task_id, now],
     )?;
     if task_changed != 1 {
-        return Err(PersistenceError::Conflict("canonical task is not cancellable".into()));
+        return Err(PersistenceError::Conflict(
+            "canonical task is not cancellable".into(),
+        ));
     }
     append_task_event(
-        &tx, &attempt.task_id, "task_cancellation_requested",
+        &tx,
+        &attempt.task_id,
+        "task_cancellation_requested",
         &format!("{{\"attempt_id\":{}}}", json_quote(&attempt.attempt_id)),
-        "operator", now,
+        "operator",
+        now,
     )?;
     tx.commit()?;
     Ok(())
@@ -1634,24 +2117,36 @@ pub fn record_cancellation_progress(
 ) -> Result<(), PersistenceError> {
     let rank = |state: &str| -> Option<u8> {
         match state {
-            "none" => Some(0), "requested" => Some(1), "request_sent" => Some(2),
-            "accepted" => Some(3), "cancelling" => Some(4),
+            "none" => Some(0),
+            "requested" => Some(1),
+            "request_sent" => Some(2),
+            "accepted" => Some(3),
+            "cancelling" => Some(4),
             "confirmed_cancelled" | "completed_successfully" | "failed" => Some(5),
-            "unknown" => Some(4), _ => None,
+            "unknown" => Some(4),
+            _ => None,
         }
     };
     let Some(next_rank) = rank(next_state) else {
-        return Err(PersistenceError::Invalid("invalid cancellation state".into()));
+        return Err(PersistenceError::Invalid(
+            "invalid cancellation state".into(),
+        ));
     };
     let expected_evidence = match next_state {
         "request_sent" => "cancel_request_sent",
         "accepted" => "cancel_accepted",
         "cancelling" => "cancellation_in_progress",
         "confirmed_cancelled" => "cancelled",
-        _ => return Err(PersistenceError::Invalid("cancellation progress requires a provider evidence state".into())),
+        _ => {
+            return Err(PersistenceError::Invalid(
+                "cancellation progress requires a provider evidence state".into(),
+            ));
+        }
     };
     if evidence.evidence_kind != expected_evidence {
-        return Err(PersistenceError::Invalid("cancellation state/evidence mismatch".into()));
+        return Err(PersistenceError::Invalid(
+            "cancellation state/evidence mismatch".into(),
+        ));
     }
 
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1660,23 +2155,38 @@ pub fn record_cancellation_progress(
     let current_rank = rank(&attempt.cancellation_state)
         .ok_or_else(|| PersistenceError::Invalid("stored cancellation state is invalid".into()))?;
     if attempt.cancellation_state == "none" {
-        return Err(PersistenceError::Conflict("provider cancellation progress requires a persisted local cancellation request".into()));
+        return Err(PersistenceError::Conflict(
+            "provider cancellation progress requires a persisted local cancellation request".into(),
+        ));
     }
     if next_rank < current_rank {
-        return Err(PersistenceError::Conflict("cancellation state cannot move backwards".into()));
+        return Err(PersistenceError::Conflict(
+            "cancellation state cannot move backwards".into(),
+        ));
     }
-    if matches!(attempt.cancellation_state.as_str(), "confirmed_cancelled" | "completed_successfully" | "failed")
-        && attempt.cancellation_state != next_state
+    if matches!(
+        attempt.cancellation_state.as_str(),
+        "confirmed_cancelled" | "completed_successfully" | "failed"
+    ) && attempt.cancellation_state != next_state
     {
-        return Err(PersistenceError::Conflict("terminal cancellation outcome cannot be replaced".into()));
+        return Err(PersistenceError::Conflict(
+            "terminal cancellation outcome cannot be replaced".into(),
+        ));
     }
     if next_state == "confirmed_cancelled"
-        && matches!(attempt.dispatch_state.as_str(), "provider_succeeded" | "succeeded")
+        && matches!(
+            attempt.dispatch_state.as_str(),
+            "provider_succeeded" | "succeeded"
+        )
     {
-        return Err(PersistenceError::Conflict("provider success must be independently verified; cancellation cannot overwrite it".into()));
+        return Err(PersistenceError::Conflict(
+            "provider success must be independently verified; cancellation cannot overwrite it"
+                .into(),
+        ));
     }
     validate_evidence_scope(&tx, &attempt, evidence, now)?;
-    authority.verify_provider_evidence(&tx, &attempt, evidence, now)
+    authority
+        .verify_provider_evidence(&tx, &attempt, evidence, now)
         .map_err(PersistenceError::Authority)?;
     persist_evidence(&tx, &attempt, evidence)?;
     if attempt.cancellation_state == next_state {
@@ -1696,7 +2206,9 @@ pub fn record_cancellation_progress(
             params![attempt.task_id, now],
         )?;
         if task_changed != 1 {
-            return Err(PersistenceError::Conflict("canonical task was not active when cancellation was confirmed".into()));
+            return Err(PersistenceError::Conflict(
+                "canonical task was not active when cancellation was confirmed".into(),
+            ));
         }
         tx.execute(
             "INSERT INTO task_results(task_id, result_json, error, attempts, elapsed_ms, completed_at)
@@ -1721,10 +2233,17 @@ pub fn record_cancellation_progress(
         )?;
     }
     append_task_event(
-        &tx, &attempt.task_id, "task_cancellation_progress",
-        &format!("{{\"attempt_id\":{},\"cancellation_state\":{},\"evidence_id\":{}}}",
-            json_quote(&attempt.attempt_id), json_quote(next_state), json_quote(&evidence.evidence_id)),
-        "provider-adapter", now,
+        &tx,
+        &attempt.task_id,
+        "task_cancellation_progress",
+        &format!(
+            "{{\"attempt_id\":{},\"cancellation_state\":{},\"evidence_id\":{}}}",
+            json_quote(&attempt.attempt_id),
+            json_quote(next_state),
+            json_quote(&evidence.evidence_id)
+        ),
+        "provider-adapter",
+        now,
     )?;
     tx.commit()?;
     Ok(())
@@ -1742,11 +2261,15 @@ fn validate_evidence_scope(
         || evidence.adapter_version != admission.adapter_version
         || evidence.provider_registration_revision != admission.provider_registration_revision
         || evidence.observed_at > now
-        || evidence.expires_at.is_some_and(|expiry| expiry <= now || expiry <= evidence.observed_at)
+        || evidence
+            .expires_at
+            .is_some_and(|expiry| expiry <= now || expiry <= evidence.observed_at)
         || evidence.provider_execution_id != attempt.provider_execution_id
             && attempt.provider_execution_id.is_some()
     {
-        return Err(PersistenceError::Authority("provider evidence does not match admitted provider/adapter/attempt identity".into()));
+        return Err(PersistenceError::Authority(
+            "provider evidence does not match admitted provider/adapter/attempt identity".into(),
+        ));
     }
     Ok(())
 }
@@ -1786,7 +2309,9 @@ struct ContractRecord {
 
 fn validate_sha256(value: &str) -> Result<(), PersistenceError> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(PersistenceError::Invalid("retry-contract SHA-256 must be 64 hexadecimal characters".into()));
+        return Err(PersistenceError::Invalid(
+            "retry-contract SHA-256 must be 64 hexadecimal characters".into(),
+        ));
     }
     Ok(())
 }
@@ -1797,30 +2322,74 @@ fn persist_retry_contract_evidence(
     now: i64,
 ) -> Result<(), PersistenceError> {
     validate_sha256(&facts.retry_contract_sha256)?;
-    validate_text("retry_contract_verifier_id", &facts.retry_contract_verifier_id, 512)?;
-    validate_text("retry_contract_source_reference", &facts.retry_contract_source_reference, 2048)?;
+    validate_text(
+        "retry_contract_verifier_id",
+        &facts.retry_contract_verifier_id,
+        512,
+    )?;
+    validate_text(
+        "retry_contract_source_reference",
+        &facts.retry_contract_source_reference,
+        2048,
+    )?;
     if facts.retry_contract_observed_at > now
         || facts.retry_contract_observed_at < 0
         || facts.retry_contract_expires_at <= now
     {
-        return Err(PersistenceError::Authority("retry-contract provenance is future-dated or expired".into()));
+        return Err(PersistenceError::Authority(
+            "retry-contract provenance is future-dated or expired".into(),
+        ));
     }
     let existing: Option<(
-        String, String, i64, String, i64, String, String, String, i64,
-        bool, bool, String, String, String, i64, i64, bool,
-    )> = tx.query_row(
-        "SELECT contract_id, provider_id, provider_registration_revision,
+        String,
+        String,
+        i64,
+        String,
+        i64,
+        String,
+        String,
+        String,
+        i64,
+        bool,
+        bool,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        bool,
+    )> = tx
+        .query_row(
+            "SELECT contract_id, provider_id, provider_registration_revision,
                 capability_id, capability_revision, adapter_id, adapter_version,
                 operation, contract_revision, idempotent_operation,
                 provider_keys_supported, contract_sha256, verifier_id, source_reference,
                 observed_at, expires_at, authenticated
          FROM dread_trusted_retry_contract_evidence WHERE evidence_id = ?1",
-        [&facts.retry_contract_evidence_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?,
-                 row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?,
-                 row.get(10)?, row.get(11)?, row.get(12)?, row.get(13)?, row.get(14)?,
-                 row.get(15)?, row.get(16)?)),
-    ).optional()?;
+            [&facts.retry_contract_evidence_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
+                    row.get(13)?,
+                    row.get(14)?,
+                    row.get(15)?,
+                    row.get(16)?,
+                ))
+            },
+        )
+        .optional()?;
     if let Some(existing) = existing {
         if existing.0 != facts.retry_contract_id
             || existing.1 != facts.provider_id
@@ -1840,7 +2409,9 @@ fn persist_retry_contract_evidence(
             || existing.15 != facts.retry_contract_expires_at
             || !existing.16
         {
-            return Err(PersistenceError::Conflict("retry-contract evidence ID was reused with different provenance".into()));
+            return Err(PersistenceError::Conflict(
+                "retry-contract evidence ID was reused with different provenance".into(),
+            ));
         }
         return Ok(());
     }
@@ -1853,12 +2424,23 @@ fn persist_retry_contract_evidence(
             observed_at, expires_at
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 1, ?16, ?17)",
         params![
-            facts.retry_contract_evidence_id, facts.retry_contract_id, facts.provider_id,
-            facts.provider_registration_revision, facts.capability_id, facts.capability_revision,
-            facts.adapter_id, facts.adapter_version, facts.operation, facts.retry_contract_revision,
-            facts.idempotent_operation, facts.provider_keys_supported, facts.retry_contract_sha256,
-            facts.retry_contract_verifier_id, facts.retry_contract_source_reference,
-            facts.retry_contract_observed_at, facts.retry_contract_expires_at,
+            facts.retry_contract_evidence_id,
+            facts.retry_contract_id,
+            facts.provider_id,
+            facts.provider_registration_revision,
+            facts.capability_id,
+            facts.capability_revision,
+            facts.adapter_id,
+            facts.adapter_version,
+            facts.operation,
+            facts.retry_contract_revision,
+            facts.idempotent_operation,
+            facts.provider_keys_supported,
+            facts.retry_contract_sha256,
+            facts.retry_contract_verifier_id,
+            facts.retry_contract_source_reference,
+            facts.retry_contract_observed_at,
+            facts.retry_contract_expires_at,
         ],
     )?;
     Ok(())
@@ -1872,28 +2454,70 @@ fn validate_retry_contract_evidence_current(
 ) -> Result<(), PersistenceError> {
     validate_sha256(&current.contract_sha256)?;
     validate_text("retry_contract_verifier_id", &current.verifier_id, 512)?;
-    validate_text("retry_contract_source_reference", &current.source_reference, 2048)?;
+    validate_text(
+        "retry_contract_source_reference",
+        &current.source_reference,
+        2048,
+    )?;
     if current.observed_at > now || current.observed_at < 0 || current.expires_at <= now {
-        return Err(PersistenceError::Authority("current retry-contract evidence is expired or future-dated".into()));
+        return Err(PersistenceError::Authority(
+            "current retry-contract evidence is expired or future-dated".into(),
+        ));
     }
     let stored: Option<(
-        String, String, i64, String, i64, String, String, String, i64,
-        bool, bool, String, String, String, i64, i64, bool,
-    )> = tx.query_row(
-        "SELECT contract_id, provider_id, provider_registration_revision,
+        String,
+        String,
+        i64,
+        String,
+        i64,
+        String,
+        String,
+        String,
+        i64,
+        bool,
+        bool,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        bool,
+    )> = tx
+        .query_row(
+            "SELECT contract_id, provider_id, provider_registration_revision,
                 capability_id, capability_revision, adapter_id, adapter_version,
                 operation, contract_revision, idempotent_operation,
                 provider_keys_supported, contract_sha256, verifier_id, source_reference,
                 observed_at, expires_at, authenticated
          FROM dread_trusted_retry_contract_evidence WHERE evidence_id = ?1",
-        [&current.evidence_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?,
-                 row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?,
-                 row.get(10)?, row.get(11)?, row.get(12)?, row.get(13)?, row.get(14)?,
-                 row.get(15)?, row.get(16)?)),
-    ).optional()?;
+            [&current.evidence_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
+                    row.get(13)?,
+                    row.get(14)?,
+                    row.get(15)?,
+                    row.get(16)?,
+                ))
+            },
+        )
+        .optional()?;
     let Some(stored) = stored else {
-        return Err(PersistenceError::Authority("retry-contract evidence is not present in the durable trusted evidence store".into()));
+        return Err(PersistenceError::Authority(
+            "retry-contract evidence is not present in the durable trusted evidence store".into(),
+        ));
     };
     if current.evidence_id != contract.retry_contract_evidence_id
         || stored.0 != contract.retry_contract_id
@@ -1926,7 +2550,9 @@ fn validate_retry_contract_evidence_current(
         || current.provider_keys_supported != contract.provider_keys_supported
         || current.expires_at != contract.expires_at
     {
-        return Err(PersistenceError::Authority("current retry-contract evidence does not match the immutable task contract".into()));
+        return Err(PersistenceError::Authority(
+            "current retry-contract evidence does not match the immutable task contract".into(),
+        ));
     }
     Ok(())
 }
@@ -1938,24 +2564,37 @@ fn bind_or_check_contract(
     now: i64,
 ) -> Result<(), PersistenceError> {
     persist_retry_contract_evidence(tx, facts, now)?;
-    let existing: Option<ContractRecord> = tx.query_row(
-        "SELECT provider_id, capability_id, operation, idempotency_key,
+    let existing: Option<ContractRecord> = tx
+        .query_row(
+            "SELECT provider_id, capability_id, operation, idempotency_key,
                 retry_contract_id, retry_contract_evidence_id, retry_contract_revision,
                 retry_contract_expires_at, provider_registration_revision,
                 capability_revision, adapter_id, adapter_version, idempotency_class,
                 idempotent_operation, provider_keys_supported, max_attempts
          FROM dread_task_execution_contracts WHERE task_id = ?1",
-        [task_id],
-        |row| Ok(ContractRecord {
-            provider_id: row.get(0)?, capability_id: row.get(1)?, operation: row.get(2)?,
-            idempotency_key: row.get(3)?, retry_contract_id: row.get(4)?,
-            retry_contract_evidence_id: row.get(5)?, retry_contract_revision: row.get(6)?,
-            expires_at: row.get(7)?, provider_registration_revision: row.get(8)?,
-            capability_revision: row.get(9)?, adapter_id: row.get(10)?, adapter_version: row.get(11)?,
-            idempotency_class: row.get(12)?, idempotent_operation: row.get(13)?,
-            provider_keys_supported: row.get(14)?, max_attempts: row.get(15)?,
-        }),
-    ).optional()?;
+            [task_id],
+            |row| {
+                Ok(ContractRecord {
+                    provider_id: row.get(0)?,
+                    capability_id: row.get(1)?,
+                    operation: row.get(2)?,
+                    idempotency_key: row.get(3)?,
+                    retry_contract_id: row.get(4)?,
+                    retry_contract_evidence_id: row.get(5)?,
+                    retry_contract_revision: row.get(6)?,
+                    expires_at: row.get(7)?,
+                    provider_registration_revision: row.get(8)?,
+                    capability_revision: row.get(9)?,
+                    adapter_id: row.get(10)?,
+                    adapter_version: row.get(11)?,
+                    idempotency_class: row.get(12)?,
+                    idempotent_operation: row.get(13)?,
+                    provider_keys_supported: row.get(14)?,
+                    max_attempts: row.get(15)?,
+                })
+            },
+        )
+        .optional()?;
     if let Some(existing) = existing {
         if existing.provider_id != facts.provider_id
             || existing.capability_id != facts.capability_id
@@ -2010,29 +2649,52 @@ fn load_contract(tx: &Transaction<'_>, task_id: &str) -> Result<ContractRecord, 
                 idempotent_operation, provider_keys_supported, max_attempts
          FROM dread_task_execution_contracts WHERE task_id = ?1",
         [task_id],
-        |row| Ok(ContractRecord {
-            provider_id: row.get(0)?, capability_id: row.get(1)?, operation: row.get(2)?,
-            idempotency_key: row.get(3)?, retry_contract_id: row.get(4)?,
-            retry_contract_evidence_id: row.get(5)?, retry_contract_revision: row.get(6)?,
-            expires_at: row.get(7)?, provider_registration_revision: row.get(8)?,
-            capability_revision: row.get(9)?, adapter_id: row.get(10)?, adapter_version: row.get(11)?,
-            idempotency_class: row.get(12)?, idempotent_operation: row.get(13)?,
-            provider_keys_supported: row.get(14)?, max_attempts: row.get(15)?,
-        }),
-    ).optional()?.ok_or_else(|| PersistenceError::NotFound(format!("execution contract for {task_id}")))
+        |row| {
+            Ok(ContractRecord {
+                provider_id: row.get(0)?,
+                capability_id: row.get(1)?,
+                operation: row.get(2)?,
+                idempotency_key: row.get(3)?,
+                retry_contract_id: row.get(4)?,
+                retry_contract_evidence_id: row.get(5)?,
+                retry_contract_revision: row.get(6)?,
+                expires_at: row.get(7)?,
+                provider_registration_revision: row.get(8)?,
+                capability_revision: row.get(9)?,
+                adapter_id: row.get(10)?,
+                adapter_version: row.get(11)?,
+                idempotency_class: row.get(12)?,
+                idempotent_operation: row.get(13)?,
+                provider_keys_supported: row.get(14)?,
+                max_attempts: row.get(15)?,
+            })
+        },
+    )
+    .optional()?
+    .ok_or_else(|| PersistenceError::NotFound(format!("execution contract for {task_id}")))
 }
 
-fn load_canonical_task(tx: &Transaction<'_>, task_id: &str) -> Result<CanonicalTask, PersistenceError> {
+fn load_canonical_task(
+    tx: &Transaction<'_>,
+    task_id: &str,
+) -> Result<CanonicalTask, PersistenceError> {
     tx.query_row(
         "SELECT t.task_type, t.capability_id, t.status, t.agent_provider,
                 (SELECT mt.mission_id FROM mission_tasks mt WHERE mt.task_id = t.id LIMIT 1)
          FROM tasks t WHERE t.id = ?1",
         [task_id],
-        |row| Ok(CanonicalTask {
-            task_type: row.get(0)?, capability_id: row.get(1)?, status: row.get(2)?,
-            agent_provider: row.get(3)?, mission_id: row.get(4)?,
-        }),
-    ).optional()?.ok_or_else(|| PersistenceError::NotFound(format!("task {task_id}")))
+        |row| {
+            Ok(CanonicalTask {
+                task_type: row.get(0)?,
+                capability_id: row.get(1)?,
+                status: row.get(2)?,
+                agent_provider: row.get(3)?,
+                mission_id: row.get(4)?,
+            })
+        },
+    )
+    .optional()?
+    .ok_or_else(|| PersistenceError::NotFound(format!("task {task_id}")))
 }
 
 /// Enforce the canonical mission lifecycle and DAG dependencies at the final
@@ -2048,28 +2710,38 @@ fn ensure_mission_task_dispatchable(
         return Ok(());
     };
 
-    let mission_status: String = tx.query_row(
-        "SELECT status FROM missions WHERE id = ?1",
-        [mission_id],
-        |row| row.get(0),
-    ).optional()?.ok_or_else(|| PersistenceError::NotFound(format!("mission {mission_id}")))?;
-    if !matches!(mission_status.as_str(), "awaiting_approval" | "queued" | "running") {
+    let mission_status: String = tx
+        .query_row(
+            "SELECT status FROM missions WHERE id = ?1",
+            [mission_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| PersistenceError::NotFound(format!("mission {mission_id}")))?;
+    if !matches!(
+        mission_status.as_str(),
+        "awaiting_approval" | "queued" | "running"
+    ) {
         return Err(PersistenceError::Conflict(format!(
             "mission {mission_id} is not dispatchable (status={mission_status})"
         )));
     }
 
-    let dependencies_json: String = tx.query_row(
-        "SELECT depends_on_json FROM mission_tasks WHERE mission_id = ?1 AND task_id = ?2",
-        params![mission_id, task_id],
-        |row| row.get(0),
-    ).optional()?.ok_or_else(|| PersistenceError::Conflict(
-        "mission task mapping disappeared before dispatch".into(),
-    ))?;
-    let dependencies: Vec<String> = serde_json::from_str(&dependencies_json)
-        .map_err(|error| PersistenceError::Invalid(format!(
+    let dependencies_json: String = tx
+        .query_row(
+            "SELECT depends_on_json FROM mission_tasks WHERE mission_id = ?1 AND task_id = ?2",
+            params![mission_id, task_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            PersistenceError::Conflict("mission task mapping disappeared before dispatch".into())
+        })?;
+    let dependencies: Vec<String> = serde_json::from_str(&dependencies_json).map_err(|error| {
+        PersistenceError::Invalid(format!(
             "canonical mission dependency list is invalid JSON: {error}"
-        )))?;
+        ))
+    })?;
     if dependencies.len() > 128 {
         return Err(PersistenceError::Invalid(
             "canonical mission dependency list exceeds 128 entries".into(),
@@ -2077,14 +2749,16 @@ fn ensure_mission_task_dispatchable(
     }
 
     for dependency_node_id in dependencies {
-        let dependency_status: Option<String> = tx.query_row(
-            "SELECT t.status
+        let dependency_status: Option<String> = tx
+            .query_row(
+                "SELECT t.status
              FROM mission_tasks dependency
              JOIN tasks t ON t.id = dependency.task_id
              WHERE dependency.mission_id = ?1 AND dependency.node_id = ?2",
-            params![mission_id, dependency_node_id],
-            |row| row.get(0),
-        ).optional()?;
+                params![mission_id, dependency_node_id],
+                |row| row.get(0),
+            )
+            .optional()?;
         if dependency_status.as_deref() != Some("completed") {
             return Err(PersistenceError::Conflict(format!(
                 "mission dependency {dependency_node_id} is not completed"
@@ -2094,7 +2768,10 @@ fn ensure_mission_task_dispatchable(
     Ok(())
 }
 
-fn load_admission(tx: &Transaction<'_>, request_id: &str) -> Result<AdmissionRecord, PersistenceError> {
+fn load_admission(
+    tx: &Transaction<'_>,
+    request_id: &str,
+) -> Result<AdmissionRecord, PersistenceError> {
     tx.query_row(
         "SELECT admission_id, request_id, task_id, mission_id, attempt_number, requester_id,
                 provider_id, capability_id, operation, permission_scope, idempotency_key,
@@ -2102,42 +2779,74 @@ fn load_admission(tx: &Transaction<'_>, request_id: &str) -> Result<AdmissionRec
                 provider_registration_revision, capability_revision, expires_at, consumed_at
          FROM dread_dispatch_admissions WHERE request_id = ?1",
         [request_id],
-        |row| Ok(AdmissionRecord {
-            admission_id: row.get(0)?, request_id: row.get(1)?, task_id: row.get(2)?,
-            mission_id: row.get(3)?, attempt_number: row.get(4)?, requester_id: row.get(5)?,
-            provider_id: row.get(6)?, capability_id: row.get(7)?, operation: row.get(8)?,
-            permission_scope: row.get(9)?, idempotency_key: row.get(10)?, evidence_id: row.get(11)?,
-            policy_decision_id: row.get(12)?, adapter_id: row.get(13)?, adapter_version: row.get(14)?,
-            provider_registration_revision: row.get(15)?, capability_revision: row.get(16)?,
-            expires_at: row.get(17)?, consumed_at: row.get(18)?,
-        }),
-    ).optional()?.ok_or_else(|| PersistenceError::NotFound(format!("admission for {request_id}")))
+        |row| {
+            Ok(AdmissionRecord {
+                admission_id: row.get(0)?,
+                request_id: row.get(1)?,
+                task_id: row.get(2)?,
+                mission_id: row.get(3)?,
+                attempt_number: row.get(4)?,
+                requester_id: row.get(5)?,
+                provider_id: row.get(6)?,
+                capability_id: row.get(7)?,
+                operation: row.get(8)?,
+                permission_scope: row.get(9)?,
+                idempotency_key: row.get(10)?,
+                evidence_id: row.get(11)?,
+                policy_decision_id: row.get(12)?,
+                adapter_id: row.get(13)?,
+                adapter_version: row.get(14)?,
+                provider_registration_revision: row.get(15)?,
+                capability_revision: row.get(16)?,
+                expires_at: row.get(17)?,
+                consumed_at: row.get(18)?,
+            })
+        },
+    )
+    .optional()?
+    .ok_or_else(|| PersistenceError::NotFound(format!("admission for {request_id}")))
 }
 
 fn load_attempt_by_request(
     connection: &Connection,
     request_id: &str,
 ) -> Result<Option<AttemptRecord>, PersistenceError> {
-    connection.query_row(
-        "SELECT attempt_id, task_id, mission_id, attempt_number, request_id, provider_id,
+    connection
+        .query_row(
+            "SELECT attempt_id, task_id, mission_id, attempt_number, request_id, provider_id,
                 capability_id, operation, idempotency_key, worker_id, provider_execution_id,
                 provider_result_json, provider_error, outcome_json, dispatch_state,
                 cancellation_state, dispatched_at, acknowledged_at, terminal_at,
                 recovery_attached_at
          FROM dread_task_attempts WHERE request_id = ?1",
-        [request_id],
-        |row| Ok(AttemptRecord {
-            attempt_id: row.get(0)?, task_id: row.get(1)?, mission_id: row.get(2)?,
-            attempt_number: row.get(3)?, request_id: row.get(4)?, provider_id: row.get(5)?,
-            capability_id: row.get(6)?, operation: row.get(7)?, idempotency_key: row.get(8)?,
-            worker_id: row.get(9)?, provider_execution_id: row.get(10)?,
-            provider_result_json: row.get(11)?, provider_error: row.get(12)?,
-            outcome_json: row.get(13)?, dispatch_state: row.get(14)?,
-            cancellation_state: row.get(15)?, dispatched_at: row.get(16)?,
-            acknowledged_at: row.get(17)?, terminal_at: row.get(18)?,
-            recovery_attached_at: row.get(19)?,
-        }),
-    ).optional().map_err(PersistenceError::from)
+            [request_id],
+            |row| {
+                Ok(AttemptRecord {
+                    attempt_id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    mission_id: row.get(2)?,
+                    attempt_number: row.get(3)?,
+                    request_id: row.get(4)?,
+                    provider_id: row.get(5)?,
+                    capability_id: row.get(6)?,
+                    operation: row.get(7)?,
+                    idempotency_key: row.get(8)?,
+                    worker_id: row.get(9)?,
+                    provider_execution_id: row.get(10)?,
+                    provider_result_json: row.get(11)?,
+                    provider_error: row.get(12)?,
+                    outcome_json: row.get(13)?,
+                    dispatch_state: row.get(14)?,
+                    cancellation_state: row.get(15)?,
+                    dispatched_at: row.get(16)?,
+                    acknowledged_at: row.get(17)?,
+                    terminal_at: row.get(18)?,
+                    recovery_attached_at: row.get(19)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(PersistenceError::from)
 }
 
 fn validate_request(request: &DispatchRequest) -> Result<(), PersistenceError> {
@@ -2147,9 +2856,13 @@ fn validate_request(request: &DispatchRequest) -> Result<(), PersistenceError> {
         ("requester_id", request.requester_id.as_str()),
         ("worker_id", request.worker_id.as_str()),
         ("permission_scope", request.permission_scope.as_str()),
-    ] { validate_text(name, value, 1024)?; }
+    ] {
+        validate_text(name, value, 1024)?;
+    }
     if request.attempt_number == 0 {
-        return Err(PersistenceError::Invalid("attempt number must be positive".into()));
+        return Err(PersistenceError::Invalid(
+            "attempt number must be positive".into(),
+        ));
     }
     Ok(())
 }
@@ -2166,15 +2879,29 @@ fn validate_authorization_facts(
         ("operation", facts.operation.as_str()),
         ("idempotency_key", facts.idempotency_key.as_str()),
         ("retry_contract_id", facts.retry_contract_id.as_str()),
-        ("retry_contract_evidence_id", facts.retry_contract_evidence_id.as_str()),
-        ("retry_contract_verifier_id", facts.retry_contract_verifier_id.as_str()),
-        ("retry_contract_source_reference", facts.retry_contract_source_reference.as_str()),
-        ("retry_contract_sha256", facts.retry_contract_sha256.as_str()),
+        (
+            "retry_contract_evidence_id",
+            facts.retry_contract_evidence_id.as_str(),
+        ),
+        (
+            "retry_contract_verifier_id",
+            facts.retry_contract_verifier_id.as_str(),
+        ),
+        (
+            "retry_contract_source_reference",
+            facts.retry_contract_source_reference.as_str(),
+        ),
+        (
+            "retry_contract_sha256",
+            facts.retry_contract_sha256.as_str(),
+        ),
         ("evidence_id", facts.evidence_id.as_str()),
         ("policy_decision_id", facts.policy_decision_id.as_str()),
         ("adapter_id", facts.adapter_id.as_str()),
         ("adapter_version", facts.adapter_version.as_str()),
-    ] { validate_text(name, value, 1024)?; }
+    ] {
+        validate_text(name, value, 1024)?;
+    }
     if facts.idempotency_key.trim().is_empty()
         || facts.max_attempts == 0
         || facts.provider_registration_revision <= 0
@@ -2187,14 +2914,27 @@ fn validate_authorization_facts(
         || facts.expires_at > now.saturating_add(MAX_ADMISSION_LIFETIME_SECONDS)
         || facts.expires_at > facts.retry_contract_expires_at
     {
-        return Err(PersistenceError::Invalid("verified admission facts are expired or incomplete".into()));
+        return Err(PersistenceError::Invalid(
+            "verified admission facts are expired or incomplete".into(),
+        ));
     }
     validate_sha256(&facts.retry_contract_sha256)?;
-    if !matches!(facts.idempotency_class.as_str(), "idempotent" | "non_idempotent" | "provider_key_required" | "unknown") {
-        return Err(PersistenceError::Invalid("unsupported idempotency class".into()));
+    if !matches!(
+        facts.idempotency_class.as_str(),
+        "idempotent" | "non_idempotent" | "provider_key_required" | "unknown"
+    ) {
+        return Err(PersistenceError::Invalid(
+            "unsupported idempotency class".into(),
+        ));
     }
-    if facts.mission_id.as_deref().is_some_and(|id| id.trim().is_empty()) {
-        return Err(PersistenceError::Invalid("mission identifier is empty".into()));
+    if facts
+        .mission_id
+        .as_deref()
+        .is_some_and(|id| id.trim().is_empty())
+    {
+        return Err(PersistenceError::Invalid(
+            "mission identifier is empty".into(),
+        ));
     }
     let _ = request;
     Ok(())
@@ -2202,17 +2942,25 @@ fn validate_authorization_facts(
 
 fn validate_text(name: &str, value: &str, max: usize) -> Result<(), PersistenceError> {
     if value.trim().is_empty() || value.len() > max || value.contains('\0') {
-        Err(PersistenceError::Invalid(format!("{name} is empty, too long, or contains NUL")))
-    } else { Ok(()) }
+        Err(PersistenceError::Invalid(format!(
+            "{name} is empty, too long, or contains NUL"
+        )))
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_json_text(value: &str) -> Result<(), PersistenceError> {
     if value.len() > MAX_EVENT_BYTES {
-        return Err(PersistenceError::Invalid("event payload exceeds the 1 MiB limit".into()));
+        return Err(PersistenceError::Invalid(
+            "event payload exceeds the 1 MiB limit".into(),
+        ));
     }
     serde_json::from_str::<serde_json::Value>(value)
         .map(|_| ())
-        .map_err(|error| PersistenceError::Invalid(format!("event payload is not valid JSON: {error}")))
+        .map_err(|error| {
+            PersistenceError::Invalid(format!("event payload is not valid JSON: {error}"))
+        })
 }
 
 fn append_task_event(
@@ -2247,25 +2995,65 @@ fn persist_evidence(
     validate_text("evidence_id", &evidence.evidence_id, 1024)?;
     validate_text("verifier_id", &evidence.verifier_id, 512)?;
     validate_text("source_reference", &evidence.source_reference, 2048)?;
-    let existing: Option<(String, String, String, String, String, i64, Option<String>, String, String, String, i64, Option<i64>)> = tx.query_row(
-        "SELECT attempt_id, request_id, provider_id, adapter_id, adapter_version,
+    let existing: Option<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        i64,
+        Option<String>,
+        String,
+        String,
+        String,
+        i64,
+        Option<i64>,
+    )> = tx
+        .query_row(
+            "SELECT attempt_id, request_id, provider_id, adapter_id, adapter_version,
                 provider_registration_revision, provider_execution_id, evidence_kind,
                 verifier_id, source_reference, observed_at, expires_at
          FROM dread_execution_evidence WHERE evidence_id = ?1",
-        [&evidence.evidence_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?,
-            row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?)),
-    ).optional()?;
+            [&evidence.evidence_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                ))
+            },
+        )
+        .optional()?;
     if let Some(existing) = existing {
         let expected = (
-            attempt.attempt_id.clone(), attempt.request_id.clone(), evidence.provider_id.clone(),
-            evidence.adapter_id.clone(), evidence.adapter_version.clone(),
-            evidence.provider_registration_revision, evidence.provider_execution_id.clone(),
-            evidence.evidence_kind.clone(), evidence.verifier_id.clone(), evidence.source_reference.clone(),
-            evidence.observed_at, evidence.expires_at,
+            attempt.attempt_id.clone(),
+            attempt.request_id.clone(),
+            evidence.provider_id.clone(),
+            evidence.adapter_id.clone(),
+            evidence.adapter_version.clone(),
+            evidence.provider_registration_revision,
+            evidence.provider_execution_id.clone(),
+            evidence.evidence_kind.clone(),
+            evidence.verifier_id.clone(),
+            evidence.source_reference.clone(),
+            evidence.observed_at,
+            evidence.expires_at,
         );
-        if existing == expected { return Ok(()); }
-        return Err(PersistenceError::Conflict("evidence ID was reused with different identity or contents".into()));
+        if existing == expected {
+            return Ok(());
+        }
+        return Err(PersistenceError::Conflict(
+            "evidence ID was reused with different identity or contents".into(),
+        ));
     }
     tx.execute(
         "INSERT INTO dread_execution_evidence(
@@ -2274,11 +3062,19 @@ fn persist_evidence(
             verifier_id, source_reference, observed_at, expires_at
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
-            evidence.evidence_id, attempt.attempt_id, attempt.request_id,
-            evidence.provider_id, evidence.adapter_id, evidence.adapter_version,
-            evidence.provider_registration_revision, evidence.provider_execution_id,
-            evidence.evidence_kind, evidence.verifier_id, evidence.source_reference,
-            evidence.observed_at, evidence.expires_at
+            evidence.evidence_id,
+            attempt.attempt_id,
+            attempt.request_id,
+            evidence.provider_id,
+            evidence.adapter_id,
+            evidence.adapter_version,
+            evidence.provider_registration_revision,
+            evidence.provider_execution_id,
+            evidence.evidence_kind,
+            evidence.verifier_id,
+            evidence.source_reference,
+            evidence.observed_at,
+            evidence.expires_at
         ],
     )?;
     Ok(())
@@ -2290,10 +3086,13 @@ fn require_columns(
     expected: &[&str],
 ) -> Result<(), PersistenceError> {
     let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
-    let columns = statement.query_map([], |row| row.get::<_, String>(1))?
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
         .collect::<Result<Vec<_>, _>>()?;
     if columns.is_empty() {
-        return Err(PersistenceError::Invalid(format!("canonical table {table} is missing")));
+        return Err(PersistenceError::Invalid(format!(
+            "canonical table {table} is missing"
+        )));
     }
     for column in expected {
         if !columns.iter().any(|actual| actual == column) {
@@ -2304,7 +3103,6 @@ fn require_columns(
     }
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -2542,11 +3340,21 @@ mod tests {
         let mut db = canonical_db();
         install(&mut db, 10).unwrap();
         install(&mut db, 11).unwrap();
-        let task_count: i64 = db.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0)).unwrap();
-        let mission_count: i64 = db.query_row("SELECT COUNT(*) FROM missions", [], |r| r.get(0)).unwrap();
+        let task_count: i64 = db
+            .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
+            .unwrap();
+        let mission_count: i64 = db
+            .query_row("SELECT COUNT(*) FROM missions", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(task_count, 1);
         assert_eq!(mission_count, 1);
-        let versions: i64 = db.query_row("SELECT COUNT(*) FROM dread_execution_schema_migrations", [], |r| r.get(0)).unwrap();
+        let versions: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM dread_execution_schema_migrations",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(versions, 4);
     }
 
@@ -2557,7 +3365,8 @@ mod tests {
         db.execute(
             "INSERT INTO dread_execution_schema_migrations(version, applied_at) VALUES (5, 12)",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         assert!(install(&mut db, 13).is_err());
     }
 
@@ -2568,13 +3377,20 @@ mod tests {
         let mut blocked_db = canonical_db();
         install(&mut blocked_db, 100).unwrap();
         assert!(release_startup_dispatch_barrier(&mut blocked_db, 100).unwrap());
-        blocked_db.execute("UPDATE missions SET status='blocked' WHERE id='mission-1'", []).unwrap();
+        blocked_db
+            .execute(
+                "UPDATE missions SET status='blocked' WHERE id='mission-1'",
+                [],
+            )
+            .unwrap();
         let blocked_request = dispatch_request("blocked-mission-request", 1);
         authorize_and_persist(&mut blocked_db, &blocked_request, &authority, 100).unwrap();
         assert!(prepare_dispatch(&mut blocked_db, &blocked_request, &authority, 101).is_err());
-        let blocked_task_status: String = blocked_db.query_row(
-            "SELECT status FROM tasks WHERE id='task-1'", [], |row| row.get(0),
-        ).unwrap();
+        let blocked_task_status: String = blocked_db
+            .query_row("SELECT status FROM tasks WHERE id='task-1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         assert_eq!(blocked_task_status, "queued");
 
         let mut dependency_db = canonical_db();
@@ -2584,19 +3400,29 @@ mod tests {
             "INSERT INTO tasks(id,title,task_type,payload_json,status,approval_required,created_at,updated_at,provider_event_cursor)
              VALUES('task-dependency','Prerequisite','service_discovery','{}','running',0,1,1,0)", [],
         ).unwrap();
-        dependency_db.execute(
-            "INSERT INTO mission_tasks(mission_id,node_id,task_id,depends_on_json)
-             VALUES('mission-1','node-0','task-dependency','[]')", [],
-        ).unwrap();
-        dependency_db.execute(
-            "UPDATE mission_tasks SET depends_on_json='[\"node-0\"]' WHERE task_id='task-1'", [],
-        ).unwrap();
+        dependency_db
+            .execute(
+                "INSERT INTO mission_tasks(mission_id,node_id,task_id,depends_on_json)
+             VALUES('mission-1','node-0','task-dependency','[]')",
+                [],
+            )
+            .unwrap();
+        dependency_db
+            .execute(
+                "UPDATE mission_tasks SET depends_on_json='[\"node-0\"]' WHERE task_id='task-1'",
+                [],
+            )
+            .unwrap();
         let dependency_request = dispatch_request("dependency-request", 1);
         authorize_and_persist(&mut dependency_db, &dependency_request, &authority, 100).unwrap();
-        assert!(prepare_dispatch(&mut dependency_db, &dependency_request, &authority, 101).is_err());
-        let dependency_task_status: String = dependency_db.query_row(
-            "SELECT status FROM tasks WHERE id='task-1'", [], |row| row.get(0),
-        ).unwrap();
+        assert!(
+            prepare_dispatch(&mut dependency_db, &dependency_request, &authority, 101).is_err()
+        );
+        let dependency_task_status: String = dependency_db
+            .query_row("SELECT status FROM tasks WHERE id='task-1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         assert_eq!(dependency_task_status, "queued");
     }
 
@@ -2622,41 +3448,105 @@ mod tests {
         assert!(!replay.is_new());
         assert_eq!(replay.attempt().attempt_id, attempt.attempt_id);
 
-        let ack = provider_evidence("ack-1", "acknowledged", Some("remote-1"), "provider-attestor", 102);
+        let ack = provider_evidence(
+            "ack-1",
+            "acknowledged",
+            Some("remote-1"),
+            "provider-attestor",
+            102,
+        );
         record_provider_ack(&mut db, "request-1", "remote-1", &ack, &authority, 102).unwrap();
-        let active = provider_evidence("active-1", "active", Some("remote-1"), "provider-attestor", 103);
+        let active = provider_evidence(
+            "active-1",
+            "active",
+            Some("remote-1"),
+            "provider-attestor",
+            103,
+        );
         record_provider_active(&mut db, "request-1", &active, &authority, 103).unwrap();
         assert_eq!(recovery_worker_attachment_candidates(&db).unwrap().len(), 1);
         mark_recovery_worker_attached(&mut db, "request-1", 104).unwrap();
 
         let first = append_provider_event(
-            &mut db, "request-1", "event-1", "progress", r#"{"progress":1}"#,
-            &authority, 105,
-        ).unwrap();
+            &mut db,
+            "request-1",
+            "event-1",
+            "progress",
+            r#"{"progress":1}"#,
+            &authority,
+            105,
+        )
+        .unwrap();
         let duplicate = append_provider_event(
-            &mut db, "request-1", "event-1", "progress", r#"{"progress":1}"#,
-            &authority, 106,
-        ).unwrap();
+            &mut db,
+            "request-1",
+            "event-1",
+            "progress",
+            r#"{"progress":1}"#,
+            &authority,
+            106,
+        )
+        .unwrap();
         assert!(matches!(first, EventAppendResult::Inserted { .. }));
         assert!(matches!(duplicate, EventAppendResult::Duplicate { .. }));
-        assert!(append_provider_event(
-            &mut db, "request-1", "event-1", "progress", r#"{"progress":2}"#,
-            &authority, 107,
-        ).is_err());
+        assert!(
+            append_provider_event(
+                &mut db,
+                "request-1",
+                "event-1",
+                "progress",
+                r#"{"progress":2}"#,
+                &authority,
+                107,
+            )
+            .is_err()
+        );
 
-        let success = provider_evidence("success-1", "succeeded", Some("remote-1"), "provider-attestor", 108);
+        let success = provider_evidence(
+            "success-1",
+            "succeeded",
+            Some("remote-1"),
+            "provider-attestor",
+            108,
+        );
         let result = r#"{"ok":true}"#;
         record_provider_terminal(
-            &mut db, "request-1", "succeeded", Some(result), None, &success, &authority, 108,
-        ).unwrap();
+            &mut db,
+            "request-1",
+            "succeeded",
+            Some(result),
+            None,
+            &success,
+            &authority,
+            108,
+        )
+        .unwrap();
         assert_eq!(pending_verification_results(&db).unwrap().len(), 1);
-        record_independent_verification(&mut db, "request-1", Some(result), None, &authority, 109).unwrap();
+        record_independent_verification(&mut db, "request-1", Some(result), None, &authority, 109)
+            .unwrap();
         // A repeated API completion call returns success only for the same proof.
-        record_independent_verification(&mut db, "request-1", Some(result), None, &authority, 109).unwrap();
+        record_independent_verification(&mut db, "request-1", Some(result), None, &authority, 109)
+            .unwrap();
 
-        let task_status: String = db.query_row("SELECT status FROM tasks WHERE id='task-1'", [], |row| row.get(0)).unwrap();
-        let mission_status: String = db.query_row("SELECT status FROM missions WHERE id='mission-1'", [], |row| row.get(0)).unwrap();
-        let elapsed_ms: i64 = db.query_row("SELECT elapsed_ms FROM task_results WHERE task_id='task-1'", [], |row| row.get(0)).unwrap();
+        let task_status: String = db
+            .query_row("SELECT status FROM tasks WHERE id='task-1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let mission_status: String = db
+            .query_row(
+                "SELECT status FROM missions WHERE id='mission-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let elapsed_ms: i64 = db
+            .query_row(
+                "SELECT elapsed_ms FROM task_results WHERE task_id='task-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(task_status, "completed");
         assert_eq!(mission_status, "completed");
         assert_eq!(elapsed_ms, 8_000);
@@ -2681,19 +3571,28 @@ mod tests {
         // was persisted. The read-only status receipt recovers the stable-key
         // operation and binds its authenticated provider execution ID.
         let active = provider_evidence(
-            "active-recovery-1", "active", Some("remote-recovered"),
-            "provider-attestor", 102,
+            "active-recovery-1",
+            "active",
+            Some("remote-recovered"),
+            "provider-attestor",
+            102,
         );
-        record_provider_active(
-            &mut db, "request-active-recovery", &active, &authority, 102,
-        ).unwrap();
+        record_provider_active(&mut db, "request-active-recovery", &active, &authority, 102)
+            .unwrap();
 
         let recovered = recovery_worker_attachment_candidates(&db).unwrap();
         assert_eq!(recovered.len(), 1);
-        assert_eq!(recovered[0].provider_execution_id.as_deref(), Some("remote-recovered"));
-        let task_provider_id: Option<String> = db.query_row(
-            "SELECT provider_task_id FROM tasks WHERE id='task-1'", [], |row| row.get(0),
-        ).unwrap();
+        assert_eq!(
+            recovered[0].provider_execution_id.as_deref(),
+            Some("remote-recovered")
+        );
+        let task_provider_id: Option<String> = db
+            .query_row(
+                "SELECT provider_task_id FROM tasks WHERE id='task-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(task_provider_id.as_deref(), Some("remote-recovered"));
     }
 
@@ -2711,13 +3610,26 @@ mod tests {
             DispatchPreparation::Existing(_) => panic!("first preparation must create the attempt"),
         };
         let failed_before_side_effects = provider_evidence(
-            "pre-side-effect-1", "pre_side_effect_failure", None, "provider-attestor", 102,
+            "pre-side-effect-1",
+            "pre_side_effect_failure",
+            None,
+            "provider-attestor",
+            102,
         );
         let decision = schedule_retry_after_definite_failure(
-            &mut db, "request-1", &failed_before_side_effects, &authority, 102,
-        ).unwrap();
+            &mut db,
+            "request-1",
+            &failed_before_side_effects,
+            &authority,
+            102,
+        )
+        .unwrap();
         assert_eq!(decision, RetryDecision::Allowed);
-        let queued: String = db.query_row("SELECT status FROM tasks WHERE id='task-1'", [], |row| row.get(0)).unwrap();
+        let queued: String = db
+            .query_row("SELECT status FROM tasks WHERE id='task-1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         assert_eq!(queued, "queued");
 
         // The first admission is immutable and unused by the retry; a fresh one
@@ -2727,14 +3639,20 @@ mod tests {
         authorize_and_persist(&mut db, &second_request, &authority, 103).unwrap();
         let second = match prepare_dispatch(&mut db, &second_request, &authority, 104).unwrap() {
             DispatchPreparation::Created(attempt) => attempt,
-            DispatchPreparation::Existing(_) => panic!("fresh retry request must create attempt two"),
+            DispatchPreparation::Existing(_) => {
+                panic!("fresh retry request must create attempt two")
+            }
         };
         assert_eq!(second.attempt_number, 2);
         assert_eq!(second.idempotency_key, first.idempotency_key);
         assert_eq!(
-            db.query_row("SELECT COUNT(*) FROM dread_task_attempts WHERE task_id='task-1'", [], |row| row.get::<_, i64>(0)).unwrap(),
+            db.query_row(
+                "SELECT COUNT(*) FROM dread_task_attempts WHERE task_id='task-1'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
             2,
         );
     }
-
 }
