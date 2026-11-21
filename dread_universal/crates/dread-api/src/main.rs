@@ -4454,7 +4454,7 @@ async fn reconcile_cancelling_agent_task(
         warn!(
             task_id = %task.id,
             provider = %task.provider,
-            error = %error,
+            error = ?error,
             "Could not start cancellation reconciliation after restart; task remains unresolved"
         );
     }
