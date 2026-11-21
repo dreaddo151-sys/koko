@@ -802,13 +802,14 @@ fn amd_percent(value: &(f64, Option<String>)) -> Option<u32> {
 }
 
 fn amd_pcie_generation(value: &Value) -> Option<u32> {
-    let text = amd_string(value)?;
-    let lower = text.to_ascii_lowercase();
-    if let Some(generation) = lower
-        .strip_prefix("gen")
-        .and_then(|suffix| suffix.trim().parse::<u32>().ok())
-    {
-        return Some(generation);
+    if let Some(text) = amd_string(value) {
+        let lower = text.to_ascii_lowercase();
+        if let Some(generation) = lower
+            .strip_prefix("gen")
+            .and_then(|suffix| suffix.trim().parse::<u32>().ok())
+        {
+            return Some(generation);
+        }
     }
     let (speed, _) = amd_number_and_unit(value)?;
     [
@@ -1878,6 +1879,164 @@ mod tests {
         assert_eq!(parsed[0].utilization_percent, None);
         assert_eq!(parsed[0].temperature_c, None);
         assert_eq!(parsed[0].power_draw_mw, None);
+    }
+
+    #[test]
+    fn amd_smi_json_merges_identity_static_and_live_metrics_for_multiple_gpus() {
+        let list = r#"{
+            "gpu_data": [
+                {"gpu": 0, "bdf": "0000:0c:00.0", "uuid": "GPU-AMD-0000"},
+                {"gpu": 1, "bdf": "0000:22:00.0", "uuid": "GPU-AMD-0001"}
+            ]
+        }"#;
+        let static_info = r#"{
+            "gpu_data": [
+                {
+                    "gpu": 0,
+                    "asic": {
+                        "market_name": "AMD Radeon RX 7900 XTX",
+                        "asic_serial": "ASIC-0000"
+                    },
+                    "bus": {
+                        "bdf": "0000:0c:00.0",
+                        "max_pcie_width": 16,
+                        "max_pcie_speed": "32 GT/s",
+                        "pcie_interface_version": "Gen 5"
+                    },
+                    "driver": {"version": "6.19.4"},
+                    "vram": {"size": {"value": 24560, "unit": "MB"}}
+                },
+                {
+                    "gpu": 1,
+                    "asic": {
+                        "market_name": "AMD Instinct MI300X",
+                        "asic_serial": "ASIC-0001"
+                    },
+                    "bus": {
+                        "bdf": "0000:22:00.0",
+                        "max_pcie_width": 16,
+                        "max_pcie_speed": "32 GT/s"
+                    },
+                    "driver": {"version": "6.19.4"},
+                    "vram": {"size": "196300 MB"}
+                }
+            ]
+        }"#;
+        let metrics = r#"[
+            {
+                "gpu": 0,
+                "usage": {"gfx_activity": {"value": 27.5, "unit": "%"}},
+                "power": {"socket_power": {"value": 220.5, "unit": "W"}},
+                "temperature": {"hotspot": {"value": 68, "unit": "C"}},
+                "pcie": {
+                    "width": 16,
+                    "speed": {"value": 32, "unit": "GT/s"}
+                },
+                "mem_usage": {
+                    "total_vram": {"value": 24560, "unit": "MB"},
+                    "used_vram": {"value": 4096, "unit": "MB"},
+                    "free_vram": {"value": 20464, "unit": "MB"}
+                }
+            },
+            {
+                "gpu": 1,
+                "usage": {"gfx_activity": "N/A"},
+                "power": {"socket_power": "N/A"},
+                "temperature": {"hotspot": "N/A"},
+                "pcie": {"width": "N/A", "speed": "N/A"},
+                "mem_usage": {
+                    "used_vram": {"value": 1024, "unit": "MB"},
+                    "total_vram": {"value": 196300, "unit": "MB"}
+                }
+            }
+        ]"#;
+
+        let devices = parse_amd_smi_json(list, static_info, metrics);
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].vendor, "amd");
+        assert_eq!(devices[0].name, "AMD Radeon RX 7900 XTX");
+        assert_eq!(devices[0].device_index, Some(0));
+        assert_eq!(devices[0].device_id.as_deref(), Some("GPU-AMD-0000"));
+        assert_eq!(devices[0].pci_bus_id.as_deref(), Some("0000:0c:00.0"));
+        assert_eq!(devices[0].driver_version.as_deref(), Some("6.19.4"));
+        assert_eq!(devices[0].vram_mib, Some(24560));
+        assert_eq!(devices[0].vram_used_mib, Some(4096));
+        assert_eq!(devices[0].vram_free_mib, Some(20464));
+        assert_eq!(devices[0].utilization_percent, Some(28));
+        assert_eq!(devices[0].temperature_c, Some(68));
+        assert_eq!(devices[0].power_draw_mw, Some(220_500));
+        assert_eq!(devices[0].pcie_link_width, Some(16));
+        assert_eq!(devices[0].pcie_link_gen, Some(5));
+        assert_eq!(devices[0].pcie_link_width_max, Some(16));
+        assert_eq!(devices[0].pcie_link_gen_max, Some(5));
+
+        assert_eq!(devices[1].name, "AMD Instinct MI300X");
+        assert_eq!(devices[1].device_index, Some(1));
+        assert_eq!(devices[1].device_id.as_deref(), Some("GPU-AMD-0001"));
+        assert_eq!(devices[1].pci_bus_id.as_deref(), Some("0000:22:00.0"));
+        assert_eq!(devices[1].vram_mib, Some(196300));
+        assert_eq!(devices[1].vram_used_mib, Some(1024));
+        assert_eq!(devices[1].vram_free_mib, Some(195276));
+        assert_eq!(devices[1].utilization_percent, None);
+        assert_eq!(devices[1].temperature_c, None);
+        assert_eq!(devices[1].power_draw_mw, None);
+        assert_eq!(devices[1].pcie_link_width, None);
+        assert_eq!(devices[1].pcie_link_gen, None);
+    }
+
+    #[test]
+    fn amd_smi_json_accepts_array_metric_reports_and_keeps_unavailable_values_unknown() {
+        let list = r#"[{"gpu": 2, "bdf": "0000:43:00.0", "uuid": "GPU-AMD-PARTITION"}]"#;
+        let static_info = r#"{
+            "gpu_data": [{
+                "gpu": 2,
+                "asic": {
+                    "market_name": "AMD Instinct MI300X",
+                    "asic_serial": "ASIC-PARTITION"
+                },
+                "bus": {"bdf": "0000:43:00.0"}
+            }]
+        }"#;
+        let metrics = r#"[{
+            "gpu": 2,
+            "usage": {"gfx_activity": {"value": 0, "unit": "%"}},
+            "power": {"socket_power": {"value": 0, "unit": "W"}},
+            "temperature": {"edge": {"value": 44, "unit": "C"}}
+        }]"#;
+
+        let devices = parse_amd_smi_json(list, static_info, metrics);
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].device_index, Some(2));
+        assert_eq!(devices[0].device_id.as_deref(), Some("GPU-AMD-PARTITION"));
+        assert_eq!(devices[0].pci_bus_id.as_deref(), Some("0000:43:00.0"));
+        assert_eq!(devices[0].utilization_percent, Some(0));
+        assert_eq!(devices[0].temperature_c, Some(44));
+        assert_eq!(devices[0].power_draw_mw, Some(0));
+        assert_eq!(devices[0].vram_mib, None);
+        assert_eq!(devices[0].vram_used_mib, None);
+        assert_eq!(devices[0].vram_free_mib, None);
+    }
+
+    #[test]
+    fn amd_memory_and_power_unit_parsers_convert_documented_units() {
+        assert_eq!(
+            amd_memory_mib(&(24560.0, Some("MB".into()))),
+            Some(24560)
+        );
+        assert_eq!(
+            amd_memory_mib(&(24.0, Some("GB".into()))),
+            Some(24576)
+        );
+        assert_eq!(
+            amd_memory_mib(&(1_073_741_824.0, Some("B".into()))),
+            Some(1024)
+        );
+        assert_eq!(amd_power_mw(&(220.5, Some("W".into()))), Some(220_500));
+        assert_eq!(amd_power_mw(&(750.0, Some("mW".into()))), Some(750));
+        assert_eq!(
+            amd_pcie_generation(&json!({"value": 32, "unit": "GT/s"})),
+            Some(5)
+        );
     }
 
     #[test]
