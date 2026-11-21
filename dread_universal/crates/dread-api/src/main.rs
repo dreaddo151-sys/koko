@@ -5820,6 +5820,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refused_provider_cancellation_keeps_task_unresolved_until_status_reconciles() {
+        let db = Arc::new(Mutex::new(open_database(":memory:").unwrap()));
+        let now = now_epoch();
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO tasks (id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, created_at, updated_at, agent_provider)
+                 VALUES ('agent-cancel-unconfirmed', 'Agent cancellation test', 'agent_task', 'hermes.capability', '{\"objective\":\"test\"}', 'queued', 1, 'test-operator', ?1, ?1, 'hermes')",
+                params![now],
+            )
+            .unwrap();
+
+        let adapter = Arc::new(MockAgentAdapter::new());
+        adapter.reject_cancellation();
+        adapter.keep_running();
+        let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
+        adapters.insert("hermes".into(), adapter.clone());
+        let (events, _) = broadcast::channel(64);
+        let cancellations = Arc::new(Mutex::new(HashMap::new()));
+        let (cancel_sender, cancel_receiver) = watch::channel(false);
+        cancellations
+            .lock()
+            .unwrap()
+            .insert("agent-cancel-unconfirmed".into(), cancel_sender);
+        let state = AppState {
+            db: Arc::clone(&db),
+            gpu: GpuGatewayClient::new("http://127.0.0.1:1").unwrap(),
+            supervisor: None,
+            events,
+            execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
+            agent_adapters: Arc::new(adapters),
+            cancellations,
+            api_token: Some("test-token".into()),
+            operator_id: "test-operator".into(),
+            auth_required: true,
+        };
+
+        let worker_state = state.clone();
+        let worker_adapter = adapter.clone();
+        let worker = tokio::spawn(async move {
+            execute_agent_task(
+                worker_state,
+                worker_adapter,
+                AgentTaskExecution {
+                    task_id: "agent-cancel-unconfirmed".into(),
+                    provider: "hermes".into(),
+                    capability_id: "hermes.capability".into(),
+                    payload: json!({"objective": "test"}),
+                    initial_event_cursor: 0,
+                },
+                cancel_receiver,
+            )
+            .await;
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if !adapter.starts.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("provider start should complete before cancellation is requested");
+
+        let response = cancel_task(
+            State(state.clone()),
+            Path("agent-cancel-unconfirmed".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.0["item"]["status"], "cancelling");
+        assert_eq!(response.0["cancellation_pending"], true);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let count: i64 = db
+                    .lock()
+                    .unwrap()
+                    .query_row(
+                        "SELECT COUNT(*) FROM task_events WHERE task_id = 'agent-cancel-unconfirmed' AND event_type = 'task_cancellation_unconfirmed'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                if count > 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("provider refusal should be recorded as unconfirmed");
+
+        let status: String = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM tasks WHERE id = 'agent-cancel-unconfirmed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "cancelling");
+        worker.abort();
+    }
+
+    #[tokio::test]
     async fn openhands_confirmation_endpoint_binds_decision_to_pending_action_and_rejects_replay() {
         use axum::{
             extract::{Path as AxumPath, State},
