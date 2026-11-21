@@ -133,11 +133,15 @@ fn find_binary(names: &[&str]) -> Option<PathBuf> {
     None
 }
 
-fn run_probe(program: &Path, args: &[&str]) -> Option<String> {
-    // Bound diagnostic probes so a stuck driver utility cannot stall profile requests.
+fn run_probe_with_timeout(
+    program: &Path,
+    args: &[&str],
+    timeout_seconds: u64,
+) -> Option<String> {
+    let timeout_arg = format!("{timeout_seconds}s");
     let output = if let Some(timeout) = find_binary(&["timeout"]) {
         Command::new(timeout)
-            .args(["--signal=KILL", "5s"])
+            .args(["--signal=KILL", &timeout_arg])
             .arg(program)
             .args(args)
             .output()
@@ -149,6 +153,11 @@ fn run_probe(program: &Path, args: &[&str]) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn run_probe(program: &Path, args: &[&str]) -> Option<String> {
+    // Keep ordinary host probes short so a stuck utility cannot stall profile requests.
+    run_probe_with_timeout(program, args, 5)
 }
 
 fn optional_csv_field(fields: &[&str], index: usize) -> Option<String> {
@@ -399,12 +408,6 @@ fn intel_u32(object: &Value, keys: &[&str]) -> Option<u32> {
         .map(|value| value as u32)
 }
 
-fn intel_u64(object: &Value, keys: &[&str]) -> Option<u64> {
-    intel_number(object, keys)
-        .filter(|value| *value >= 0.0 && *value <= u64::MAX as f64)
-        .map(|value| value as u64)
-}
-
 /// Parse documented Intel XPU Manager query JSON output.
 fn parse_intel_query_json(output: &str) -> Vec<GpuDevice> {
     let Ok(report) = serde_json::from_str::<Value>(output) else {
@@ -571,13 +574,23 @@ fn parse_intel_discovery_json(output: &str) -> Vec<GpuDevice> {
 }
 
 fn intel_devices(binary: &Path) -> Vec<GpuDevice> {
-    if let Some(output) = run_probe(binary, &["query", "--json"]) {
+    // XPU Manager's first driver query may initialize Level Zero and collect a
+    // sample. Bound it independently from the short host-inventory probes.
+    if let Some(output) = run_probe_with_timeout(
+        binary,
+        &["--timeout=8", "query", "--json"],
+        12,
+    ) {
         let devices = parse_intel_query_json(&output);
         if !devices.is_empty() {
             return devices;
         }
     }
-    if let Some(output) = run_probe(binary, &["discovery", "--json"]) {
+    if let Some(output) = run_probe_with_timeout(
+        binary,
+        &["--timeout=6", "discovery", "--json"],
+        10,
+    ) {
         let devices = parse_intel_discovery_json(&output);
         if !devices.is_empty() {
             return devices;
