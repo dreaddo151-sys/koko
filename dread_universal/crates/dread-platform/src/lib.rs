@@ -133,11 +133,7 @@ fn find_binary(names: &[&str]) -> Option<PathBuf> {
     None
 }
 
-fn run_probe_with_timeout(
-    program: &Path,
-    args: &[&str],
-    timeout_seconds: u64,
-) -> Option<String> {
+fn run_probe_with_timeout(program: &Path, args: &[&str], timeout_seconds: u64) -> Option<String> {
     let timeout_arg = format!("{timeout_seconds}s");
     let output = if let Some(timeout) = find_binary(&["timeout"]) {
         Command::new(timeout)
@@ -345,7 +341,6 @@ fn nvidia_devices(binary: &Path) -> Vec<GpuDevice> {
         .collect()
 }
 
-
 fn intel_string<'a>(object: &'a Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .find_map(|key| object.get(*key).and_then(Value::as_str))
@@ -377,7 +372,10 @@ fn intel_number(object: &Value, keys: &[&str]) -> Option<f64> {
             .next()
             .unwrap_or(text)
             .trim_end_matches('%');
-        numeric.parse::<f64>().ok().filter(|number| number.is_finite())
+        numeric
+            .parse::<f64>()
+            .ok()
+            .filter(|number| number.is_finite())
     })
 }
 
@@ -426,11 +424,9 @@ fn parse_intel_query_json(output: &str) -> Vec<GpuDevice> {
             let pci = intel_string(gpu, &["pci_bus_id"])
                 .or_else(|| gpu.pointer("/pci/bus_id").and_then(Value::as_str));
             let uuid = intel_string(gpu, &["gpu_uuid", "uuid", "soc_uuid"]);
-            let index = intel_u32(gpu, &["device_index", "index"])
-                .or_else(|| {
-                    intel_string(gpu, &["device_id"])
-                        .and_then(|value| value.parse::<u32>().ok())
-                });
+            let index = intel_u32(gpu, &["device_index", "index"]).or_else(|| {
+                intel_string(gpu, &["device_id"]).and_then(|value| value.parse::<u32>().ok())
+            });
 
             let total = intel_nested_number(gpu, &["fb_memory_usage", "total"])
                 .or_else(|| intel_number(gpu, &["memory_total_mib"]));
@@ -439,16 +435,12 @@ fn parse_intel_query_json(output: &str) -> Vec<GpuDevice> {
             let free = intel_nested_number(gpu, &["fb_memory_usage", "free"])
                 .or_else(|| intel_number(gpu, &["memory_free_mib"]));
 
-            let pcie_gen = intel_nested_number(
-                gpu,
-                &["pci", "gpu_link_info", "pcie_generation", "current"],
-            )
-            .or_else(|| intel_number(gpu, &["pcie_generation_current"]));
-            let pcie_width = intel_nested_number(
-                gpu,
-                &["pci", "gpu_link_info", "link_width", "current"],
-            )
-            .or_else(|| intel_number(gpu, &["pcie_link_width_current"]));
+            let pcie_gen =
+                intel_nested_number(gpu, &["pci", "gpu_link_info", "pcie_generation", "current"])
+                    .or_else(|| intel_number(gpu, &["pcie_generation_current"]));
+            let pcie_width =
+                intel_nested_number(gpu, &["pci", "gpu_link_info", "link_width", "current"])
+                    .or_else(|| intel_number(gpu, &["pcie_link_width_current"]));
 
             let power_w = intel_nested_number(
                 gpu,
@@ -493,10 +485,9 @@ fn parse_intel_query_json(output: &str) -> Vec<GpuDevice> {
                 .and_then(|value| {
                     (value >= 0.0 && value <= f64::from(u32::MAX)).then_some(value as u32)
                 }),
-                utilization_percent: intel_nested_number(gpu, &["utilization", "gpu"])
-                    .and_then(|value| {
-                        (value >= 0.0 && value <= 100.0).then_some(value.round() as u32)
-                    }),
+                utilization_percent: intel_nested_number(gpu, &["utilization", "gpu"]).and_then(
+                    |value| (value >= 0.0 && value <= 100.0).then_some(value.round() as u32),
+                ),
                 temperature_c: intel_nested_number(gpu, &["temperature", "gpu_current_temp"])
                     .and_then(|value| {
                         (value >= 0.0 && value <= f64::from(u32::MAX))
@@ -539,15 +530,9 @@ fn parse_intel_discovery_json(output: &str) -> Vec<GpuDevice> {
                 device,
                 &["pci_bdf_address", "PCI BDF Address", "pci_bus_id"],
             );
-            let uuid = intel_string(
-                device,
-                &["soc_uuid", "SOC UUID", "gpu_uuid", "uuid"],
-            );
+            let uuid = intel_string(device, &["soc_uuid", "SOC UUID", "gpu_uuid", "uuid"]);
             let index = intel_u32(device, &["device_id", "Device ID", "device_index", "index"]);
-            let memory = intel_number(
-                device,
-                &["memory_physical_size_mib", "memory_total_mib"],
-            );
+            let memory = intel_number(device, &["memory_physical_size_mib", "memory_total_mib"]);
             let driver = intel_string(device, &["umd_version", "UMD Version"]);
             Some(GpuDevice {
                 vendor: "intel".into(),
@@ -565,7 +550,10 @@ fn parse_intel_discovery_json(output: &str) -> Vec<GpuDevice> {
                 pcie_link_gen: None,
                 pcie_link_width: None,
                 pcie_link_gen_max: intel_u32(device, &["pcie_generation", "PCIe Generation"]),
-                pcie_link_width_max: intel_u32(device, &["pcie_max_link_width", "PCIe Max Link Width"]),
+                pcie_link_width_max: intel_u32(
+                    device,
+                    &["pcie_max_link_width", "PCIe Max Link Width"],
+                ),
                 utilization_percent: None,
                 temperature_c: None,
                 power_draw_mw: None,
@@ -577,21 +565,15 @@ fn parse_intel_discovery_json(output: &str) -> Vec<GpuDevice> {
 fn intel_devices(binary: &Path) -> Vec<GpuDevice> {
     // XPU Manager's first driver query may initialize Level Zero and collect a
     // sample. Bound it independently from the short host-inventory probes.
-    if let Some(output) = run_probe_with_timeout(
-        binary,
-        &["--timeout=8", "query", "--json"],
-        12,
-    ) {
+    if let Some(output) = run_probe_with_timeout(binary, &["--timeout=8", "query", "--json"], 12) {
         let devices = parse_intel_query_json(&output);
         if !devices.is_empty() {
             return devices;
         }
     }
-    if let Some(output) = run_probe_with_timeout(
-        binary,
-        &["--timeout=6", "discovery", "--json"],
-        10,
-    ) {
+    if let Some(output) =
+        run_probe_with_timeout(binary, &["--timeout=6", "discovery", "--json"], 10)
+    {
         let devices = parse_intel_discovery_json(&output);
         if !devices.is_empty() {
             return devices;
