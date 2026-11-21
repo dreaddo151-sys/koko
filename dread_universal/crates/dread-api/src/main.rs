@@ -5539,7 +5539,7 @@ async fn main() -> anyhow::Result<()> {
     let recovered_tasks = recover_task_queue(&state)?;
     info!(
         recovered_tasks,
-        "Recovered eligible queued tasks; interrupted running tasks were marked failed"
+        "Recovered eligible queued tasks and resumed provider cancellation reconciliation; interrupted built-in tasks were marked failed"
     );
     info!(address = %addr, database = %db_path, "PROJECT DREAD Universal API listening");
     axum::serve(listener, app(state))
