@@ -1664,11 +1664,7 @@ mod tests {
     #[test]
     fn probe_timeout_kills_a_stalled_process_without_gnu_timeout() {
         let started = Instant::now();
-        let output = run_probe_with_timeout(
-            Path::new("/bin/sh"),
-            &["-c", "exec sleep 5"],
-            1,
-        );
+        let output = run_probe_with_timeout(Path::new("/bin/sh"), &["-c", "exec sleep 5"], 1);
         assert!(output.is_none());
         assert!(started.elapsed() < Duration::from_secs(3));
     }
