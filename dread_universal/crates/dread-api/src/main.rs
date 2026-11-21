@@ -4641,7 +4641,7 @@ async fn cancel_task(
             message: "Task cannot be cancelled in its current state".into(),
         });
     };
-    let changed = current_status != next_status;
+    let changed = current_status.as_str() != next_status;
     let mut cancellation_event = None;
     if changed {
         tx.execute(
