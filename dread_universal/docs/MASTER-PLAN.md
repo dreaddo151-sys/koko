@@ -65,7 +65,7 @@ The finished operator experience must provide:
 Detect and report, without changing the host:
 - OS, distribution/release, kernel, architecture, CPU model/topology/thread count and memory.
 - Physical disks, filesystems, workspace capacity and installation roots.
-- Every visible GPU with stable vendor identity (UUID/serial where exposed), PCI bus address, current enumeration index, vendor/model/count, VRAM, PCIe link, driver and available CUDA/ROCm/oneAPI/Metal capabilities.
+- Every visible GPU with stable vendor identity (UUID/serial where exposed), PCI bus address, current enumeration index, vendor/model/count, VRAM, PCIe link, driver and available CUDA/ROCm/oneAPI/Metal capabilities. Vendor adapters use NVIDIA `nvidia-smi`, AMD `rocm-smi`, Intel `xpu-smi` machine-readable query/discovery, and Apple `system_profiler` where present.
 - Separately read runtime telemetry from the authenticated Python GPU Supervisor where configured. Keep host discovery and Supervisor runtime samples distinct; Supervisor telemetry must be read-only, size-bounded and must not acquire, release or modify GPU leases. Enumeration index is not treated as a persistent identity; missing identity fields remain unknown rather than fabricated.
 - llama.cpp binaries, gateway state, model files, model metadata and gateway-advertised model inventory.
 - ComfyUI, GPU Supervisor, bridge, existing Hub and configured local services.
@@ -758,3 +758,12 @@ The PR #9 token/prompt work lived on the older Run 81 branch and was absent from
 - Added protected Rust `GET /api/gpu/telemetry`. When the Python Supervisor is not configured it returns 503; otherwise it forwards the telemetry JSON from the authenticated bridge. API tests verify the bridge Bearer token, returned read-only marker and representative device counters; the route is included in the Bearer-auth protected-route regression.
 - Added a separate GPU-page console panel showing the bridge's actual sample timestamp, source and per-device utilization, VRAM, temperature, power and PCIe fields. It refreshes every 30 seconds only while the GPU page is open and is cleared on disconnect.
 - This is distinct from `/api/system/profile`, which reads host utilities and inventories host hardware. NVIDIA Supervisor telemetry does not replace AMD/Intel/Apple host discovery. The Python GPU Supervisor remains sole GPU lease/process owner.
+
+
+### Intel XPU inventory adapter — 2026-11-21
+
+- `detect_host()` now calls the installed `xpu-smi` adapter, rather than reporting only the presence of the utility while leaving Intel devices absent from `gpu_devices`.
+- Preferred read-only query is `xpu-smi --timeout=8 query --json`; it parses the documented `gpus[]` fields for product name, GPU UUID, index, PCI bus ID, FB memory total/used/free (MiB), UMD version, PCIe link current/max, utilization, current temperature and average power draw. Average power in watts is converted to the existing milliwatt field.
+- If the richer query is unavailable, a bounded `xpu-smi --timeout=6 discovery --json` fallback maps only static identity/driver/PCI/memory fields supplied by that report. Utilization, temperature, power, current PCIe link and absent identity values remain unknown rather than inferred.
+- The XPU Manager probe has a separate bounded timeout because first-use Level Zero initialization can take longer than short generic host utility probes. No configuration, reset, firmware update or other mutating XPU command is called.
+- Synthetic parser tests cover two Intel devices, UUID/PCI identity and telemetry counters, plus static discovery fallback with live metrics absent. Physical Intel-host and driver-version acceptance remain open.
