@@ -783,3 +783,11 @@ The PR #9 token/prompt work lived on the older Run 81 branch and was absent from
 - If neither JSON report can be parsed, the adapter attempts the documented `--query-gpu=index,name,uuid,pci.bus_id --format=csv,noheader,nounits` interface as an identity-only fallback. It never invents VRAM or runtime metrics from that response. `--timeout` is an XPU-SMI global no-progress limit and each host probe is additionally process-time-bounded.
 - The XPU Manager probe has a separate bounded timeout because first-use Level Zero initialization can take longer than short generic host utility probes. No configuration, reset, firmware update or other mutating XPU command is called.
 - Parser tests cover multi-device query JSON (UUID/PCI identity, memory, utilization, temperature, power and PCIe), discovery memory unit conversion, static discovery fallback and identity-only CSV fallback; missing metrics remain `None`. Full Ubuntu CI run #1196 (2026-11-21) passed on the corresponding PR #14 source head. Physical Intel-host and driver-version acceptance remain open.
+
+
+### Portable bounded host-probe execution — 2026-11-21
+
+- All allowlisted host utility probes now use a Rust-managed process deadline rather than depending on the presence of GNU `timeout`. Stdout is piped and retained only up to 4 MiB; stderr is discarded. A timed-out direct child is killed and reaped, unsuccessful processes are rejected, and oversized output is rejected rather than parsed as a truncated report.
+- Regression tests exercise timeout enforcement without GNU `timeout` and rejection of output one byte over the capture budget.
+- The preceding full candidate `447cf43e34e0d423f17e6a387181cdf5cc83ab92` passed all three Ubuntu 24.04 CI jobs in PR run #1222 (`44846314057`). The added output-budget test and documentation are newer; their exact-head CI must pass before this hardening slice is called validated.
+- This bounds the direct child process and captured memory. It does not claim cross-platform process-tree containment for arbitrary descendants, and it does not replace vendor CLI timeouts or physical host acceptance.
