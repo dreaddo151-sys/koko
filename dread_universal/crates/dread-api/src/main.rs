@@ -5091,9 +5091,10 @@ fn parse_positive_limit(
     let Some(raw) = raw else {
         return Ok(default);
     };
-    let value = raw.trim().parse::<usize>().map_err(|_| {
-        anyhow::anyhow!("{name} must be an integer from 1 through {maximum}")
-    })?;
+    let value = raw
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| anyhow::anyhow!("{name} must be an integer from 1 through {maximum}"))?;
     anyhow::ensure!(
         (1..=maximum).contains(&value),
         "{name} must be an integer from 1 through {maximum}"
@@ -5101,11 +5102,7 @@ fn parse_positive_limit(
     Ok(value)
 }
 
-fn positive_limit_from_env(
-    name: &str,
-    default: usize,
-    maximum: usize,
-) -> anyhow::Result<usize> {
+fn positive_limit_from_env(name: &str, default: usize, maximum: usize) -> anyhow::Result<usize> {
     let raw = match env::var(name) {
         Ok(value) => Some(value),
         Err(env::VarError::NotPresent) => None,
@@ -6084,7 +6081,10 @@ mod tests {
     #[test]
     fn execution_limit_settings_apply_defaults_and_reject_out_of_range_values() {
         assert_eq!(parse_positive_limit("LIMIT", None, 3, 16).unwrap(), 3);
-        assert_eq!(parse_positive_limit("LIMIT", Some(" 4 "), 3, 16).unwrap(), 4);
+        assert_eq!(
+            parse_positive_limit("LIMIT", Some(" 4 "), 3, 16).unwrap(),
+            4
+        );
         assert!(parse_positive_limit("LIMIT", Some("0"), 3, 16).is_err());
         assert!(parse_positive_limit("LIMIT", Some("17"), 3, 16).is_err());
         assert!(parse_positive_limit("LIMIT", Some("many"), 3, 16).is_err());
