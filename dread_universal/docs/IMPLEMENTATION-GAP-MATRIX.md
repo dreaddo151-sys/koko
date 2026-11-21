@@ -55,3 +55,14 @@ Ubuntu 24.04 x86_64 is the current CI/package baseline. Other OS and accelerator
 ## Review rule for every next change
 
 Before a source change, name the master-plan row it advances and identify its safety boundary. After the change, add or update tests, inspect the diff, run fmt/Clippy/tests/release build and web build, record the exact CI run/head, then update this matrix. Do not change a row to complete without the corresponding acceptance evidence.
+
+
+## Provider cancellation reconciliation — 2026-11-21
+
+| Requirement | State | Evidence / remaining boundary |
+|---|---|---|
+| Remote agent cancellation truthfulness | Implemented in source; exact-head CI pending | Active provider-backed tasks enter `cancelling`; the worker submits cancellation once and waits for a provider terminal state. A refusal, non-terminal acknowledgement or temporary provider outage is recorded as unconfirmed and status polling continues. |
+| Cancellation race with task start | Implemented in source; exact-head CI pending | Provider start requests are not dropped when cancellation races with submission; DREAD waits for the idempotent start response, persists the provider ID, then issues cancellation. |
+| Console cancellation visibility | Implemented in source; web CI pending | `cancelling` is counted as active and shown as awaiting provider confirmation; no duplicate cancel control is offered. |
+| GPU inference cancellation | Partial / provider contract blocked | The current Supervisor bridge cannot interrupt an already-running upstream generation. Rust request cancellation is best-effort; task state must not be treated as proof that the upstream generation stopped. |
+| Restart recovery of in-flight cancellation | Open | Startup recovery must reconcile persisted `cancelling` tasks with their provider IDs and provider status rather than silently requeueing or marking them cancelled. |
