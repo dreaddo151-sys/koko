@@ -468,11 +468,8 @@ fn parse_intel_query_json(output: &str) -> Vec<GpuDevice> {
                 intel_nested_number(gpu, &["pci", "gpu_link_info", "link_width", "current"])
                     .or_else(|| intel_number(gpu, &["pcie_link_width_current"]));
 
-            let power_w = intel_nested_number(
-                gpu,
-                &["gpu_power_readings", "average_power_draw"],
-            )
-            .or_else(|| intel_number(gpu, &["power_draw_w"]));
+            let power_w = intel_nested_number(gpu, &["gpu_power_readings", "average_power_draw"])
+                .or_else(|| intel_number(gpu, &["power_draw_w"]));
 
             Some(GpuDevice {
                 vendor: "intel".into(),
