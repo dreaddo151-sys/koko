@@ -1525,7 +1525,7 @@ pub fn detect_host() -> HostProfile {
     if let Some(binary) = &nvidia {
         gpu_devices.extend(nvidia_devices(binary));
     }
-    let amd_inventory = amd_smi.as_ref().map(amd_smi_devices).unwrap_or_default();
+    let amd_inventory = amd_smi.as_ref().map(|binary| amd_smi_devices(binary)).unwrap_or_default();
     if amd_inventory.is_empty() {
         if let Some(binary) = &amd {
             gpu_devices.extend(amd_rocm_smi_devices(binary));
