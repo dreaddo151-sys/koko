@@ -4197,7 +4197,8 @@ async fn execute_approved_task(
         } else {
             error.clone()
         };
-        if !matches!(final_status, "cancelled" | "cancelling")
+        if current_status != "cancelled"
+            && final_status != "cancelling"
             && tx.execute(
                 "UPDATE tasks SET status = ?2, updated_at = ?3 WHERE id = ?1 AND status IN ('running', 'cancelling')",
                 params![task_id, final_status, completed_at],
