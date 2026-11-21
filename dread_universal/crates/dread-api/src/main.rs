@@ -3549,14 +3549,18 @@ async fn execute_agent_task_inner(
                 }
             }
             Err(error) => {
-                finish_agent_task(
-                    &state,
-                    &task_id,
-                    "failed",
-                    None,
-                    Some(format!("Provider event polling failed: {error}")),
-                );
-                return;
+                if cancellation_submitted {
+                    warn!(task_id = %task_id, provider = %provider, error = %error, "Provider event reconciliation is temporarily unavailable");
+                } else {
+                    finish_agent_task(
+                        &state,
+                        &task_id,
+                        "failed",
+                        None,
+                        Some(format!("Provider event polling failed: {error}")),
+                    );
+                    return;
+                }
             }
         }
         match adapter.task_status(&task_id, &provider_id).await {
