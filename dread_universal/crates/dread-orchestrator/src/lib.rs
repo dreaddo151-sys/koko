@@ -386,7 +386,7 @@ impl ExecutionGate {
     }
 
     /// Run a long-lived provider operation under trusted resource-class and global limits.
-    /// The runner must observe cancellation and finish provider cleanup before returning.
+    /// The runner must confirm cleanup or remain awaited until the provider is terminal.
     pub async fn run_managed_for_resources<T, F, Fut>(
         &self,
         resources: ResourceRequest,
