@@ -3724,10 +3724,13 @@ fn finish_agent_task(
         .flatten();
     if let Some(mission_id) = mission_id.as_deref() {
         if cancellation_requested {
-            if tx.execute(
-                "UPDATE missions SET status = 'blocked' WHERE id = ?1",
-                params![mission_id],
-            ).is_err() {
+            if tx
+                .execute(
+                    "UPDATE missions SET status = 'blocked' WHERE id = ?1",
+                    params![mission_id],
+                )
+                .is_err()
+            {
                 return;
             }
         } else if final_status == "completed" {
@@ -4336,9 +4339,8 @@ async fn execute_approved_task(
         if tx.commit().is_err() {
             return;
         }
-        let advance_mission = final_status == "completed"
-            && current_status != "cancelling"
-            && mission_id.is_some();
+        let advance_mission =
+            final_status == "completed" && current_status != "cancelling" && mission_id.is_some();
         (event, mission_id, advance_mission)
     };
     let _ = state.events.send(completion_event);
@@ -4508,9 +4510,7 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
         let mut statement = tx.prepare(
             "SELECT id, agent_provider, provider_task_id FROM tasks WHERE status = 'cancelling'",
         )?;
-        let rows = statement.query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     for (task_id, provider, provider_task_id) in cancelling_rows {
@@ -4562,14 +4562,17 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
             ).map_err(|error| anyhow::anyhow!(error.message))?);
             continue;
         }
-        emitted.push(append_task_event(
-            &tx,
-            &task_id,
-            "task_cancellation_recovery_started",
-            &json!({"status": "cancelling", "provider": provider}),
-            "recovery",
-            now,
-        ).map_err(|error| anyhow::anyhow!(error.message))?);
+        emitted.push(
+            append_task_event(
+                &tx,
+                &task_id,
+                "task_cancellation_recovery_started",
+                &json!({"status": "cancelling", "provider": provider}),
+                "recovery",
+                now,
+            )
+            .map_err(|error| anyhow::anyhow!(error.message))?,
+        );
         cancelling.push(CancellingTaskRecovery {
             id: task_id,
             provider,
