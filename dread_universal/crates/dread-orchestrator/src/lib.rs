@@ -14,7 +14,7 @@ use std::{
 };
 
 use serde_json::Value;
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 const CANCELLATION_CLEANUP_GRACE: Duration = Duration::from_secs(5);
 
@@ -43,10 +43,108 @@ impl Default for ExecutionConfig {
     }
 }
 
+/// Independently bounded resource dimensions for trusted scheduler admission.
+///
+/// These quotas limit DREAD's own worker concurrency. They do not replace provider
+/// admission or hardware ownership; the Python GPU Supervisor remains authoritative
+/// for actual GPU process and lease lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceClass {
+    Cpu,
+    Gpu,
+    Model,
+    Media,
+    Agent,
+}
+
+impl ResourceClass {
+    const ALL: [Self; 5] = [Self::Cpu, Self::Gpu, Self::Model, Self::Media, Self::Agent];
+
+    const fn bit(self) -> u8 {
+        match self {
+            Self::Cpu => 0b00001,
+            Self::Gpu => 0b00010,
+            Self::Model => 0b00100,
+            Self::Media => 0b01000,
+            Self::Agent => 0b10000,
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Cpu => 0,
+            Self::Gpu => 1,
+            Self::Model => 2,
+            Self::Media => 3,
+            Self::Agent => 4,
+        }
+    }
+}
+
+/// Resource dimensions selected by trusted runner routing, never by an API payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceRequest(u8);
+
+impl ResourceRequest {
+    pub const CPU: Self = Self(ResourceClass::Cpu.bit());
+    pub const GPU: Self = Self(ResourceClass::Gpu.bit());
+    pub const MODEL: Self = Self(ResourceClass::Model.bit());
+    pub const MEDIA: Self = Self(ResourceClass::Media.bit());
+    pub const AGENT: Self = Self(ResourceClass::Agent.bit());
+    /// Local model inference requires both the GPU and model class budgets.
+    pub const GPU_MODEL: Self = Self(ResourceClass::Gpu.bit() | ResourceClass::Model.bit());
+    /// Reserved for reviewed media runners; this does not acquire a hardware lease.
+    pub const GPU_MEDIA: Self = Self(ResourceClass::Gpu.bit() | ResourceClass::Media.bit());
+
+    fn includes(self, class: ResourceClass) -> bool {
+        self.0 & class.bit() != 0
+    }
+
+    fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+/// Per-class execution ceilings. The global ExecutionConfig cap still applies across
+/// all classes; tasks requesting multiple classes acquire each permit in stable order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceLimits {
+    pub cpu: usize,
+    pub gpu: usize,
+    pub model: usize,
+    pub media: usize,
+    pub agent: usize,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            cpu: 2,
+            gpu: 1,
+            model: 1,
+            media: 1,
+            agent: 1,
+        }
+    }
+}
+
+impl ResourceLimits {
+    const fn for_class(self, class: ResourceClass) -> usize {
+        match class {
+            ResourceClass::Cpu => self.cpu,
+            ResourceClass::Gpu => self.gpu,
+            ResourceClass::Model => self.model,
+            ResourceClass::Media => self.media,
+            ResourceClass::Agent => self.agent,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
     ZeroConcurrency,
     AdmissionBelowConcurrency,
+    ZeroResourceConcurrency(ResourceClass),
     ZeroAttempts,
     ZeroTimeout,
     MaxRetryBackoffBelowInitial,
@@ -77,6 +175,7 @@ impl RunnerError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionError {
     InvalidTaskId,
+    InvalidResourceRequest,
     AdmissionFull { limit: usize },
     Cancelled { attempts: u8 },
     TimedOut { attempts: u8 },
@@ -95,6 +194,7 @@ pub struct ExecutionResult {
 #[derive(Clone)]
 pub struct ExecutionGate {
     semaphore: Arc<Semaphore>,
+    resource_semaphores: [Arc<Semaphore>; 5],
     admitted: Arc<AtomicUsize>,
     config: ExecutionConfig,
 }
@@ -111,6 +211,13 @@ impl Drop for AdmissionGuard {
 
 impl ExecutionGate {
     pub fn new(config: ExecutionConfig) -> Result<Self, ConfigError> {
+        Self::new_with_resource_limits(config, ResourceLimits::default())
+    }
+
+    pub fn new_with_resource_limits(
+        config: ExecutionConfig,
+        resource_limits: ResourceLimits,
+    ) -> Result<Self, ConfigError> {
         if config.max_concurrency == 0 {
             return Err(ConfigError::ZeroConcurrency);
         }
@@ -126,8 +233,18 @@ impl ExecutionGate {
         if config.max_retry_backoff < config.retry_backoff {
             return Err(ConfigError::MaxRetryBackoffBelowInitial);
         }
+        for class in ResourceClass::ALL {
+            if resource_limits.for_class(class) == 0 {
+                return Err(ConfigError::ZeroResourceConcurrency(class));
+            }
+        }
         Ok(Self {
             semaphore: Arc::new(Semaphore::new(config.max_concurrency)),
+            resource_semaphores: std::array::from_fn(|index| {
+                Arc::new(Semaphore::new(
+                    resource_limits.for_class(ResourceClass::ALL[index]),
+                ))
+            }),
             admitted: Arc::new(AtomicUsize::new(0)),
             config,
         })
@@ -135,6 +252,10 @@ impl ExecutionGate {
 
     pub fn admitted_count(&self) -> usize {
         self.admitted.load(Ordering::Acquire)
+    }
+
+    pub fn available_resource_permits(&self, class: ResourceClass) -> usize {
+        self.resource_semaphores[class.index()].available_permits()
     }
 
     async fn wait_before_retry(
@@ -186,16 +307,89 @@ impl ExecutionGate {
         })
     }
 
+    /// Acquire each requested resource in enum order, then the shared global
+    /// concurrency permit. Waiting for a busy resource class does not consume a
+    /// global running slot, and cancellation drops every permit already acquired.
+    async fn acquire_permits(
+        &self,
+        request: ResourceRequest,
+        cancellation: &mut watch::Receiver<bool>,
+    ) -> Result<(Vec<OwnedSemaphorePermit>, OwnedSemaphorePermit), ExecutionError> {
+        if request.is_empty() {
+            return Err(ExecutionError::InvalidResourceRequest);
+        }
+
+        let mut resources = Vec::new();
+        for class in ResourceClass::ALL {
+            if !request.includes(class) {
+                continue;
+            }
+            let permit = loop {
+                if *cancellation.borrow() {
+                    return Err(ExecutionError::Cancelled { attempts: 0 });
+                }
+                tokio::select! {
+                    permit = Arc::clone(&self.resource_semaphores[class.index()]).acquire_owned() => {
+                        break permit.map_err(|_| ExecutionError::SchedulerClosed)?;
+                    }
+                    changed = cancellation.changed() => {
+                        if changed.is_err() || *cancellation.borrow() {
+                            return Err(ExecutionError::Cancelled { attempts: 0 });
+                        }
+                    }
+                }
+            };
+            resources.push(permit);
+        }
+
+        let global = loop {
+            if *cancellation.borrow() {
+                return Err(ExecutionError::Cancelled { attempts: 0 });
+            }
+            tokio::select! {
+                permit = Arc::clone(&self.semaphore).acquire_owned() => {
+                    break permit.map_err(|_| ExecutionError::SchedulerClosed)?;
+                }
+                changed = cancellation.changed() => {
+                    if changed.is_err() || *cancellation.borrow() {
+                        return Err(ExecutionError::Cancelled { attempts: 0 });
+                    }
+                }
+            }
+        };
+        Ok((resources, global))
+    }
+
     /// Run a long-lived managed operation under the shared admission and concurrency limits.
     ///
     /// This is intended for provider workers whose own lifecycle polls for terminal
     /// state and performs provider-specific cancellation. It deliberately does not
     /// apply the generic attempt timeout or automatic retry: dropping a remote
     /// request can leave non-idempotent provider work running after DREAD has lost
-    /// track of it. The supplied operation must observe cancellation and return only
-    /// after it has confirmed or completed provider-side cleanup.
+    /// track of it. The supplied operation must either observe cancellation and
+    /// confirm provider-side cleanup, or remain awaited until the provider operation
+    /// is known terminal. It must never drop an in-flight remote request merely
+    /// because the local caller requested cancellation.
     pub async fn run_managed<T, F, Fut>(
         &self,
+        task_id: impl Into<String>,
+        cancellation: watch::Receiver<bool>,
+        operation: F,
+    ) -> Result<T, ExecutionError>
+    where
+        T: Send,
+        F: FnOnce(watch::Receiver<bool>) -> Fut + Send,
+        Fut: Future<Output = Result<T, String>> + Send,
+    {
+        self.run_managed_for_resources(ResourceRequest::AGENT, task_id, cancellation, operation)
+            .await
+    }
+
+    /// Run a long-lived provider operation under trusted resource-class and global limits.
+    /// The runner must confirm cleanup or remain awaited until the provider is terminal.
+    pub async fn run_managed_for_resources<T, F, Fut>(
+        &self,
+        resources: ResourceRequest,
         task_id: impl Into<String>,
         mut cancellation: watch::Receiver<bool>,
         operation: F,
@@ -211,22 +405,8 @@ impl ExecutionGate {
         }
 
         let _admission = self.try_admit()?;
-        let _permit = loop {
-            if *cancellation.borrow() {
-                return Err(ExecutionError::Cancelled { attempts: 0 });
-            }
-            tokio::select! {
-                permit = Arc::clone(&self.semaphore).acquire_owned() => {
-                    break permit.map_err(|_| ExecutionError::SchedulerClosed)?;
-                }
-                changed = cancellation.changed() => {
-                    if changed.is_err() || *cancellation.borrow() {
-                        return Err(ExecutionError::Cancelled { attempts: 0 });
-                    }
-                }
-            }
-        };
-
+        let (_resource_permits, _global_permit) =
+            self.acquire_permits(resources, &mut cancellation).await?;
         operation(cancellation.clone())
             .await
             .map_err(|message| ExecutionError::RunnerFailed {
@@ -243,16 +423,37 @@ impl ExecutionGate {
         &self,
         task_id: impl Into<String>,
         cancellation: watch::Receiver<bool>,
+        operation: F,
+    ) -> Result<ExecutionResult, ExecutionError>
+    where
+        F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
+        Fut: Future<Output = Result<Value, String>> + Send,
+    {
+        self.run_for_resources(ResourceRequest::CPU, task_id, cancellation, operation)
+            .await
+    }
+
+    /// Run a reviewed operation using only the resource classes chosen by trusted code.
+    pub async fn run_for_resources<F, Fut>(
+        &self,
+        resources: ResourceRequest,
+        task_id: impl Into<String>,
+        cancellation: watch::Receiver<bool>,
         mut operation: F,
     ) -> Result<ExecutionResult, ExecutionError>
     where
         F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
         Fut: Future<Output = Result<Value, String>> + Send,
     {
-        self.run_inner(task_id, cancellation, move |attempt, cancellation| {
-            let operation_future = operation(attempt, cancellation);
-            async move { operation_future.await.map_err(RunnerError::permanent) }
-        })
+        self.run_inner(
+            resources,
+            task_id,
+            cancellation,
+            move |attempt, cancellation| {
+                let operation_future = operation(attempt, cancellation);
+                async move { operation_future.await.map_err(RunnerError::permanent) }
+            },
+        )
         .await
     }
 
@@ -268,11 +469,33 @@ impl ExecutionGate {
         F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
         Fut: Future<Output = Result<Value, RunnerError>> + Send,
     {
-        self.run_inner(task_id, cancellation, operation).await
+        self.run_with_retryable_errors_for_resources(
+            ResourceRequest::CPU,
+            task_id,
+            cancellation,
+            operation,
+        )
+        .await
+    }
+
+    pub async fn run_with_retryable_errors_for_resources<F, Fut>(
+        &self,
+        resources: ResourceRequest,
+        task_id: impl Into<String>,
+        cancellation: watch::Receiver<bool>,
+        operation: F,
+    ) -> Result<ExecutionResult, ExecutionError>
+    where
+        F: FnMut(u8, watch::Receiver<bool>) -> Fut + Send,
+        Fut: Future<Output = Result<Value, RunnerError>> + Send,
+    {
+        self.run_inner(resources, task_id, cancellation, operation)
+            .await
     }
 
     async fn run_inner<F, Fut>(
         &self,
+        resources: ResourceRequest,
         task_id: impl Into<String>,
         mut cancellation: watch::Receiver<bool>,
         mut operation: F,
@@ -286,22 +509,8 @@ impl ExecutionGate {
             return Err(ExecutionError::InvalidTaskId);
         }
         let _admission = self.try_admit()?;
-
-        let _permit = loop {
-            if *cancellation.borrow() {
-                return Err(ExecutionError::Cancelled { attempts: 1 });
-            }
-            tokio::select! {
-                permit = Arc::clone(&self.semaphore).acquire_owned() => {
-                    break permit.map_err(|_| ExecutionError::SchedulerClosed)?;
-                }
-                changed = cancellation.changed() => {
-                    if changed.is_err() || *cancellation.borrow() {
-                        return Err(ExecutionError::Cancelled { attempts: 0 });
-                    }
-                }
-            }
-        };
+        let (_resource_permits, _global_permit) =
+            self.acquire_permits(resources, &mut cancellation).await?;
 
         let started = Instant::now();
         let mut attempts = 0;
@@ -661,6 +870,227 @@ mod tests {
         assert_eq!(gate.admitted_count(), 0);
     }
 
+    #[test]
+    fn rejects_zero_resource_class_limit() {
+        let limits = ResourceLimits {
+            media: 0,
+            ..ResourceLimits::default()
+        };
+        assert_eq!(
+            ExecutionGate::new_with_resource_limits(config(2, 4), limits).err(),
+            Some(ConfigError::ZeroResourceConcurrency(ResourceClass::Media))
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_quotas_do_not_occupy_global_slots_while_waiting() {
+        let limits = ResourceLimits {
+            cpu: 2,
+            gpu: 1,
+            model: 1,
+            media: 1,
+            agent: 1,
+        };
+        let gate = Arc::new(ExecutionGate::new_with_resource_limits(config(2, 6), limits).unwrap());
+        let release_gpu = Arc::new(Notify::new());
+
+        let (first_started_tx, first_started_rx) = oneshot::channel();
+        let first_gate = Arc::clone(&gate);
+        let first_release = Arc::clone(&release_gpu);
+        let first = tokio::spawn(async move {
+            let mut started = Some(first_started_tx);
+            first_gate
+                .run_for_resources(
+                    ResourceRequest::GPU_MODEL,
+                    "gpu-model-1",
+                    watch::channel(false).1,
+                    move |_, _| {
+                        let started = started.take();
+                        let release = Arc::clone(&first_release);
+                        async move {
+                            if let Some(started) = started {
+                                let _ = started.send(());
+                            }
+                            release.notified().await;
+                            Ok(json!({"gpu": 1}))
+                        }
+                    },
+                )
+                .await
+        });
+        first_started_rx.await.unwrap();
+
+        let (second_started_tx, mut second_started_rx) = oneshot::channel();
+        let second_gate = Arc::clone(&gate);
+        let second = tokio::spawn(async move {
+            let mut started = Some(second_started_tx);
+            second_gate
+                .run_for_resources(
+                    ResourceRequest::GPU_MODEL,
+                    "gpu-model-2",
+                    watch::channel(false).1,
+                    move |_, _| {
+                        let started = started.take();
+                        async move {
+                            if let Some(started) = started {
+                                let _ = started.send(());
+                            }
+                            Ok(json!({"gpu": 2}))
+                        }
+                    },
+                )
+                .await
+        });
+
+        for _ in 0..50 {
+            if gate.admitted_count() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        assert_eq!(gate.admitted_count(), 2);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut second_started_rx)
+                .await
+                .is_err(),
+            "a second GPU/model task must wait behind the GPU and model class ceilings"
+        );
+
+        let (cpu_started_tx, cpu_started_rx) = oneshot::channel();
+        let cpu_result = gate
+            .run_for_resources(
+                ResourceRequest::CPU,
+                "cpu-discovery",
+                watch::channel(false).1,
+                {
+                    let mut started = Some(cpu_started_tx);
+                    move |_, _| {
+                        let started = started.take();
+                        async move {
+                            if let Some(started) = started {
+                                let _ = started.send(());
+                            }
+                            Ok(json!({"cpu": true}))
+                        }
+                    }
+                },
+            )
+            .await;
+        assert!(cpu_result.is_ok());
+        cpu_started_rx.await.unwrap();
+
+        release_gpu.notify_one();
+        assert!(first.await.unwrap().is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), &mut second_started_rx)
+                .await
+                .unwrap()
+                .is_ok()
+        );
+        assert!(second.await.unwrap().is_ok());
+        assert_eq!(gate.admitted_count(), 0);
+        assert_eq!(gate.available_resource_permits(ResourceClass::Gpu), 1);
+        assert_eq!(gate.available_resource_permits(ResourceClass::Model), 1);
+    }
+
+    #[tokio::test]
+    async fn cancellation_while_waiting_for_resource_releases_admission() {
+        let gate = Arc::new(
+            ExecutionGate::new_with_resource_limits(
+                config(2, 4),
+                ResourceLimits {
+                    cpu: 2,
+                    gpu: 1,
+                    model: 1,
+                    media: 1,
+                    agent: 1,
+                },
+            )
+            .unwrap(),
+        );
+        let release_gpu = Arc::new(Notify::new());
+        let (started_tx, started_rx) = oneshot::channel();
+        let first_gate = Arc::clone(&gate);
+        let first_release = Arc::clone(&release_gpu);
+        let first = tokio::spawn(async move {
+            let mut started = Some(started_tx);
+            first_gate
+                .run_for_resources(
+                    ResourceRequest::GPU_MODEL,
+                    "gpu-holder",
+                    watch::channel(false).1,
+                    move |_, _| {
+                        let started = started.take();
+                        let release = Arc::clone(&first_release);
+                        async move {
+                            if let Some(started) = started {
+                                let _ = started.send(());
+                            }
+                            release.notified().await;
+                            Ok(json!({"held": true}))
+                        }
+                    },
+                )
+                .await
+        });
+        started_rx.await.unwrap();
+
+        let (cancel, cancellation) = watch::channel(false);
+        let second_gate = Arc::clone(&gate);
+        let second = tokio::spawn(async move {
+            second_gate
+                .run_for_resources(
+                    ResourceRequest::GPU_MODEL,
+                    "gpu-waiter",
+                    cancellation,
+                    |_, _| async { Ok(json!({"should_not_run": true})) },
+                )
+                .await
+        });
+        for _ in 0..50 {
+            if gate.admitted_count() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        assert_eq!(gate.admitted_count(), 2);
+        cancel.send(true).unwrap();
+        assert_eq!(
+            second.await.unwrap(),
+            Err(ExecutionError::Cancelled { attempts: 0 })
+        );
+        assert_eq!(gate.admitted_count(), 1);
+
+        release_gpu.notify_one();
+        assert!(first.await.unwrap().is_ok());
+        assert_eq!(gate.admitted_count(), 0);
+
+        let retry = gate
+            .run_for_resources(
+                ResourceRequest::GPU_MODEL,
+                "gpu-after-cancel",
+                watch::channel(false).1,
+                |_, _| async { Ok(json!({"ok": true})) },
+            )
+            .await;
+        assert!(retry.is_ok());
+    }
+
+    #[tokio::test]
+    async fn resource_request_must_not_be_empty() {
+        let gate = ExecutionGate::new(config(1, 2)).unwrap();
+        let result = gate
+            .run_for_resources(
+                ResourceRequest(0),
+                "empty-resource-set",
+                watch::channel(false).1,
+                |_, _| async { Ok(json!({"unexpected": true})) },
+            )
+            .await;
+        assert_eq!(result, Err(ExecutionError::InvalidResourceRequest));
+        assert_eq!(gate.admitted_count(), 0);
+    }
+
     #[tokio::test]
     async fn enforces_execution_concurrency_limit() {
         let gate = Arc::new(ExecutionGate::new(config(1, 2)).unwrap());
@@ -914,5 +1344,95 @@ mod tests {
             .await;
         assert_eq!(result, Err(ExecutionError::TimedOut { attempts: 1 }));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn managed_runner_cancellation_releases_admission_while_waiting_for_permit() {
+        let gate = Arc::new(ExecutionGate::new(config(1, 2)).unwrap());
+        let release = Arc::new(Notify::new());
+        let holder_started = Arc::new(Notify::new());
+        let holder_gate = Arc::clone(&gate);
+        let holder_started_for_runner = Arc::clone(&holder_started);
+        let holder_release_for_runner = Arc::clone(&release);
+        let holder = tokio::spawn(async move {
+            holder_gate
+                .run("holder", watch::channel(false).1, move |_, _| {
+                    let started = Arc::clone(&holder_started_for_runner);
+                    let release = Arc::clone(&holder_release_for_runner);
+                    async move {
+                        started.notify_one();
+                        release.notified().await;
+                        Ok(json!({"holder": true}))
+                    }
+                })
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), holder_started.notified())
+            .await
+            .expect("holder execution should start");
+
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let waiting_gate = Arc::clone(&gate);
+        let waiting = tokio::spawn(async move {
+            waiting_gate
+                .run_managed("waiting-provider", cancel_rx, |_| async {
+                    Ok(json!({"unexpected": "runner started"}))
+                })
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while gate.admitted_count() != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("managed task should be admitted while waiting for the shared permit");
+
+        cancel_tx.send(true).unwrap();
+        assert_eq!(
+            waiting.await.unwrap(),
+            Err(ExecutionError::Cancelled { attempts: 0 })
+        );
+        assert_eq!(gate.admitted_count(), 1);
+
+        release.notify_one();
+        assert!(holder.await.unwrap().is_ok());
+        assert_eq!(gate.admitted_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn managed_runner_passes_cancellation_to_provider_cleanup() {
+        let gate = Arc::new(ExecutionGate::new(config(1, 2)).unwrap());
+        let cleaned_up = Arc::new(AtomicUsize::new(0));
+        let cleanup_flag = Arc::clone(&cleaned_up);
+        let (started_tx, started_rx) = oneshot::channel();
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+
+        let managed = tokio::spawn(async move {
+            gate.run_managed(
+                "provider-cleanup",
+                cancel_rx,
+                move |mut cancellation| async move {
+                    let _ = started_tx.send(());
+                    cancellation
+                        .changed()
+                        .await
+                        .map_err(|_| "cancellation channel closed unexpectedly".to_string())?;
+                    if !*cancellation.borrow() {
+                        return Err("provider cleanup received a non-cancellation update".into());
+                    }
+                    cleanup_flag.store(1, Ordering::Release);
+                    Ok(json!({"provider_cleanup": "confirmed"}))
+                },
+            )
+            .await
+        });
+
+        started_rx.await.unwrap();
+        cancel_tx.send(true).unwrap();
+        let result = managed.await.unwrap().unwrap();
+        assert_eq!(result, json!({"provider_cleanup": "confirmed"}));
+        assert_eq!(cleaned_up.load(Ordering::Acquire), 1);
     }
 }

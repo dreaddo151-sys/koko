@@ -4,6 +4,8 @@
 //! auto-discovered or registered by this crate. Callers must enforce DREAD
 //! approval before task submission; imported capabilities start disabled.
 
+pub mod extensions;
+
 pub mod deerflow;
 pub mod hermes;
 pub mod openhands;

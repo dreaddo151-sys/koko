@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Activity, AlertCircle, Bot, Check, ChevronRight, Cpu, Gauge, KeyRound, Layers3, LockKeyhole, LogOut, MessageSquare, Play, Plus, Radio, RefreshCw, Search, Server, ShieldCheck, TerminalSquare, X, Zap, Workflow } from "lucide-react";
+import { Activity, AlertCircle, Bot, Check, ChevronRight, Cpu, FolderSearch, Gauge, KeyRound, Layers3, LockKeyhole, LogOut, MessageSquare, Play, Plus, Radio, RefreshCw, Search, Server, ShieldCheck, TerminalSquare, X, Zap, Workflow } from "lucide-react";
 
 type Model = { id: string };
 type Task = { id: string; title: string; task_type: string; status: string; created_at: number };
@@ -11,15 +11,26 @@ type MissionDetail = { mission_id: string; graph: { mission_id: string; nodes: M
 type Agent = { id: string; name: string; status: string; adapter?: string };
 type Event = { sequence: number; event_type: string; actor: string; created_at: number; payload?: Record<string, unknown> };
 type Result = { result?: unknown; error?: string | null; attempts?: number; elapsed_ms?: number };
+type TokenUsage = { provider: string; prompt_tokens: number; completion_tokens: number; total_tokens: number; measured_responses: number; responses_without_usage: number; scan_limit: number; note: string };
 type Capability = { id: string; name: string; kind: string; description: string; version?: string | null; license?: string | null; compatibility: string; dependencies: string[]; adapter?: string | null; status: string; provenance: { source_name: string; source_version?: string | null } };
 type SkillPreview = { id: string; name: string; description: string; content: string; trust: string; execution: string };
 type Service = { id: string; name: string; role: string; status: string; http_status?: number | null; latency_ms?: number; summary?: string | null; detail?: string };
-type GpuDevice = { vendor: string; name: string; compute_capability: string | null; vram_mib: number | null; vram_used_mib: number | null; vram_free_mib: number | null; driver_version: string | null; pcie_link_gen: number | null; pcie_link_width: number | null; pcie_link_gen_max: number | null; pcie_link_width_max: number | null; utilization_percent: number | null; temperature_c: number | null; power_draw_mw: number | null };
+type GpuDevice = { vendor: string; name: string; device_id: string | null; device_index: number | null; pci_bus_id: string | null; compute_capability: string | null; vram_mib: number | null; vram_used_mib: number | null; vram_free_mib: number | null; driver_version: string | null; pcie_link_gen: number | null; pcie_link_width: number | null; pcie_link_gen_max: number | null; pcie_link_width_max: number | null; utilization_percent: number | null; temperature_c: number | null; power_draw_mw: number | null };
 type StorageDevice = { source: string; filesystem: string; mount_point: string; total_mib: number | null; used_mib: number | null; available_mib: number | null };
 type StoragePartition = { name: string; filesystem: string | null; mount_points: string[] };
 type PhysicalStorageDevice = { name: string; model: string | null; transport: string | null; size_mib: number | null; partitions: StoragePartition[] };
 type HostProfile = { os: string; architecture: string; distribution: string | null; distribution_version: string | null; kernel_release: string | null; cpu_model: string | null; cpu_physical_cores: number | null; cpu_logical_threads: number | null; cpu_sockets: number | null; cpu_cores_per_socket: number | null; cpu_threads_per_core: number | null; cpu_numa_nodes: number | null; cuda_version: string | null; cuda_toolkit_version: string | null; cuda_toolkits: {version: string; compiler_path: string}[]; cpu_threads: number; memory_total_mib: number | null; memory_available_mib: number | null; root_disk_total_mib: number | null; root_disk_available_mib: number | null; storage_devices: StorageDevice[]; physical_storage_devices: PhysicalStorageDevice[]; gpu_devices: GpuDevice[]; llama_server: string | null; nvidia_smi_available: boolean; rocm_smi_available: boolean; xpu_smi_available: boolean; inference_backend: string };
-type Page = "overview" | "missions" | "tasks" | "agents" | "capabilities" | "models" | "gpu";
+type SupervisorTelemetry = { source: string; read_only: boolean; sampled_at_unix_ms: number; devices: { index: number | null; name: string; utilization_percent: number | null; memory_used_mib: number | null; memory_total_mib: number | null; temperature_c: number | null; power_w: number | null; pcie_generation: number | null; pcie_width: number | null }[] };
+
+type GgufMetadata = { version: number; tensor_count: number; metadata_count: number; model_name: string | null; architecture: string | null; context_length: number | null; file_type_code: number | null; quantization_version: number | null };
+type LocalModel = { id: string; name: string; model_kind: string; format: string; root: string; relative_path: string; size_bytes: number; status: string; metadata_status: string; metadata_error: string | null; gguf_metadata: GgufMetadata | null };
+type LocalWorkflow = { id: string; name: string; relative_path: string; format: string; node_count: number; node_types: string[]; status: string; execution: string };
+type LocalPlugin = { id: string; name: string; display_name: string; version?: string | null; ecosystem: string; manifest_path: string; components: {agents:number;skills:number;commands:number;hooks:number;mcp_servers:number;tools:number}; status: string; trust: string; execution: string };
+type AgentManifest = { id: string; name: string; adapter: string; health_url: string; version?: string | null; description?: string | null; capabilities: string[]; manifest_path: string; enabled: boolean; status: string; execution: string };
+type RepairFinding = { component_id: string; severity: string; condition: string; observed_state: string; evidence: string; recommended_action: string; requires_operator_approval: boolean; auto_apply_eligible: boolean; status: string };
+type RepairPlan = { status: string; checked_components: number; findings: RepairFinding[]; summary: string; safety_boundary: string };
+type ComfyUiMonitor = { status: string; endpoint: string; queue: {status:string;data?:{running_count:number;pending_count:number;running:{prompt_id:string}[];pending:{prompt_id:string}[]}|null;error?:string|null}; history: {status:string;data?:{prompt_id:string;status:string;completed:boolean;outputs:{filename:string;media_type:string}[];errors:{event_type:string;message?:string|null}[]}[]|null;error?:string|null}; system: {status:string;error?:string|null} };
+type Page = "overview" | "missions" | "tasks" | "agents" | "capabilities" | "models" | "gpu" | "inventory";
 
 async function api<T>(path: string, token: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
@@ -41,7 +52,7 @@ const mib = (value: number | null) => value === null ? "NOT REPORTED" : `${(valu
 
 function Pill({value}:{value:string}) {
   const s = value.toLowerCase();
-  const tone = ["online","ok","completed","approved","ready"].includes(s) ? "good" : ["running","queued","pending_approval","waiting_for_confirmation"].includes(s) ? "warm" : ["failed","offline","cancelled","degraded","locked"].includes(s) ? "bad" : "";
+  const tone = ["online","ok","completed","approved","ready"].includes(s) ? "good" : ["running","queued","cancelling","pending_approval","waiting_for_confirmation"].includes(s) ? "warm" : ["failed","offline","cancelled","degraded","locked"].includes(s) ? "bad" : "";
   return <span className={`pill ${tone}`}><i />{value.replaceAll("_"," ")}</span>;
 }
 function App() {
@@ -57,9 +68,20 @@ function App() {
   {"id":"summarize","depends_on":["discover"],"priority":1,"task_type":"service_discovery","payload":{}}
 ]`);
   const [skillPreview,setSkillPreview]=useState<SkillPreview|null>(null); const [notice,setNotice]=useState(""); const [selectedSkills,setSelectedSkills]=useState<string[]>([]); const [hostProfile,setHostProfile]=useState<HostProfile|null>(null);
-  const [prompt,setPrompt]=useState(""); const [active,setActive]=useState("");
+  const [prompt,setPrompt]=useState(""); const [enhancedPrompt,setEnhancedPrompt]=useState(""); const [enhancing,setEnhancing]=useState(false); const [tokenUsage,setTokenUsage]=useState<TokenUsage|null>(null); const [active,setActive]=useState("");
   const [events,setEvents]=useState<Event[]>([]); const [result,setResult]=useState<Result|null>(null);
   const [page,setPage]=useState<Page>("overview"); const [lastRefresh,setLastRefresh]=useState<number|null>(null);
+  const [localModels,setLocalModels]=useState<LocalModel[]>([]);
+  const [localWorkflows,setLocalWorkflows]=useState<LocalWorkflow[]>([]);
+  const [localPlugins,setLocalPlugins]=useState<LocalPlugin[]>([]);
+  const [supervisorTelemetry,setSupervisorTelemetry]=useState<SupervisorTelemetry|null>(null);
+  const [supervisorTelemetryError,setSupervisorTelemetryError]=useState("");
+  const [agentManifests,setAgentManifests]=useState<AgentManifest[]>([]);
+  const [repairPlan,setRepairPlan]=useState<RepairPlan|null>(null);
+  const inventoryScanInFlight=useRef(false);
+  const [comfyMonitor,setComfyMonitor]=useState<ComfyUiMonitor|null>(null);
+  const [inventoryUpdated,setInventoryUpdated]=useState<number|null>(null);
+  const [inventoryBusy,setInventoryBusy]=useState(false);
 
   const refresh=useCallback(async()=>{
     if(!token){setConnected(false);return;}
@@ -72,6 +94,34 @@ function App() {
     }catch(e){setConnected(false);setError(e instanceof Error?e.message:"API request failed");}
   },[token]);
   useEffect(()=>{void refresh();if(!token)return;const t=window.setInterval(()=>void refresh(),5000);return()=>window.clearInterval(t);},[refresh,token]);
+  const refreshTokenUsage=useCallback(async()=>{
+    if(!token){setTokenUsage(null);return;}
+    try{setTokenUsage(await api<TokenUsage>("/api/usage/tokens",token));}
+    catch{setTokenUsage(null);}
+  },[token]);
+  useEffect(()=>{
+    void refreshTokenUsage();
+    if(!token)return;
+    const timer=window.setInterval(()=>void refreshTokenUsage(),30000);
+    return()=>window.clearInterval(timer);
+  },[refreshTokenUsage,token]);
+  const refreshSupervisorTelemetry=useCallback(async()=>{
+    if(!token){setSupervisorTelemetry(null);setSupervisorTelemetryError("");return;}
+    try{
+      const telemetry=await api<SupervisorTelemetry>("/api/gpu/telemetry",token);
+      setSupervisorTelemetry(telemetry);
+      setSupervisorTelemetryError("");
+    }catch(e){
+      setSupervisorTelemetry(null);
+      setSupervisorTelemetryError(e instanceof Error?e.message:"Supervisor telemetry unavailable");
+    }
+  },[token]);
+  useEffect(()=>{
+    if(page!=="gpu"||!token){return;}
+    void refreshSupervisorTelemetry();
+    const timer=window.setInterval(()=>void refreshSupervisorTelemetry(),30000);
+    return()=>window.clearInterval(timer);
+  },[page,token,refreshSupervisorTelemetry]);
   useEffect(()=>{if(models.length&&!models.some(x=>x.id===model))setModel(models[0].id);},[models,model]);
   useEffect(()=>{
     if(!token||!selectedMission){setMissionDetail(null);return;}
@@ -98,7 +148,38 @@ function App() {
     void load();const t=window.setInterval(()=>void load(),2500);
     return()=>{dead=true;window.clearInterval(t);};
   },[active,token]);
-  const stats=useMemo(()=>({active:tasks.filter(x=>["queued","running"].includes(x.status)).length,pending:tasks.filter(x=>x.status==="pending_approval").length,done:tasks.filter(x=>x.status==="completed").length}),[tasks]);
+  const refreshInventory=useCallback(async()=>{
+    if(!token||inventoryScanInFlight.current)return;
+    inventoryScanInFlight.current=true;
+    setInventoryBusy(true);
+    const [modelsResult,mediaResult,workflowsResult,pluginsResult,agentsResult,repairResult]=await Promise.allSettled([
+      api<{models:LocalModel[]}>("/api/models/local",token),
+      api<ComfyUiMonitor>("/api/media/comfyui/monitor",token),
+      api<{workflows:LocalWorkflow[]}>("/api/media/workflows/discover",token),
+      api<{plugins:LocalPlugin[]}>("/api/extensions/discover",token),
+      api<{manifests:AgentManifest[]}>("/api/agents/manifests/discover",token),
+      api<RepairPlan>("/api/repair/plan",token)
+    ]);
+    const failures:string[]=[];
+    if(modelsResult.status==="fulfilled")setLocalModels(modelsResult.value.models??[]);else failures.push("local model inventory");
+    if(mediaResult.status==="fulfilled")setComfyMonitor(mediaResult.value);else failures.push("ComfyUI monitor");
+    if(workflowsResult.status==="fulfilled")setLocalWorkflows(workflowsResult.value.workflows??[]);else failures.push("workflow catalog");
+    if(pluginsResult.status==="fulfilled")setLocalPlugins(pluginsResult.value.plugins??[]);else failures.push("plugin inventory");
+    if(agentsResult.status==="fulfilled")setAgentManifests(agentsResult.value.manifests??[]);else failures.push("agent manifest inventory");
+    if(repairResult.status==="fulfilled")setRepairPlan(repairResult.value);else failures.push("diagnostic repair plan");
+    if(failures.length)setError("Could not refresh: "+failures.join(", "));
+    else setError("");
+    setInventoryUpdated(Date.now());
+    setInventoryBusy(false);
+    inventoryScanInFlight.current=false;
+  },[token]);
+  useEffect(()=>{
+    if(page!=="inventory"||!token)return;
+    void refreshInventory();
+    const timer=window.setInterval(()=>void refreshInventory(),30000);
+    return()=>window.clearInterval(timer);
+  },[page,token,refreshInventory]);
+  const stats=useMemo(()=>({active:tasks.filter(x=>["queued","running","cancelling"].includes(x.status)).length,pending:tasks.filter(x=>x.status==="pending_approval").length,done:tasks.filter(x=>x.status==="completed").length}),[tasks]);
   const onlineServices=services.filter(x=>x.status==="ONLINE").length;
   const comfy=services.find(x=>x.id==="comfyui");
   const connect=()=>{if(!draft.trim()){setError("Enter DREAD_API_TOKEN.");return;}setToken(draft.trim());setDraft("");};
@@ -110,6 +191,26 @@ function App() {
       const out=await api<{item:Task}>("/api/tasks",token,{method:"POST",body:JSON.stringify({title:type==="gpu_chat"?`Chat · ${model}`:"Local service discovery",task_type:type,payload})});
       setTasks(x=>[out.item,...x]);setActive(out.item.id);setPage("tasks");if(type==="gpu_chat")setPrompt("");
     }catch(e){setError(e instanceof Error?e.message:"Task creation failed");}finally{setBusy(false);}
+  };
+  const enhancePrompt=async()=>{
+    if(!token||!supervisorOnline||!model||!prompt.trim())return;
+    setEnhancing(true);setError("");setEnhancedPrompt("");
+    try{
+      const out=await api<{enhanced_prompt:string;requires_operator_review:boolean;submitted:boolean}>(
+        "/api/prompt/enhance",token,
+        {method:"POST",body:JSON.stringify({model,prompt:prompt.trim()})}
+      );
+      if(!out.requires_operator_review||out.submitted)throw new Error("Prompt service did not return a review-only preview.");
+      setEnhancedPrompt(out.enhanced_prompt);
+      setNotice("An enhanced prompt preview is ready. Nothing was submitted or executed.");
+    }catch(e){setError(e instanceof Error?e.message:"Prompt enhancement failed");}
+    finally{setEnhancing(false);}
+  };
+  const applyEnhancedPrompt=()=>{
+    if(!enhancedPrompt)return;
+    setPrompt(enhancedPrompt);
+    setEnhancedPrompt("");
+    setNotice("Enhanced prompt applied to the composer only. Queueing still requires your separate action and task approval.");
   };
   const planMission=async()=>{
     if(!token)return;
@@ -201,7 +302,7 @@ function App() {
     }catch(e){setError(e instanceof Error?e.message:"Capability removal failed");}
     finally{setBusy(false);}
   };
-  const disconnect=()=>{setToken("");setDraft("");setPage("overview");setActive("");setEvents([]);setResult(null);setTasks([]);setMissions([]);setSelectedMission("");setMissionDetail(null);setAgents([]);setCapabilities([]);setModels([]);setServices([]);setModel("");setConnected(false);setSupervisorConfigured(false);};
+  const disconnect=()=>{setToken("");setDraft("");setPage("overview");setActive("");setEvents([]);setResult(null);setTasks([]);setMissions([]);setSelectedMission("");setMissionDetail(null);setAgents([]);setCapabilities([]);setModels([]);setServices([]);setModel("");setPrompt("");setEnhancedPrompt("");setTokenUsage(null);setEnhancing(false);setSupervisorTelemetry(null);setSupervisorTelemetryError("");setLocalModels([]);setLocalWorkflows([]);setLocalPlugins([]);setAgentManifests([]);setComfyMonitor(null);setRepairPlan(null);setInventoryUpdated(null);setInventoryBusy(false);inventoryScanInFlight.current=false;setConnected(false);setSupervisorConfigured(false);};
   const activeTask=tasks.find(x=>x.id===active);
   const latestWaitEvent=[...events].reverse().find(event=>event.event_type==="agent_waiting_for_confirmation");
   const pendingActionEvent=latestWaitEvent?[...events].reverse().find(event=>event.event_type==="ActionEvent"&&event.sequence<latestWaitEvent.sequence):undefined;
@@ -230,7 +331,7 @@ function App() {
     finally{setBusy(false);}
   };
   const nav:[Page,string,ReactNode,string][]=[
-    ["overview","Command deck",<Activity/>,"01"],["gpu","GPU telemetry",<Gauge/>,"02"],["models","Model arsenal",<Layers3/>,"03"],["agents","Agent network",<Bot/>,"04"],["missions","Mission DAG",<Workflow/>,"05"],["tasks","Task queue",<Workflow/>,"06"],["capabilities","Pstack registry",<ShieldCheck/>,"07"]
+    ["overview","Command deck",<Activity/>,"01"],["gpu","GPU telemetry",<Gauge/>,"02"],["models","Model arsenal",<Layers3/>,"03"],["agents","Agent network",<Bot/>,"04"],["missions","Mission DAG",<Workflow/>,"05"],["tasks","Task queue",<Workflow/>,"06"],["capabilities","Pstack registry",<ShieldCheck/>,"07"],["inventory","Local inventory",<FolderSearch/>,"08"]
   ];
   return <div className="shell">
     <aside className="sidebar">
@@ -246,29 +347,83 @@ function App() {
         <div className="heading"><div><h1>{page==="overview"?"Command deck":page==="missions"?"Mission orchestrator":page==="tasks"?"Task queue":page==="agents"?"Agent network":page==="capabilities"?"Pstack capability registry":page==="models"?"Model arsenal":"GPU telemetry"}</h1><p>Observe, coordinate and operate your local AI stack without crossing its safety boundaries.</p></div><div className="workstation"><span className="workstation-mark"><Cpu size={15}/></span><div><b>{hostProfile?`${hostProfile.gpu_devices.length} GPU DEVICE(S) / ${(hostProfile.distribution??hostProfile.os).toUpperCase()}`:"HOST DISCOVERY PENDING"}</b><small>{hostProfile?`${hostProfile.architecture.toUpperCase()} · ${hostProfile.cpu_physical_cores??"?"} CORES / ${hostProfile.cpu_logical_threads??"?"} LOGICAL THREADS / ${hostProfile.cpu_threads} AVAILABLE`:"LOCAL NODE / LOOPBACK"}</small></div><Pill value={connected?"LINKED":"LOCKED"}/></div></div>
         {!token&&<div className="connect"><LockKeyhole size={21}/><div><b>AUTHENTICATE COMMAND LINK</b><small>Bearer token remains in page memory only. Never persisted to browser storage.</small></div><div className="token"><KeyRound size={15}/><input type={show?"text":"password"} value={draft} onChange={e=>setDraft(e.target.value)} onKeyDown={e=>e.key==="Enter"&&connect()} placeholder="DREAD API ACCESS TOKEN"/><button className="icon" onClick={()=>setShow(!show)}><Search size={14}/></button><button className="primary" onClick={connect}>ESTABLISH LINK</button></div></div>}
         {error&&<div className="error"><AlertCircle size={16}/>{error}<button onClick={()=>setError("")}><X size={14}/></button></div>}
-        {hostProfile&&<section className="panel host-panel"><PanelTitle icon={<Cpu/>} title="AUTO-DISCOVERED HOST PROFILE" meta="READ-ONLY / NO HOST MUTATIONS"/><div className="host-grid"><div><small>UBUNTU / DISTRIBUTION</small><b>{hostProfile.distribution??hostProfile.os} {hostProfile.distribution_version??""} · {hostProfile.architecture}</b></div><div><small>KERNEL</small><b>{hostProfile.kernel_release??"NOT REPORTED"}</b></div><div><small>CPU MODEL</small><b>{hostProfile.cpu_model??"NOT REPORTED"}</b></div><div><small>CPU PHYSICAL CORES / LOGICAL THREADS / AVAILABLE</small><b>{hostProfile.cpu_physical_cores??"N/A"} / {hostProfile.cpu_logical_threads??"N/A"} / {hostProfile.cpu_threads}</b></div><div><small>CPU SOCKET / CORE / NUMA TOPOLOGY</small><b>{hostProfile.cpu_sockets??"?"} SOCKET(S) · {hostProfile.cpu_cores_per_socket??"?"} CORE(S)/SOCKET · {hostProfile.cpu_threads_per_core??"?"} THREAD(S)/CORE · {hostProfile.cpu_numa_nodes??"?"} NUMA NODE(S)</b></div><div><small>NVIDIA DRIVER CUDA COMPATIBILITY</small><b>{hostProfile.cuda_version??"NOT REPORTED"}</b></div><div><small>CUDA TOOLKITS / COMPILERS</small><b>{hostProfile.cuda_toolkits.length?hostProfile.cuda_toolkits.map(toolkit=>`${toolkit.version} · ${toolkit.compiler_path}`).join(" | "):hostProfile.cuda_toolkit_version??"NOT FOUND"}</b></div><div><small>RAM TOTAL / AVAILABLE</small><b>{mib(hostProfile.memory_total_mib)} / {mib(hostProfile.memory_available_mib)}</b></div><div><small>ROOT DISK TOTAL / FREE</small><b>{mib(hostProfile.root_disk_total_mib)} / {mib(hostProfile.root_disk_available_mib)}</b></div><div><small>SELECTED INFERENCE BACKEND</small><b>{hostProfile.inference_backend}</b></div><div><small>LLAMA-SERVER EXECUTABLE</small><b>{hostProfile.llama_server??"NOT DISCOVERED (SUPERVISOR MAY LAUNCH ON DEMAND)"}</b></div></div><div className="host-gpus">{hostProfile.gpu_devices.length?hostProfile.gpu_devices.map((gpu,index)=><div className="row" key={`${gpu.vendor}-${index}`}><div><b>{gpu.name}</b><small>{gpu.vendor.toUpperCase()} · {gpu.vram_used_mib===null?"VRAM USE N/A":`${gpu.vram_used_mib.toLocaleString()}/${gpu.vram_mib?.toLocaleString()??"?"} MiB · ${gpu.vram_free_mib?.toLocaleString()??"?"} MiB FREE`} · {gpu.driver_version?`DRIVER ${gpu.driver_version}`:"DRIVER N/A"} · {gpu.compute_capability?`COMPUTE ${gpu.compute_capability}`:"COMPUTE N/A"} · {gpu.pcie_link_gen?`PCIe CURRENT Gen${gpu.pcie_link_gen} x${gpu.pcie_link_width??"?"} / MAX Gen${gpu.pcie_link_gen_max??"?"} x${gpu.pcie_link_width_max??"?"}`:"PCIe N/A"} · {gpu.utilization_percent===null?"LOAD N/A":`${gpu.utilization_percent}% LOAD`} · {gpu.temperature_c===null?"TEMP N/A":`${gpu.temperature_c}°C`} · {gpu.power_draw_mw===null?"POWER N/A":`${(gpu.power_draw_mw/1000).toFixed(1)} W`}</small></div><Pill value="DETECTED"/></div>):<Empty text="No supported GPU utility reported a device. CPU-only host remains discoverable."/>}</div><div className="host-storage"><div className="storage-title"><small>MOUNTED PERSISTENT / NETWORK FILESYSTEMS</small><b>{hostProfile.storage_devices.length} MOUNT(S)</b></div>{hostProfile.storage_devices.length?hostProfile.storage_devices.map((disk,index)=><div className="row" key={`${disk.source}-${disk.mount_point}-${index}`}><div><b>{disk.mount_point}</b><small>{disk.source} · {disk.filesystem.toUpperCase()} · {mib(disk.used_mib)} USED / {mib(disk.total_mib)} TOTAL · {mib(disk.available_mib)} FREE</small></div><Pill value="MOUNTED"/></div>):<Empty text="No persistent or network mounts reported by df."/>}</div><div className="host-storage"><div className="storage-title"><small>PHYSICAL DISKS / PARTITIONS (MOUNTED OR UNMOUNTED)</small><b>{hostProfile.physical_storage_devices.length} DISK(S)</b></div>{hostProfile.physical_storage_devices.length?hostProfile.physical_storage_devices.map((disk,index)=><div className="row" key={`${disk.name}-${index}`}><div><b>{disk.name} · {disk.model??"MODEL N/A"}</b><small>{disk.transport?.toUpperCase()??"TRANSPORT N/A"} · {mib(disk.size_mib)} · {disk.partitions.length?disk.partitions.map(part=>`${part.name} ${part.filesystem??"NO FS"} ${part.mount_points.join(", ")||"UNMOUNTED"}`).join(" | "):"NO PARTITIONS REPORTED"}</small></div><Pill value="PHYSICAL DISK"/></div>):<Empty text="No physical block devices reported by lsblk."/>}</div><div className="host-tools"><span>NVIDIA-SMI {hostProfile.nvidia_smi_available?"FOUND":"MISSING"}</span><span>ROCM-SMI {hostProfile.rocm_smi_available?"FOUND":"MISSING"}</span><span>XPU-SMI {hostProfile.xpu_smi_available?"FOUND":"MISSING"}</span><span>PCIe values are a point-in-time snapshot; idle Gen1 downshift is expected. Validate CURRENT vs MAX only under sustained GPU load.</span></div></section>}
+        {hostProfile&&<section className="panel host-panel"><PanelTitle icon={<Cpu/>} title="AUTO-DISCOVERED HOST PROFILE" meta="READ-ONLY / NO HOST MUTATIONS"/><div className="host-grid"><div><small>UBUNTU / DISTRIBUTION</small><b>{hostProfile.distribution??hostProfile.os} {hostProfile.distribution_version??""} · {hostProfile.architecture}</b></div><div><small>KERNEL</small><b>{hostProfile.kernel_release??"NOT REPORTED"}</b></div><div><small>CPU MODEL</small><b>{hostProfile.cpu_model??"NOT REPORTED"}</b></div><div><small>CPU PHYSICAL CORES / LOGICAL THREADS / AVAILABLE</small><b>{hostProfile.cpu_physical_cores??"N/A"} / {hostProfile.cpu_logical_threads??"N/A"} / {hostProfile.cpu_threads}</b></div><div><small>CPU SOCKET / CORE / NUMA TOPOLOGY</small><b>{hostProfile.cpu_sockets??"?"} SOCKET(S) · {hostProfile.cpu_cores_per_socket??"?"} CORE(S)/SOCKET · {hostProfile.cpu_threads_per_core??"?"} THREAD(S)/CORE · {hostProfile.cpu_numa_nodes??"?"} NUMA NODE(S)</b></div><div><small>NVIDIA DRIVER CUDA COMPATIBILITY</small><b>{hostProfile.cuda_version??"NOT REPORTED"}</b></div><div><small>CUDA TOOLKITS / COMPILERS</small><b>{hostProfile.cuda_toolkits.length?hostProfile.cuda_toolkits.map(toolkit=>`${toolkit.version} · ${toolkit.compiler_path}`).join(" | "):hostProfile.cuda_toolkit_version??"NOT FOUND"}</b></div><div><small>RAM TOTAL / AVAILABLE</small><b>{mib(hostProfile.memory_total_mib)} / {mib(hostProfile.memory_available_mib)}</b></div><div><small>ROOT DISK TOTAL / FREE</small><b>{mib(hostProfile.root_disk_total_mib)} / {mib(hostProfile.root_disk_available_mib)}</b></div><div><small>SELECTED INFERENCE BACKEND</small><b>{hostProfile.inference_backend}</b></div><div><small>LLAMA-SERVER EXECUTABLE</small><b>{hostProfile.llama_server??"NOT DISCOVERED (SUPERVISOR MAY LAUNCH ON DEMAND)"}</b></div></div><div className="host-gpus">{hostProfile.gpu_devices.length?hostProfile.gpu_devices.map((gpu,index)=><div className="row" key={`${gpu.device_id??gpu.pci_bus_id??gpu.vendor}-${index}`}><div><b>GPU {gpu.device_index??index} · {gpu.name}</b><small>{gpu.vendor.toUpperCase()} · {gpu.device_id? `ID ${gpu.device_id.slice(0,20)}`:"ID N/A"} · {gpu.pci_bus_id??"PCI BUS N/A"}</small><small>{gpu.vendor.toUpperCase()} · {gpu.vram_used_mib===null?"VRAM USE N/A":`${gpu.vram_used_mib.toLocaleString()}/${gpu.vram_mib?.toLocaleString()??"?"} MiB · ${gpu.vram_free_mib?.toLocaleString()??"?"} MiB FREE`} · {gpu.driver_version?`DRIVER ${gpu.driver_version}`:"DRIVER N/A"} · {gpu.compute_capability?`COMPUTE ${gpu.compute_capability}`:"COMPUTE N/A"} · {gpu.pcie_link_gen?`PCIe CURRENT Gen${gpu.pcie_link_gen} x${gpu.pcie_link_width??"?"} / MAX Gen${gpu.pcie_link_gen_max??"?"} x${gpu.pcie_link_width_max??"?"}`:"PCIe N/A"} · {gpu.utilization_percent===null?"LOAD N/A":`${gpu.utilization_percent}% LOAD`} · {gpu.temperature_c===null?"TEMP N/A":`${gpu.temperature_c}°C`} · {gpu.power_draw_mw===null?"POWER N/A":`${(gpu.power_draw_mw/1000).toFixed(1)} W`}</small></div><Pill value="DETECTED"/></div>):<Empty text="No supported GPU utility reported a device. CPU-only host remains discoverable."/>}</div><div className="host-storage"><div className="storage-title"><small>MOUNTED PERSISTENT / NETWORK FILESYSTEMS</small><b>{hostProfile.storage_devices.length} MOUNT(S)</b></div>{hostProfile.storage_devices.length?hostProfile.storage_devices.map((disk,index)=><div className="row" key={`${disk.source}-${disk.mount_point}-${index}`}><div><b>{disk.mount_point}</b><small>{disk.source} · {disk.filesystem.toUpperCase()} · {mib(disk.used_mib)} USED / {mib(disk.total_mib)} TOTAL · {mib(disk.available_mib)} FREE</small></div><Pill value="MOUNTED"/></div>):<Empty text="No persistent or network mounts reported by df."/>}</div><div className="host-storage"><div className="storage-title"><small>PHYSICAL DISKS / PARTITIONS (MOUNTED OR UNMOUNTED)</small><b>{hostProfile.physical_storage_devices.length} DISK(S)</b></div>{hostProfile.physical_storage_devices.length?hostProfile.physical_storage_devices.map((disk,index)=><div className="row" key={`${disk.name}-${index}`}><div><b>{disk.name} · {disk.model??"MODEL N/A"}</b><small>{disk.transport?.toUpperCase()??"TRANSPORT N/A"} · {mib(disk.size_mib)} · {disk.partitions.length?disk.partitions.map(part=>`${part.name} ${part.filesystem??"NO FS"} ${part.mount_points.join(", ")||"UNMOUNTED"}`).join(" | "):"NO PARTITIONS REPORTED"}</small></div><Pill value="PHYSICAL DISK"/></div>):<Empty text="No physical block devices reported by lsblk."/>}</div><div className="host-tools"><span>NVIDIA-SMI {hostProfile.nvidia_smi_available?"FOUND":"MISSING"}</span><span>ROCM-SMI {hostProfile.rocm_smi_available?"FOUND":"MISSING"}</span><span>XPU-SMI {hostProfile.xpu_smi_available?"FOUND":"MISSING"}</span><span>PCIe values are a point-in-time snapshot; idle Gen1 downshift is expected. Validate CURRENT vs MAX only under sustained GPU load.</span></div></section>}
         <div className="metrics">
           <Metric icon={<Cpu/>} label="GPU SUPERVISOR" value={supervisorOnline?"READY":"LOCKED"} detail="PYTHON LEASE BRIDGE / :11502" tone={supervisorOnline?"cyan":"amber"}/>
           <Metric icon={<Activity/>} label="ACTIVE MISSIONS" value={String(stats.active).padStart(2,"0")} detail={`${stats.pending} AWAITING OPERATOR APPROVAL`} tone="violet"/>
           <Metric icon={<Layers3/>} label="LOCAL MODEL POOL" value={String(models.length).padStart(2,"0")} detail="DISCOVERED VIA GPU GATEWAY" tone="cyan"/>
           <Metric icon={<Radio/>} label="SERVICE UPLINKS" value={String(onlineServices).padStart(2,"0")} detail={`${services.length} CONFIGURED / READ-ONLY PROBES`} tone="green"/>
         </div>
+        <div className="approval token-usage-strip"><Activity size={14}/><span>PROVIDER-REPORTED TOKENS · {tokenUsage?tokenUsage.total_tokens.toLocaleString():"—"} TOTAL · {tokenUsage?tokenUsage.prompt_tokens.toLocaleString():"—"} PROMPT · {tokenUsage?tokenUsage.completion_tokens.toLocaleString():"—"} COMPLETION · {tokenUsage?tokenUsage.measured_responses.toLocaleString():"—"} MEASURED RESPONSES · {tokenUsage?tokenUsage.responses_without_usage.toLocaleString():"—"} WITHOUT USAGE METADATA</span><small>{tokenUsage?"30 SEC REFRESH · NO ESTIMATES":"CONNECT TO LOAD USAGE"}</small></div>
         {page==="overview"&&<div className="command-grid">
           <section className="panel inference-panel"><PanelTitle icon={<Zap/>} title="INFERENCE COMMAND" meta="APPROVAL REQUIRED"/><div className="panel-intro">Submit a local task. Execution remains gated until an operator approves it.</div>
             <label>MODEL ROUTE</label><select value={model} onChange={e=>setModel(e.target.value)} disabled={!token||!models.length}><option value="">Connect to discover local models</option>{models.map(x=><option key={x.id}>{x.id}</option>)}</select>
-            <label>MISSION PROMPT</label><textarea rows={5} value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder="Define the objective for your local model..." disabled={!token}/>
+            <div className="panel-toolbar"><label>MISSION PROMPT</label><button className="secondary" disabled={!token||!supervisorOnline||enhancing||!model||!prompt.trim()} onClick={()=>void enhancePrompt()}>{enhancing?"ENHANCING…":"ENHANCE PROMPT"}</button></div>
+            <textarea rows={5} value={prompt} onChange={e=>{setPrompt(e.target.value);setEnhancedPrompt("");}} placeholder="Define the objective for your local model..." disabled={!token}/>
+            {enhancedPrompt&&<div className="skill-preview"><div className="row"><div><b>ENHANCED PROMPT / REVIEW BEFORE APPLYING</b><small>Preview only · not submitted · model {model}</small></div><button className="link" onClick={()=>setEnhancedPrompt("")}>DISCARD</button></div><pre className="result">{enhancedPrompt}</pre><div className="compose-foot"><small>Review the complete suggestion before applying it to the composer.</small><button className="primary" onClick={applyEnhancedPrompt}>APPLY TO COMPOSER</button></div></div>}
             <div className="skill-picker"><label>APPROVED SKILL CONTEXT / OPTIONAL</label>{capabilities.filter(x=>(x.kind==="skill"||x.kind==="agent")&&x.status==="enabled").length?capabilities.filter(x=>(x.kind==="skill"||x.kind==="agent")&&x.status==="enabled").map(skill=><label className="skill-choice" key={skill.id}><input type="checkbox" checked={selectedSkills.includes(skill.id)} onChange={e=>setSelectedSkills(current=>e.target.checked?[...current,skill.id]:current.filter(id=>id!==skill.id))}/><span>{skill.name}<small>{skill.id}</small></span></label>):<small>No enabled skills or agent profiles. Import, preview and approve them in the Pstack registry.</small>}</div>
             <div className="compose-foot"><small>TEXT ONLY / NON-STREAMING / RESULT CAP 1 MiB</small><button className="primary" disabled={!token||!supervisorOnline||busy||!model||!prompt.trim()} onClick={()=>void create("gpu_chat")}><Plus size={14}/>QUEUE INFERENCE</button></div>
             <div className="approval"><ShieldCheck size={14}/>{supervisorOnline?"Task creation does not execute inference. Operator approval is required.":"GPU inference locked — authenticated Python Supervisor bridge unavailable."}</div>
           </section>
-          <section className="panel gpu-strip"><PanelTitle icon={<Gauge/>} title="DETECTED GPU ARRAY" meta="HOST PROFILE / TELEMETRY OPTIONAL"/><div className="gpu-pair">{hostProfile?.gpu_devices.length?hostProfile.gpu_devices.map((gpu,index)=><GpuCard key={`${gpu.vendor}-${index}`} index={`GPU ${index}`} gpu={gpu}/>):<Empty text="No supported GPU detected. The control plane remains available for CPU-only llama.cpp when configured."/>}</div><div className="telemetry-note"><Activity size={13}/> Read-only hardware samples come from host discovery. The Python GPU Supervisor separately owns inference admission and process lifecycle.</div><button className="link" onClick={()=>setPage("gpu")}>OPEN GPU TELEMETRY <ChevronRight size={14}/></button></section>
+          <section className="panel gpu-strip"><PanelTitle icon={<Gauge/>} title="DETECTED GPU ARRAY" meta="HOST PROFILE / TELEMETRY OPTIONAL"/><div className="gpu-pair">{hostProfile?.gpu_devices.length?hostProfile.gpu_devices.map((gpu,index)=><GpuCard key={`${gpu.vendor}-${index}`} index={`GPU ${gpu.device_index??index}`} gpu={gpu}/>):<Empty text="No supported GPU detected. The control plane remains available for CPU-only llama.cpp when configured."/>}</div><div className="telemetry-note"><Activity size={13}/> Read-only hardware samples come from host discovery. The Python GPU Supervisor separately owns inference admission and process lifecycle.</div><button className="link" onClick={()=>setPage("gpu")}>OPEN GPU TELEMETRY <ChevronRight size={14}/></button></section>
           <section className="panel system-panel"><PanelTitle icon={<Workflow/>} title="SYSTEM SYNAPSE" meta="LIVE SERVICE MAP"/><div className="synapse"><div className="syn-node hub-node"><span className="node-core"><Activity size={18}/></span><b>RUST CORE</b><small>{connected?"API CONNECTED":"AWAITING LINK"}</small></div><div className="syn-branches"><div className="syn-branch"><span className="syn-wire"/><div className="syn-node"><Cpu size={17}/><b>GPU SUPERVISOR</b><small>{supervisorOnline?"AUTHENTICATED":"LOCKED / :11502"}</small></div></div><div className="syn-branch"><span className="syn-wire"/><div className="syn-node"><Server size={17}/><b>COMFYUI RUNTIME</b><small>{comfy?.status??"NOT DISCOVERED"}</small></div></div><div className="syn-branch"><span className="syn-wire"/><div className="syn-node"><Bot size={17}/><b>AGENT FABRIC</b><small>{agents.length} CONFIGURED / READ ONLY</small></div></div></div></div><div className="system-foot"><span><i className="legend-online"/>ONLINE</span><span><i className="legend-locked"/>LOCKED / NOT CONFIGURED</span><span><i className="legend-line"/>DISCOVERY LINK</span></div></section>
           <section className="panel queue-panel"><PanelTitle icon={<Workflow/>} title="MISSION QUEUE" meta="5 SEC REFRESH"/><TaskList tasks={tasks.slice(0,5)} active={active} select={setActive} action={action} busy={busy}/><button className="link" onClick={()=>setPage("tasks")}>OPEN MISSION CONTROL <ChevronRight size={14}/></button></section>
           <section className="panel service-panel"><PanelTitle icon={<Radio/>} title="LOCAL SERVICE MATRIX" meta="READ-ONLY"/>{services.length?services.map(x=><div className="row" key={x.id}><div><b>{x.name}</b><small>{x.role} · {x.latency_ms??"—"} ms</small></div><Pill value={x.status}/></div>):<Empty text="Connect to load configured local services."/>}</section>
           <section className="panel agent-panel"><PanelTitle icon={<Bot/>} title="AGENT FABRIC" meta="ALLOWLISTED LOCAL / EXPLICIT"/>{agents.length?agents.map(x=><div className="row" key={x.id}><div><b>{x.name}</b><small>{x.adapter??x.id}</small></div><Pill value={x.status}/></div>):<Empty text="No known local agent endpoint responded. DREAD probes only allowlisted loopback health URLs; it does not sweep ports or launch agents."/>}<button className="link" onClick={()=>setPage("agents")}>INSPECT AGENT NETWORK <ChevronRight size={14}/></button></section>
         </div>}
-        {page==="gpu"&&<><div className="section-head"><div><label>HARDWARE / RESOURCE DOMAIN</label><h2>GPU telemetry matrix</h2><p>Read-only host samples are displayed independently of inference lease availability.</p></div><Pill value={supervisorOnline?"SUPERVISOR ONLINE":"SUPERVISOR OFFLINE"}/></div><div className="gpu-pair large">{hostProfile?.gpu_devices.length?hostProfile.gpu_devices.map((gpu,index)=><GpuCard key={`${gpu.vendor}-${index}`} index={`GPU ${index}`} gpu={gpu}/>):<Empty text="No supported GPU detected. CPU inference remains available when a local llama.cpp runtime is configured."/>}</div><div className="telemetry-note"><Activity size={13}/> Hardware telemetry is sampled by the host discovery layer. Supervisor status controls inference leases, not whether read-only GPU metrics may be displayed.</div></>}
+        {page==="gpu"&&<>
+          <div className="section-head"><div><label>HARDWARE / RESOURCE DOMAIN</label><h2>GPU telemetry matrix</h2><p>Host hardware discovery and Supervisor runtime samples are displayed separately; neither endpoint changes GPU leases.</p></div><Pill value={supervisorOnline?"SUPERVISOR ONLINE":"SUPERVISOR OFFLINE"}/></div>
+          <div className="gpu-pair large">{hostProfile?.gpu_devices.length?hostProfile.gpu_devices.map((gpu,index)=><GpuCard key={`${gpu.vendor}-${index}`} index={`GPU ${index}`} gpu={gpu}/>):<Empty text="No supported GPU detected. CPU inference remains available when a local llama.cpp runtime is configured."/>}</div>
+          <div className="telemetry-note"><Activity size={13}/> Host discovery is a read-only host snapshot. Supervisor telemetry is a separate authenticated nvidia-smi sample from the Python GPU Supervisor.</div>
+          <section className="panel">
+            <div className="panel-toolbar"><PanelTitle icon={<Gauge/>} title="PYTHON GPU SUPERVISOR TELEMETRY" meta={supervisorTelemetry?.read_only?"READ-ONLY SAMPLE":"NOT AVAILABLE"}/><button className="secondary" disabled={!token||!supervisorOnline} onClick={()=>void refreshSupervisorTelemetry()}><RefreshCw size={14}/>REFRESH</button></div>
+            {supervisorTelemetryError&&<p className="muted">{supervisorTelemetryError}</p>}
+            {supervisorTelemetry?<><p className="muted">{supervisorTelemetry.source} · sampled {new Date(supervisorTelemetry.sampled_at_unix_ms).toLocaleTimeString()} · no lease or model lifecycle operations</p>
+              {supervisorTelemetry.devices.length?supervisorTelemetry.devices.map(device=><div className="row" key={device.index??device.name}><div><b>GPU {device.index??"?"} · {device.name}</b><small>{device.utilization_percent===null?"LOAD N/A":device.utilization_percent+"% LOAD"} · {device.memory_used_mib===null?"VRAM N/A":`${device.memory_used_mib.toLocaleString()}/${device.memory_total_mib?.toLocaleString()??"?"} MiB`} · {device.temperature_c===null?"TEMP N/A":device.temperature_c+"°C"} · {device.power_w===null?"POWER N/A":device.power_w.toFixed(1)+" W"} · {device.pcie_generation===null?"PCIe N/A":`PCIe Gen${device.pcie_generation} x${device.pcie_width??"?"}`}</small></div><Pill value="SUPERVISOR SAMPLE"/></div>):<Empty text="Supervisor bridge returned no supported NVIDIA devices."/>}
+            </>:<Empty text={supervisorTelemetryError||"Supervisor telemetry has not been sampled. Connect the authenticated Python GPU Supervisor to view runtime telemetry."}/>}
+            <p className="muted">Refreshes every 30 seconds only while this GPU page is open. The Supervisor remains the sole GPU lease and process-lifecycle authority.</p>
+          </section>
+        </>}
         {page==="models"&&<section className="panel"><PanelTitle icon={<Layers3/>} title="LOCAL MODEL ARSENAL" meta={`${models.length} DISCOVERED`}/>{models.length?models.map(x=><div className="row" key={x.id}><div><b>{x.id}</b><small>Discovered from local GPU gateway</small></div><Pill value="AVAILABLE"/></div>):<Empty text="No models returned by the local GPU gateway. Confirm gateway and upstream model service status."/>}</section>}
+
+        {page==="inventory"&&<div className="command-grid">
+          <section className="panel">
+            <div className="panel-toolbar"><PanelTitle icon={<FolderSearch/>} title="LOCAL MODEL FILES" meta={String(localModels.length)+" CANDIDATES"}/><button className="secondary" disabled={!token||inventoryBusy} onClick={()=>void refreshInventory()}><RefreshCw size={14}/>REFRESH INVENTORY</button></div>
+            <p className="muted">Filesystem discovery only. These are candidate weight files, not proof of model compatibility or loaded state. Loading and unloading remain under the Python GPU Supervisor.</p>
+            {localModels.length?localModels.slice(0,100).map(item=><div className="row" key={item.id}><div><b>{item.gguf_metadata?.model_name??item.name}</b><small>{item.model_kind} · {item.format.toUpperCase()} · {item.relative_path}</small>{item.gguf_metadata&&<small>GGUF v{item.gguf_metadata.version} · {item.gguf_metadata.architecture??"architecture N/A"} · context {item.gguf_metadata.context_length?.toLocaleString()??"N/A"} · file type code {item.gguf_metadata.file_type_code??"N/A"} · quantization version {item.gguf_metadata.quantization_version??"N/A"}</small>}{item.metadata_error&&<small>Metadata unavailable: {item.metadata_error}</small>}</div><div className="task-actions"><Pill value="discovered_not_loaded"/><Pill value={item.metadata_status}/><small>{(item.size_bytes/1073741824).toFixed(2)} GiB</small></div></div>):<Empty text="No local model files found under configured model roots. Set DREAD_MODEL_ROOTS to scan additional directories."/>}
+            {localModels.length>100&&<p className="muted">Showing first 100 of {localModels.length} discovered files.</p>}
+          </section>
+          <section className="panel">
+            <PanelTitle icon={<Workflow/>} title="COMFYUI MEDIA RUNTIME" meta={comfyMonitor?.status?.toUpperCase()??"NOT CHECKED"}/>
+            {comfyMonitor?<><div className="row"><div><b>Queue running</b><small>{comfyMonitor.queue.error??comfyMonitor.endpoint}</small></div><Pill value={String(comfyMonitor.queue.data?.running_count??"unavailable")}/></div><div className="row"><div><b>Queue pending</b><small>Live queue metadata only</small></div><Pill value={String(comfyMonitor.queue.data?.pending_count??"unavailable")}/></div><div className="row"><div><b>Recent history</b><small>{comfyMonitor.history.error??"Prompt IDs, completion status and output metadata only"}</small></div><Pill value={String(comfyMonitor.history.data?.length??"unavailable")}/></div>{comfyMonitor.history.data?.slice(0,5).map(job=><div className="row" key={job.prompt_id}><div><b>{job.prompt_id.slice(0,16)}</b><small>{job.status} · {job.outputs.length} output(s)</small></div><Pill value={job.completed?"completed":job.status}/></div>)}</>:<Empty text="ComfyUI has not been queried yet. Open this page to run the read-only monitor."/>}
+            <div className="panel-toolbar"><PanelTitle icon={<Layers3/>} title="WORKFLOW CATALOG" meta={String(localWorkflows.length)+" FOUND"}/></div>
+            <p className="muted">Workflow JSON is parsed for node metadata only. Payloads, widget values and credentials are not returned, and discovery never submits a workflow.</p>
+            {localWorkflows.length?localWorkflows.slice(0,60).map(item=><div className="row" key={item.id}><div><b>{item.name}</b><small>{item.format} · {item.node_count} nodes · {item.relative_path}</small><small>{item.node_types.slice(0,6).join(", ")}</small></div><Pill value="not validated"/></div>):<Empty text="No supported ComfyUI workflow JSON files were discovered under the configured workflow roots."/>}
+            {localWorkflows.length>60&&<p className="muted">Showing first 60 of {localWorkflows.length} workflow files.</p>}
+          </section>
+          <section className="panel">
+            <PanelTitle icon={<ShieldCheck/>} title="LOCAL PLUGIN MANIFESTS" meta={String(localPlugins.length)+" DISCOVERED"}/>
+            <p className="muted">Cursor, Claude and generic manifests are inventory metadata only. Discovered plugins are untrusted and disabled; hooks, scripts, tools and MCP servers are never started.</p>
+            {localPlugins.length?localPlugins.slice(0,100).map(item=><div className="row" key={item.id}><div><b>{item.display_name}</b><small>{item.ecosystem} · {item.name}{item.version?" · "+item.version:""}</small><small>{item.manifest_path} · {item.components.skills} skills / {item.components.tools} tools / {item.components.mcp_servers} MCP servers</small></div><div className="task-actions"><Pill value="untrusted"/><Pill value="disabled"/></div></div>):<Empty text="No local plugin manifests found under the configured Cursor / Claude / generic roots."/>}
+            {localPlugins.length>100&&<p className="muted">Showing first 100 of {localPlugins.length} plugin manifests.</p>}
+            <div className="panel-toolbar"><PanelTitle icon={<Bot/>} title="LOCAL AGENT ADAPTER MANIFESTS" meta={String(agentManifests.length)+" CANDIDATES"}/></div>
+            <p className="muted">These manifests are discovered automatically from configured and standard per-user locations. DREAD does not probe the declared URL or start an agent during discovery. A candidate must be reviewed, mapped to a supported adapter, explicitly configured, and separately enabled before health checks or execution.</p>
+            {agentManifests.length?agentManifests.slice(0,100).map(item=><div className="row" key={item.manifest_path}><div><b>{item.name}</b><small>{item.id} · adapter {item.adapter}{item.version?" · "+item.version:""}</small><small>{item.health_url} · {item.manifest_path}</small><small>{item.capabilities.slice(0,8).join(", ")||"No capability metadata"}{item.description?" · "+item.description:""}</small></div><div className="task-actions"><Pill value="review_required"/><Pill value="disabled"/></div></div>):<Empty text="No local agent manifests found. Configure DREAD_AGENT_MANIFEST_ROOTS or add agent.toml / *.agent.toml files under config/agents.d or the per-user DREAD config directory."/>}
+            {agentManifests.length>100&&<p className="muted">Showing first 100 of {agentManifests.length} agent manifests.</p>}
+            <p className="muted">{inventoryUpdated?"Last scan "+new Date(inventoryUpdated).toLocaleTimeString()+".":"Inventory has not been scanned."} Automatic refresh runs every 30 seconds while this page is open.</p>
+          </section>
+          <section className="panel">
+            <PanelTitle icon={<ShieldCheck/>} title="SELF-REPAIR DIAGNOSTICS" meta={repairPlan?.status?.toUpperCase()??"NOT CHECKED"}/>
+            <p className="muted">This is the diagnosis and proposal layer only. It does not edit files, restart services, load/unload models, alter GPU leases or apply repairs.</p>
+            {repairPlan?<><div className="row"><div><b>{repairPlan.summary}</b><small>{repairPlan.checked_components} component(s) observed</small></div><Pill value="diagnostic_plan_only"/></div>
+              {repairPlan.findings.length?repairPlan.findings.map(item=><div className="row" key={item.component_id+item.condition}><div><b>{item.component_id} · {item.condition.replaceAll("_"," ")}</b><small>{item.evidence}</small><small>Proposal: {item.recommended_action}</small></div><div className="task-actions"><Pill value={item.severity}/><Pill value="proposed_not_applied"/></div></div>):<Empty text="No repair findings were produced from the currently observable components."/>}
+              <p className="muted">{repairPlan.safety_boundary}</p>
+            </>:<Empty text="Diagnostic plan has not been loaded."/>}
+          </section>
+          <section className="panel">
+            <div className="row"><div><b>Inventory refresh guard</b><small>Disk scans are serialized; one refresh runs at a time.</small></div><Pill value={inventoryBusy?"running":"idle"}/></div>
+          </section>
+        </div>}
         {page==="missions"&&<div className="task-layout">
           <section className="panel">
             <PanelTitle icon={<Workflow/>} title="MISSION DAG PLANNER" meta="PLAN FIRST / APPROVAL LATER"/>
@@ -320,6 +475,7 @@ function App() {
           </div>
           {!pendingActionId&&<p className="agent-confirmation-warning">The provider action identifier is missing. Refresh the trace; decisions remain disabled.</p>}
         </div>}
+        {activeTask.status==="cancelling"&&<div className="agent-confirmation-status pending"><b>CANCELLATION OUTCOME PENDING</b><p>DREAD sent the cancellation request, but the execution provider has not confirmed a terminal state. The task remains unresolved; do not retry the request.</p></div>}
         {activeTask.status==="running"&&confirmationSubmissionPending&&<div className="agent-confirmation-status pending"><b>OPENHANDS DECISION SUBMITTED</b><p>DREAD has reserved this action and sent the decision to the provider. Wait for the provider state to update; do not retry.</p></div>}
         {activeTask.status==="running"&&confirmationOutcomeUncertain&&<div className="agent-confirmation-status uncertain"><b>OPENHANDS DECISION OUTCOME UNCERTAIN</b><p>The provider did not confirm receipt. This action is locked against duplicate submission. Inspect the provider session or cancel the task; do not retry.</p></div>}
         <div className="events">{events.map(x=><div className="event" key={x.sequence}><code>#{x.sequence}</code><span>{x.event_type.replaceAll("_"," ")}</span><small>{clock(x.created_at)}</small></div>)}{!events.length&&<Empty text="No mission events yet."/>}</div>{result&&<div className="result"><b>EXECUTION RESULT</b><pre>{JSON.stringify(result.result??result.error??result,null,2)}</pre></div>}</>:<Empty text="Select a mission to inspect its audit events and result."/>}</section></div>}
@@ -340,7 +496,7 @@ function GpuCard({index,gpu}:{index:string;gpu:GpuDevice}){
   const temperature=gpu.temperature_c===null?"N/A":`${gpu.temperature_c}°C`;
   const power=gpu.power_draw_mw===null?"N/A":`${(gpu.power_draw_mw/1000).toFixed(1)} W`;
   const pcie=gpu.pcie_link_gen===null?"PCIe N/A":`PCIe Gen${gpu.pcie_link_gen} x${gpu.pcie_link_width??"?"} / Max Gen${gpu.pcie_link_gen_max??"?"} x${gpu.pcie_link_width_max??"?"}`;
-  return <div className="gpu-card"><div className="gpu-card-top"><div className="gpu-chip"><Cpu size={20}/></div><div><small>{index} · {gpu.vendor.toUpperCase()}</small><b>{gpu.name}</b><small>{gpu.driver_version? `DRIVER ${gpu.driver_version}`:"DRIVER N/A"} · {pcie}</small></div><Pill value={hasTelemetry?"TELEMETRY AVAILABLE":"DETECTED / N/A"}/></div><div className="gpu-scope"><div className="scope-grid"/><div className="scope-scan"/><div className="scope-center"><Activity size={19}/><b>{utilization}</b><small>GPU UTILIZATION</small></div></div><div className="gpu-readings"><span><small>UTILIZATION</small><b>{utilization}</b></span><span><small>VRAM USED / TOTAL</small><b>{vram}</b></span><span><small>TEMPERATURE</small><b>{temperature}</b></span><span><small>POWER DRAW</small><b>{power}</b></span></div></div>;
+  return <div className="gpu-card"><div className="gpu-card-top"><div className="gpu-chip"><Cpu size={20}/></div><div><small>{index} · {gpu.vendor.toUpperCase()}</small><b>{gpu.name}</b><small>{gpu.driver_version? `DRIVER ${gpu.driver_version}`:"DRIVER N/A"} · {pcie}</small><small>{gpu.device_id?`ID ${gpu.device_id.slice(0,20)}`:"ID N/A"} · {gpu.pci_bus_id??"PCI BUS N/A"}</small></div><Pill value={hasTelemetry?"TELEMETRY AVAILABLE":"DETECTED / N/A"}/></div><div className="gpu-scope"><div className="scope-grid"/><div className="scope-scan"/><div className="scope-center"><Activity size={19}/><b>{utilization}</b><small>GPU UTILIZATION</small></div></div><div className="gpu-readings"><span><small>UTILIZATION</small><b>{utilization}</b></span><span><small>VRAM USED / TOTAL</small><b>{vram}</b></span><span><small>TEMPERATURE</small><b>{temperature}</b></span><span><small>POWER DRAW</small><b>{power}</b></span></div></div>;
 }
 function TaskList({tasks,active,select,action,busy}:{tasks:Task[];active:string;select:(id:string)=>void;action:(task:Task,verb:"approve"|"run"|"cancel")=>void;busy:boolean}){
   if(!tasks.length)return <Empty text="No missions have been created." />;

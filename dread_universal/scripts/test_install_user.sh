@@ -9,12 +9,16 @@ HOME="$TMP/home"
 PREFIX="$HOME/.local/opt/dread-universal"
 MOCK_BIN="$TMP/mock-bin"
 STATE="$TMP/systemd-state"
+SYSTEMCTL_LOG="$TMP/systemctl.log"
 mkdir -p "$HOME" "$MOCK_BIN" "$PREFIX/config" "$PREFIX/data" "$PREFIX/bin" "$PREFIX/web/dist"
 
 cat > "$MOCK_BIN/systemctl" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$1" == "--user" ]] || exit 2
+if [[ -n "${MOCK_SYSTEMCTL_LOG:-}" ]]; then
+  printf '%s\n' "$*" >> "$MOCK_SYSTEMCTL_LOG"
+fi
 shift
 case "$1" in
   is-active)
@@ -71,12 +75,13 @@ chmod +x "$MOCK_BIN/"*
 printf 'custom-services-config\n' > "$PREFIX/config/services.toml"
 printf 'custom-agents-config\n' > "$PREFIX/config/agents.toml"
 printf 'legacy-sqlite-bytes\n' > "$PREFIX/data/dread_registry.sqlite3"
-printf 'DREAD_API_TOKEN=legacy-api-token-012345678901234567890123456789\nDREAD_GPU_SUPERVISOR_URL=http://127.0.0.1:11502\nDREAD_GPU_SUPERVISOR_TOKEN=legacy-supervisor-token-012345678901234567890123456789\n' > "$PREFIX/.env"
+printf 'DREAD_API_TOKEN=legacy-api-token-012345678901234567890123456789\nDREAD_GPU_SUPERVISOR_URL=http://127.0.0.1:11502\nDREAD_GPU_SUPERVISOR_TOKEN=legacy-supervisor-token-012345678901234567890123456789\nDREAD_GPU_GATEWAY_URL=http://127.0.0.1:11515\nDREAD_COMFYUI_URL=http://127.0.0.1:8189\nDREAD_WORKSPACE=/opt/dread-workspace\nDREAD_MODEL_ROOTS=/models/gguf:/models/comfyui\nDREAD_COMFYUI_WORKFLOW_ROOTS=/workflows\nDREAD_PLUGIN_ROOTS=/plugins\nDREAD_AGENT_MANIFEST_ROOTS=/agents\n' > "$PREFIX/.env"
 
 make_bundle() {
   local version="$1"
   local bundle="$TMP/bundle-$version"
   mkdir -p "$bundle/bin" "$bundle/web/dist/assets" "$bundle/config" "$bundle/scripts" "$bundle/docs"
+  mkdir -p "$bundle/systemd"
   printf '#!/usr/bin/env bash\necho %s\n' "$version" > "$bundle/bin/dread-universal"
   chmod +x "$bundle/bin/dread-universal"
   printf '<div id="root"></div>\n' > "$bundle/web/dist/index.html"
@@ -86,6 +91,9 @@ make_bundle() {
   printf '# docs\n' > "$bundle/README.md"
   printf '# docs\n' > "$bundle/docs/README.md"
   printf '#!/usr/bin/env bash\n' > "$bundle/scripts/helper.sh"
+  install -m 0755 "$ROOT/scripts/dread_watchdog.py" "$bundle/scripts/dread_watchdog.py"
+  install -m 0644 "$ROOT/systemd/dread-watchdog.service" "$bundle/systemd/dread-watchdog.service"
+  install -m 0644 "$ROOT/systemd/dread-watchdog.timer" "$bundle/systemd/dread-watchdog.timer"
   install -m 0755 "$ROOT/scripts/install-user.sh" "$bundle/install-user.sh"
   printf 'test\n' > "$bundle/.env.example"
   printf '%s\n' "$bundle"
@@ -98,6 +106,7 @@ run_installer() {
   MOCK_SYSTEMD_STATE="$STATE" \
   MOCK_SYSTEMD_ENABLED="$TMP/systemd-enabled" \
   MOCK_UNIT_FILE="$HOME/.config/systemd/user/dread-universal.service" \
+  MOCK_SYSTEMCTL_LOG="$SYSTEMCTL_LOG" \
   PATH="$MOCK_BIN:$PATH" \
   bash "$bundle/install-user.sh" 2>/dev/null
 }
@@ -109,14 +118,41 @@ grep -q 'custom-services-config' "$HOME/.config/dread-universal/services.toml"
 grep -q 'legacy-sqlite-bytes' "$HOME/.local/share/dread-universal/data/dread_registry.sqlite3"
 grep -q 'legacy-api-token' "$HOME/.config/dread-universal/dread.env"
 grep -q 'legacy-supervisor-token' "$HOME/.config/dread-universal/dread.env"
+grep -q '^DREAD_GPU_GATEWAY_URL=http://127.0.0.1:11515$' "$HOME/.config/dread-universal/dread.env"
+grep -q '^DREAD_COMFYUI_URL=http://127.0.0.1:8189$' "$HOME/.config/dread-universal/dread.env"
+grep -q '^DREAD_WORKSPACE=/opt/dread-workspace$' "$HOME/.config/dread-universal/dread.env"
+grep -q '^DREAD_MODEL_ROOTS=/models/gguf:/models/comfyui$' "$HOME/.config/dread-universal/dread.env"
+grep -q '^DREAD_COMFYUI_WORKFLOW_ROOTS=/workflows$' "$HOME/.config/dread-universal/dread.env"
+grep -q '^DREAD_PLUGIN_ROOTS=/plugins$' "$HOME/.config/dread-universal/dread.env"
+grep -q '^DREAD_AGENT_MANIFEST_ROOTS=/agents$' "$HOME/.config/dread-universal/dread.env"
+! grep -q '^Environment=DREAD_GPU_GATEWAY_URL=' "$HOME/.config/systemd/user/dread-universal.service"
+WATCHDOG_SERVICE_FILE="$HOME/.config/systemd/user/dread-watchdog.service"
+WATCHDOG_TIMER_FILE="$HOME/.config/systemd/user/dread-watchdog.timer"
+[[ -f "$WATCHDOG_SERVICE_FILE" && -f "$WATCHDOG_TIMER_FILE" ]]
+grep -Fq "$PREFIX/scripts/dread_watchdog.py --apply" "$WATCHDOG_SERVICE_FILE"
+grep -Fq "$HOME/.local/state/dread-universal" "$WATCHDOG_SERVICE_FILE"
+grep -Fq 'OnUnitActiveSec=60s' "$WATCHDOG_TIMER_FILE"
+! grep -q 'enable --now dread-watchdog.timer' "$SYSTEMCTL_LOG"
+[[ "$(stat -c '%a' "$WATCHDOG_SERVICE_FILE")" == 600 ]]
+[[ "$(stat -c '%a' "$WATCHDOG_TIMER_FILE")" == 600 ]]
 [[ "$(stat -c '%a' "$HOME/.config/dread-universal/dread.env")" == 600 ]]
 [[ "$(cat "$STATE")" == active ]]
 
 printf 'keep-backup-marker\n' > "$PREFIX/previous-release-marker"
+# Preserve operator-managed watchdog policy through a normal upgrade.
+printf '[Service]\n# operator-watchdog-override\n' > "$HOME/.config/systemd/user/dread-watchdog.service"
+printf '[Timer]\n# operator-watchdog-timer-override\n' > "$HOME/.config/systemd/user/dread-watchdog.timer"
+# A legacy per-app .env may still exist alongside an already-created per-user
+# config. Missing allowlisted keys must be merged without replacing user values.
+printf 'DREAD_COMFYUI_URL=http://127.0.0.1:8999\nDREAD_COMFYUI_USER_ROOT=/custom/comfyui-user\n' > "$PREFIX/.env"
 BUNDLE2="$(make_bundle v2)"
 run_installer "$BUNDLE2"
 [[ "$("$PREFIX/bin/dread-universal")" == v2 ]]
 [[ "$(cat "$STATE")" == active ]]
+grep -q 'operator-watchdog-override' "$HOME/.config/systemd/user/dread-watchdog.service"
+grep -q 'operator-watchdog-timer-override' "$HOME/.config/systemd/user/dread-watchdog.timer"
+grep -q '^DREAD_COMFYUI_URL=http://127.0.0.1:8189$' "$HOME/.config/dread-universal/dread.env"
+grep -q '^DREAD_COMFYUI_USER_ROOT=/custom/comfyui-user$' "$HOME/.config/dread-universal/dread.env"
 backup_marker="$(find "$HOME/.local/opt" -maxdepth 2 -type f -name previous-release-marker -print -quit)"
 if [[ -z "$backup_marker" ]]; then
   printf 'Prior application backup did not retain the marker file. Backup directories:\n' >&2
@@ -135,6 +171,8 @@ chmod 0600 "$UNIT_FILE"
 sed -i '/^DREAD_OPERATOR_ID=/d' "$ENV_FILE"
 cp "$UNIT_FILE" "$TMP/unit-before-failure"
 cp "$ENV_FILE" "$TMP/env-before-failure"
+cp "$HOME/.config/systemd/user/dread-watchdog.service" "$TMP/watchdog-service-before-failure"
+cp "$HOME/.config/systemd/user/dread-watchdog.timer" "$TMP/watchdog-timer-before-failure"
 
 BUNDLE3="$(make_bundle v3)"
 if HOME="$HOME" DREAD_INSTALL_DIR="$PREFIX" MOCK_SYSTEMD_STATE="$STATE" MOCK_SYSTEMD_ENABLED="$TMP/systemd-enabled" MOCK_UNIT_FILE="$UNIT_FILE" MOCK_FAIL_HEALTH=1 PATH="$MOCK_BIN:$PATH" bash "$BUNDLE3/install-user.sh" >/dev/null; then
@@ -145,6 +183,8 @@ fi
 [[ "$(cat "$STATE")" == active ]]
 cmp -s "$TMP/unit-before-failure" "$UNIT_FILE"
 cmp -s "$TMP/env-before-failure" "$ENV_FILE"
+cmp -s "$TMP/watchdog-service-before-failure" "$HOME/.config/systemd/user/dread-watchdog.service"
+cmp -s "$TMP/watchdog-timer-before-failure" "$HOME/.config/systemd/user/dread-watchdog.timer"
 [[ "$(cat "$TMP/systemd-enabled")" == enabled ]]
 # A failed first install must remove its newly enabled unit even though no
 # previous unit or application tree exists.

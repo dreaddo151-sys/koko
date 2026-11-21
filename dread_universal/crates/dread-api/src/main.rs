@@ -19,10 +19,13 @@ use dread_agents::{
     openhands::OpenHandsAgentServerAdapter,
 };
 use dread_discovery::{
-    discover, discover_agents, known_agent_endpoints, load_agents, load_services,
+    discover, discover_agent_manifests, discover_agents, known_agent_endpoints, load_agents,
+    load_services,
 };
 use dread_gpu::{GpuGatewayClient, GpuSupervisorClient};
-use dread_orchestrator::{ExecutionConfig, ExecutionError, ExecutionGate, MissionGraph};
+use dread_orchestrator::{
+    ExecutionConfig, ExecutionError, ExecutionGate, MissionGraph, ResourceLimits, ResourceRequest,
+};
 use dread_platform::cached_host_profile;
 use dread_skills::{
     discover_agent_profiles, discover_skills, load_agent_profile_context, load_skill_context,
@@ -39,7 +42,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{broadcast, watch};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 const MAX_API_BODY_BYTES: usize = 32 * 1024 * 1024;
@@ -342,12 +345,56 @@ struct QueuedTaskRecovery {
     provider_event_cursor: u64,
 }
 
+struct CancellingTaskRecovery {
+    id: String,
+    provider: String,
+    provider_task_id: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateTask {
     title: String,
     task_type: String,
     capability_id: Option<String>,
     payload: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct EnhancePrompt {
+    model: String,
+    prompt: String,
+}
+
+#[derive(Debug, Default)]
+struct TokenUsageTotals {
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    total_tokens: u64,
+    measured_responses: u64,
+    responses_without_usage: u64,
+}
+
+impl TokenUsageTotals {
+    fn observe(&mut self, result: &Value) {
+        let usage = result.get("usage");
+        let prompt = usage
+            .and_then(|item| item.get("prompt_tokens"))
+            .and_then(Value::as_u64);
+        let completion = usage
+            .and_then(|item| item.get("completion_tokens"))
+            .and_then(Value::as_u64);
+        let total = usage
+            .and_then(|item| item.get("total_tokens"))
+            .and_then(Value::as_u64);
+        if let (Some(prompt), Some(completion), Some(total)) = (prompt, completion, total) {
+            self.prompt_tokens = self.prompt_tokens.saturating_add(prompt);
+            self.completion_tokens = self.completion_tokens.saturating_add(completion);
+            self.total_tokens = self.total_tokens.saturating_add(total);
+            self.measured_responses = self.measured_responses.saturating_add(1);
+        } else {
+            self.responses_without_usage = self.responses_without_usage.saturating_add(1);
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -685,6 +732,17 @@ async fn agents() -> Result<Json<Value>, ApiError> {
     })
 }
 
+type AgentManifestInventoryResponse = Json<dread_discovery::AgentManifestInventory>;
+
+async fn discover_agent_manifest_inventory() -> Result<AgentManifestInventoryResponse, ApiError> {
+    let inventory = tokio::task::spawn_blocking(discover_agent_manifests)
+        .await
+        .map_err(|error| {
+            ApiError::internal(format!("Agent manifest discovery worker failed: {error}"))
+        })?;
+    Ok(Json(inventory))
+}
+
 async fn agent_adapter_registry(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let mut items: Vec<Value> = state
         .agent_adapters
@@ -1008,27 +1066,58 @@ fn pstack_skills_root() -> Result<PathBuf, ApiError> {
             path
         } else {
             env::current_dir()
-                .map_err(|e| ApiError::internal(e.to_string()))?
+                .map_err(|error| ApiError::internal(error.to_string()))?
                 .join(path)
         });
     }
 
-    let cwd = env::current_dir().map_err(|e| ApiError::internal(e.to_string()))?;
-    for candidate in [
-        cwd.join("integrations/cursor-plugins/pstack"),
-        cwd.join("integrations/pstack/upstream"),
-        cwd.join("../integrations/cursor-plugins/pstack"),
-        cwd.join("../integrations/pstack/upstream"),
-    ] {
-        if candidate.join("skills").is_dir() {
+    let mut search_roots = Vec::new();
+    if let Ok(current) = env::current_dir() {
+        search_roots.push(current.clone());
+        if let Some(parent) = current.parent() {
+            search_roots.push(parent.to_path_buf());
+        }
+    }
+    if let Ok(executable) = env::current_exe()
+        && let Some(directory) = executable.parent()
+    {
+        search_roots.push(directory.to_path_buf());
+        if let Some(parent) = directory.parent() {
+            search_roots.push(parent.to_path_buf());
+        }
+    }
+    if let Some(home) = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+    {
+        search_roots.push(home.join("pstack"));
+        search_roots.push(home.join(".local/share/pstack"));
+        search_roots.push(home.join("integrations/pstack/upstream"));
+        search_roots.push(home.join(".cursor/plugins/pstack"));
+    }
+
+    let mut candidates = Vec::new();
+    for root in search_roots {
+        candidates.extend([
+            root.join("integrations/cursor-plugins/pstack"),
+            root.join("integrations/pstack/upstream"),
+            root.join("integrations/cursor-plugins-full/pstack"),
+            root.join("pstack"),
+        ]);
+    }
+    let mut seen = HashSet::new();
+    for candidate in candidates {
+        if !seen.insert(candidate.clone()) {
+            continue;
+        }
+        if candidate.join("skills").is_dir() && candidate.join("agents").is_dir() {
             return Ok(candidate);
         }
     }
 
     Err(ApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
-        message: "Pstack skill catalog not found; set DREAD_SKILLS_ROOT to its root directory"
-            .into(),
+        message: "Pstack skill catalog not found in configured, application, workspace or user data roots; set DREAD_SKILLS_ROOT to its root directory".into(),
     })
 }
 
@@ -3304,7 +3393,8 @@ async fn execute_agent_task(
     let worker_state = state.clone();
     let result = state
         .execution
-        .run_managed(
+        .run_managed_for_resources(
+            ResourceRequest::AGENT,
             task_id.clone(),
             cancellation,
             move |cancellation| async move {
@@ -3373,7 +3463,10 @@ async fn execute_agent_task_inner(
         input: payload,
         idempotency_key: format!("project-dread:{task_id}"),
     };
-    let started = tokio::select! { result = adapter.start_task(request) => result, _ = cancellation.changed() => { finish_agent_task(&state, &task_id, "cancelled", None, Some("Cancelled before provider submission".into())); return; } };
+    // Do not drop a provider start request when cancellation races with submission:
+    // the provider may have accepted the request even if the HTTP future is dropped.
+    // Resolve the idempotent start call first, then cancel using the returned provider ID.
+    let started = adapter.start_task(request).await;
     let started = match started {
         Ok(task) => task,
         Err(error) => {
@@ -3399,21 +3492,42 @@ async fn execute_agent_task_inner(
     }
     let mut cursor = initial_event_cursor;
     let mut confirmation_waiting = false;
+    let mut cancellation_submitted = false;
     loop {
-        if *cancellation.borrow() {
+        if *cancellation.borrow() && !cancellation_submitted {
+            cancellation_submitted = true;
             match adapter.cancel_task(&task_id, &provider_id).await {
-                Ok(task) => {
-                    finish_agent_task(&state, &task_id, "cancelled", task.result, task.error)
+                Ok(task) if task.state == AgentTaskState::Cancelled => {
+                    finish_agent_task(&state, &task_id, "cancelled", task.result, task.error);
+                    return;
                 }
-                Err(error) => finish_agent_task(
-                    &state,
-                    &task_id,
-                    "failed",
-                    None,
-                    Some(format!("Provider cancellation failed: {error}")),
-                ),
+                Ok(task) => {
+                    let _ = persist_task_event(
+                        &state,
+                        &task_id,
+                        "task_cancellation_unconfirmed",
+                        &json!({
+                            "provider": provider,
+                            "provider_state": format!("{:?}", task.state),
+                            "message": "Provider accepted the cancellation request but has not reported a terminal cancelled state"
+                        }),
+                        "executor",
+                    );
+                }
+                Err(error) => {
+                    let _ = persist_task_event(
+                        &state,
+                        &task_id,
+                        "task_cancellation_unconfirmed",
+                        &json!({
+                            "provider": provider,
+                            "error": error.to_string(),
+                            "message": "Provider cancellation was not confirmed; DREAD will reconcile provider status"
+                        }),
+                        "executor",
+                    );
+                }
             }
-            return;
         }
         match adapter.events(&task_id, &provider_id, cursor).await {
             Ok(events) => {
@@ -3441,14 +3555,18 @@ async fn execute_agent_task_inner(
                 }
             }
             Err(error) => {
-                finish_agent_task(
-                    &state,
-                    &task_id,
-                    "failed",
-                    None,
-                    Some(format!("Provider event polling failed: {error}")),
-                );
-                return;
+                if cancellation_submitted {
+                    warn!(task_id = %task_id, provider = %provider, error = %error, "Provider event reconciliation is temporarily unavailable");
+                } else {
+                    finish_agent_task(
+                        &state,
+                        &task_id,
+                        "failed",
+                        None,
+                        Some(format!("Provider event polling failed: {error}")),
+                    );
+                    return;
+                }
             }
         }
         match adapter.task_status(&task_id, &provider_id).await {
@@ -3515,14 +3633,20 @@ async fn execute_agent_task_inner(
                 }
             }
             Err(error) => {
-                finish_agent_task(
-                    &state,
-                    &task_id,
-                    "failed",
-                    None,
-                    Some(format!("Provider status polling failed: {error}")),
-                );
-                return;
+                if cancellation_submitted {
+                    // Keep the durable task in "cancelling" while the provider is
+                    // unreachable. A transport failure is not proof of cancellation.
+                    warn!(task_id = %task_id, provider = %provider, error = %error, "Provider status reconciliation is temporarily unavailable");
+                } else {
+                    finish_agent_task(
+                        &state,
+                        &task_id,
+                        "failed",
+                        None,
+                        Some(format!("Provider status polling failed: {error}")),
+                    );
+                    return;
+                }
             }
         }
         tokio::select! { _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}, _ = cancellation.changed() => {} }
@@ -3552,9 +3676,17 @@ fn finish_agent_task(
         .optional()
         .ok()
         .flatten();
-    if !matches!(current.as_deref(), Some("queued" | "running" | "cancelled")) {
+    if !matches!(
+        current.as_deref(),
+        Some("queued" | "running" | "cancelling" | "cancelled")
+    ) {
         return;
     }
+    // "cancelling" is deliberately not treated as "cancelled": only the
+    // provider's terminal state may resolve an active remote task. However,
+    // a successful completion after a cancellation request must not advance
+    // the rest of the mission.
+    let cancellation_requested = current.as_deref() == Some("cancelling");
     let final_status = if current.as_deref() == Some("cancelled") {
         "cancelled"
     } else {
@@ -3591,7 +3723,17 @@ fn finish_agent_task(
         .ok()
         .flatten();
     if let Some(mission_id) = mission_id.as_deref() {
-        if final_status == "completed" {
+        if cancellation_requested {
+            if tx
+                .execute(
+                    "UPDATE missions SET status = 'blocked' WHERE id = ?1",
+                    params![mission_id],
+                )
+                .is_err()
+            {
+                return;
+            }
+        } else if final_status == "completed" {
             let incomplete: i64 = match tx.query_row(
                 "SELECT COUNT(*)
                  FROM mission_tasks mt JOIN tasks t ON t.id = mt.task_id
@@ -3649,6 +3791,7 @@ fn finish_agent_task(
         registry.remove(task_id);
     }
     if final_status == "completed"
+        && !cancellation_requested
         && let Some(mission_id) = mission_id
     {
         dispatch_ready_mission_tasks(state.clone(), mission_id);
@@ -3914,6 +4057,14 @@ async fn execute_gpu_chat(
         .map_err(|error| format!("Python GPU Supervisor inference failed: {error}"))
 }
 
+fn builtin_resource_request(task_type: &str) -> Option<ResourceRequest> {
+    match task_type {
+        "service_discovery" => Some(ResourceRequest::CPU),
+        "gpu_chat" => Some(ResourceRequest::GPU_MODEL),
+        _ => None,
+    }
+}
+
 async fn execute_approved_task(
     state: AppState,
     task_id: String,
@@ -3921,6 +4072,12 @@ async fn execute_approved_task(
     payload: Value,
     cancellation: watch::Receiver<bool>,
 ) {
+    // queue_task admits only reviewed built-in types; keep this second boundary so
+    // a future recovery/dispatch path cannot silently classify an unknown runner.
+    let Some(resources) = builtin_resource_request(&task_type) else {
+        error!(task_id = %task_id, task_type = %task_type, "No resource profile exists for built-in runner");
+        return;
+    };
     let started_at = now_epoch();
     let started_event = {
         let Ok(mut conn) = state.db.lock() else {
@@ -3955,55 +4112,68 @@ async fn execute_approved_task(
     };
     let _ = state.events.send(started_event);
 
-    let runner_type = task_type.clone();
-    let runner_payload = payload.clone();
-    let runner_gpu = state.gpu.clone();
-    let runner_supervisor = state.supervisor.clone();
-    let runner_db = state.db.clone();
-    let execution = state
-        .execution
-        .run(task_id.clone(), cancellation, move |_, cancellation| {
-            let runner_type = runner_type.clone();
-            let runner_payload = runner_payload.clone();
-            let runner_gpu = runner_gpu.clone();
-            let runner_supervisor = runner_supervisor.clone();
-            let runner_db = runner_db.clone();
-            async move {
-                if *cancellation.borrow() {
-                    return Err("Task cancelled before runner start".to_string());
-                }
-                match runner_type.as_str() {
-                    "service_discovery" => {
-                        let Json(result) = services().await.map_err(|error| error.message)?;
-                        Ok(result)
-                    }
-                    "gpu_chat" => match runner_supervisor.as_ref() {
-                        Some(supervisor) => {
-                            let contexts =
-                                load_enabled_skill_contexts(&runner_db, &runner_payload)?;
-                            execute_gpu_chat(
-                                &runner_gpu,
-                                supervisor,
-                                &runner_payload,
-                                &contexts,
-                            )
-                            .await
+    // GPU inference is non-interruptible through the current Supervisor bridge.
+    // Keep its HTTP future alive until the bridge returns a terminal response; a
+    // caller cancellation must not drop the request and falsely release GPU work.
+    let execution = if task_type == "gpu_chat" {
+        let runner_payload = payload.clone();
+        let runner_gpu = state.gpu.clone();
+        let runner_supervisor = state.supervisor.clone();
+        let runner_db = state.db.clone();
+        let started = std::time::Instant::now();
+        state
+            .execution
+            .run_managed_for_resources(resources, task_id.clone(), cancellation, move |_cancellation| async move {
+                let supervisor = runner_supervisor
+                    .as_ref()
+                    .ok_or_else(|| "GPU chat is disabled until the Python GPU Supervisor bridge is configured".to_string())?;
+                let contexts = load_enabled_skill_contexts(&runner_db, &runner_payload)?;
+                execute_gpu_chat(&runner_gpu, supervisor, &runner_payload, &contexts).await
+            })
+            .await
+            .map(|result| {
+                (
+                    result,
+                    1,
+                    started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                )
+            })
+    } else {
+        let runner_type = task_type.clone();
+        state
+            .execution
+            .run_for_resources(
+                resources,
+                task_id.clone(),
+                cancellation,
+                move |_, cancellation| {
+                    let runner_type = runner_type.clone();
+                    async move {
+                        if *cancellation.borrow() {
+                            return Err("Task cancelled before runner start".to_string());
                         }
-                        None => Err("GPU chat is disabled until the Python GPU Supervisor bridge is configured".into()),
-                    },
-                    _ => Err(format!("No reviewed runner for task type '{runner_type}'")),
-                }
-            }
-        })
-        .await;
+                        match runner_type.as_str() {
+                            "service_discovery" => {
+                                let Json(result) =
+                                    services().await.map_err(|error| error.message)?;
+                                Ok(result)
+                            }
+                            _ => Err(format!("No reviewed runner for task type '{runner_type}'")),
+                        }
+                    }
+                },
+            )
+            .await
+            .map(|result| (result.result, result.attempts, result.elapsed_ms))
+    };
 
     let (status, result_json, error, attempts, elapsed_ms) = match execution {
-        Ok(result) => (
+        Ok((result, attempts, elapsed_ms)) => (
             "completed",
-            Some(result.result.to_string()),
+            Some(result.to_string()),
             None,
-            result.attempts,
-            result.elapsed_ms,
+            attempts,
+            elapsed_ms,
         ),
         Err(error) => {
             let attempts = match &error {
@@ -4043,16 +4213,38 @@ async fn execute_approved_task(
         let Some(current_status) = current_status else {
             return;
         };
+        let cancellation_before_start =
+            current_status == "cancelling" && status == "cancelled" && attempts == 0;
+        let cancellation_unconfirmed = current_status == "cancelling"
+            && attempts > 0
+            && matches!(status, "cancelled" | "failed");
         let final_status = if current_status == "cancelled" {
             "cancelled"
         } else if current_status == "running" {
             status
+        } else if cancellation_before_start {
+            "cancelled"
+        } else if cancellation_unconfirmed {
+            "cancelling"
+        } else if current_status == "cancelling"
+            && (status == "completed" || (status == "failed" && attempts == 0))
+        {
+            status
         } else {
             return;
         };
-        if final_status != "cancelled"
+        let final_error = if cancellation_unconfirmed {
+            Some(format!(
+                "Cancellation outcome is unconfirmed: the Python GPU Supervisor bridge cannot confirm whether upstream inference stopped. Last DREAD runner outcome: {}. The task remains in cancelling state for operator reconciliation.",
+                error.as_deref().unwrap_or("no additional error details")
+            ))
+        } else {
+            error.clone()
+        };
+        if current_status != "cancelled"
+            && final_status != "cancelling"
             && tx.execute(
-                "UPDATE tasks SET status = ?2, updated_at = ?3 WHERE id = ?1 AND status = 'running'",
+                "UPDATE tasks SET status = ?2, updated_at = ?3 WHERE id = ?1 AND status IN ('running', 'cancelling')",
                 params![task_id, final_status, completed_at],
             ).is_err()
         {
@@ -4061,7 +4253,7 @@ async fn execute_approved_task(
         if tx.execute(
             "INSERT OR REPLACE INTO task_results (task_id, result_json, error, attempts, elapsed_ms, completed_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![task_id, result_json, error, attempts, elapsed_ms, completed_at],
+            params![task_id, result_json, final_error, attempts, elapsed_ms, completed_at],
         ).is_err()
         {
             return;
@@ -4078,7 +4270,17 @@ async fn execute_approved_task(
             Err(_) => return,
         };
         if let Some(mission_id) = mission_id.as_ref() {
-            if final_status == "completed" {
+            if current_status == "cancelling" {
+                if tx
+                    .execute(
+                        "UPDATE missions SET status = 'blocked' WHERE id = ?1",
+                        params![mission_id],
+                    )
+                    .is_err()
+                {
+                    return;
+                }
+            } else if final_status == "completed" {
                 let incomplete: i64 = match tx.query_row(
                     "SELECT COUNT(*)
                      FROM mission_tasks mt JOIN tasks t ON t.id = mt.task_id
@@ -4109,14 +4311,18 @@ async fn execute_approved_task(
                 return;
             }
         }
-        let event_type = match final_status {
-            "completed" => "task_succeeded",
-            "cancelled" => "task_execution_cancelled",
-            _ => "task_failed",
+        let event_type = if cancellation_unconfirmed {
+            "task_cancellation_unconfirmed"
+        } else {
+            match final_status {
+                "completed" => "task_succeeded",
+                "cancelled" => "task_execution_cancelled",
+                _ => "task_failed",
+            }
         };
         let payload = json!({
             "status": final_status,
-            "error": error,
+            "error": final_error,
             "attempts": attempts,
             "elapsed_ms": elapsed_ms
         });
@@ -4133,7 +4339,8 @@ async fn execute_approved_task(
         if tx.commit().is_err() {
             return;
         }
-        let advance_mission = final_status == "completed" && mission_id.is_some();
+        let advance_mission =
+            final_status == "completed" && current_status != "cancelling" && mission_id.is_some();
         (event, mission_id, advance_mission)
     };
     let _ = state.events.send(completion_event);
@@ -4142,6 +4349,114 @@ async fn execute_approved_task(
     }
     if advance_mission && let Some(mission_id) = mission_id {
         dispatch_ready_mission_tasks(state.clone(), mission_id);
+    }
+}
+
+async fn reconcile_cancelling_agent_task(
+    state: AppState,
+    adapter: Arc<dyn AgentAdapter>,
+    task: CancellingTaskRecovery,
+) {
+    let task_id = task.id.clone();
+    let provider = task.provider.clone();
+    let provider_task_id = task.provider_task_id.clone();
+    let worker_state = state.clone();
+    let result = state
+        .execution
+        .run_managed_for_resources(
+            ResourceRequest::AGENT,
+            task_id.clone(),
+            watch::channel(false).1,
+            move |_cancellation| async move {
+                match adapter.cancel_task(&task_id, &provider_task_id).await {
+                    Ok(remote) if remote.state == AgentTaskState::Cancelled => {
+                        finish_agent_task(
+                            &worker_state,
+                            &task_id,
+                            "cancelled",
+                            remote.result,
+                            remote.error,
+                        );
+                        return Ok(());
+                    }
+                    Ok(remote) => {
+                        let _ = persist_task_event(
+                            &worker_state,
+                            &task_id,
+                            "task_cancellation_unconfirmed",
+                            &json!({
+                                "provider": provider,
+                                "provider_state": format!("{:?}", remote.state),
+                                "message": "Startup recovery reissued cancellation; provider has not reported terminal cancellation"
+                            }),
+                            "recovery",
+                        );
+                    }
+                    Err(error) => {
+                        let _ = persist_task_event(
+                            &worker_state,
+                            &task_id,
+                            "task_cancellation_unconfirmed",
+                            &json!({
+                                "provider": provider,
+                                "error": error.to_string(),
+                                "message": "Startup recovery could not confirm cancellation; provider status polling continues"
+                            }),
+                            "recovery",
+                        );
+                    }
+                }
+
+                loop {
+                    match adapter.task_status(&task_id, &provider_task_id).await {
+                        Ok(remote)
+                            if matches!(
+                                remote.state,
+                                AgentTaskState::Succeeded
+                                    | AgentTaskState::Failed
+                                    | AgentTaskState::Cancelled
+                            ) =>
+                        {
+                            let result = adapter
+                                .task_result(&task_id, &provider_task_id)
+                                .await
+                                .unwrap_or(remote);
+                            let status = match result.state {
+                                AgentTaskState::Succeeded => "completed",
+                                AgentTaskState::Cancelled => "cancelled",
+                                _ => "failed",
+                            };
+                            finish_agent_task(
+                                &worker_state,
+                                &task_id,
+                                status,
+                                result.result,
+                                result.error,
+                            );
+                            return Ok(());
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            warn!(
+                                task_id = %task_id,
+                                provider = %provider,
+                                error = %error,
+                                "Recovered cancellation status is temporarily unavailable"
+                            );
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            },
+        )
+        .await;
+    if let Err(error) = result {
+        warn!(
+            task_id = %task.id,
+            provider = %task.provider,
+            error = ?error,
+            "Could not start cancellation reconciliation after restart; task remains unresolved"
+        );
     }
 }
 
@@ -4190,6 +4505,81 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
     }
 
     let mut resumable = Vec::new();
+    let mut cancelling = Vec::new();
+    let cancelling_rows: Vec<(String, Option<String>, Option<String>)> = {
+        let mut statement = tx.prepare(
+            "SELECT id, agent_provider, provider_task_id FROM tasks WHERE status = 'cancelling'",
+        )?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (task_id, provider, provider_task_id) in cancelling_rows {
+        let Some(provider) = provider else {
+            emitted.push(append_task_event(
+                &tx,
+                &task_id,
+                "task_cancellation_recovery_unavailable",
+                &json!({
+                    "status": "cancelling",
+                    "reason": "This execution path has no durable provider task identifier; manual outcome reconciliation is required"
+                }),
+                "recovery",
+                now,
+            ).map_err(|error| anyhow::anyhow!(error.message))?);
+            continue;
+        };
+        let Some(provider_task_id) = provider_task_id else {
+            emitted.push(append_task_event(
+                &tx,
+                &task_id,
+                "task_cancellation_recovery_unavailable",
+                &json!({
+                    "status": "cancelling",
+                    "provider": provider,
+                    "reason": "No provider task identifier was persisted before restart; DREAD will not guess or resubmit the task"
+                }),
+                "recovery",
+                now,
+            ).map_err(|error| anyhow::anyhow!(error.message))?);
+            continue;
+        };
+        let adapter_enabled = state
+            .agent_adapters
+            .get(&provider)
+            .is_some_and(|adapter| adapter.descriptor().enabled);
+        if !adapter_enabled {
+            emitted.push(append_task_event(
+                &tx,
+                &task_id,
+                "task_cancellation_recovery_unavailable",
+                &json!({
+                    "status": "cancelling",
+                    "provider": provider,
+                    "reason": "The provider adapter is not configured and enabled; task remains unresolved"
+                }),
+                "recovery",
+                now,
+            ).map_err(|error| anyhow::anyhow!(error.message))?);
+            continue;
+        }
+        emitted.push(
+            append_task_event(
+                &tx,
+                &task_id,
+                "task_cancellation_recovery_started",
+                &json!({"status": "cancelling", "provider": provider}),
+                "recovery",
+                now,
+            )
+            .map_err(|error| anyhow::anyhow!(error.message))?,
+        );
+        cancelling.push(CancellingTaskRecovery {
+            id: task_id,
+            provider,
+            provider_task_id,
+        });
+    }
+
     let running_agents: Vec<QueuedTaskRecovery> = {
         let mut statement = tx.prepare(
             "SELECT id, task_type, capability_id, approval_required, approved_by, payload_json, agent_provider, provider_event_cursor
@@ -4389,7 +4779,19 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
         let _ = state.events.send(event);
     }
 
-    let recovered_count = resumable.len();
+    let recovered_count = resumable.len() + cancelling.len();
+    for task in cancelling {
+        let adapter = state
+            .agent_adapters
+            .get(&task.provider)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Recovered cancellation adapter disappeared"))?;
+        tokio::spawn(reconcile_cancelling_agent_task(
+            state.clone(),
+            adapter,
+            task,
+        ));
+    }
     for task in resumable {
         let (cancel_sender, cancel_receiver) = watch::channel(false);
         state
@@ -4464,6 +4866,19 @@ async fn get_task_result(
     })))
 }
 
+fn cancellation_transition(
+    current_status: &str,
+    has_agent_provider: bool,
+    task_type: &str,
+) -> Option<(&'static str, bool)> {
+    match current_status {
+        "cancelling" => Some(("cancelling", true)),
+        "running" if has_agent_provider || task_type == "gpu_chat" => Some(("cancelling", true)),
+        "pending_approval" | "approved" | "queued" | "running" => Some(("cancelled", false)),
+        _ => None,
+    }
+}
+
 async fn cancel_task(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -4473,52 +4888,71 @@ async fn cancel_task(
     let tx = conn
         .transaction()
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    let changed = tx.execute(
-        "UPDATE tasks SET status = 'cancelled', updated_at = ?2 WHERE id = ?1 AND status IN ('pending_approval', 'approved', 'queued', 'running')",
-        params![id, now],
-    ).map_err(|e| ApiError::internal(e.to_string()))?;
-    if changed == 0 {
-        let exists: bool = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1)",
-                params![id],
-                |row| row.get(0),
-            )
-            .map_err(|e| ApiError::internal(e.to_string()))?;
-        if !exists {
-            return Err(ApiError::not_found("Task not found"));
-        }
+    let current: Option<(String, Option<String>, String)> = tx
+        .query_row(
+            "SELECT status, agent_provider, task_type FROM tasks WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let Some((current_status, agent_provider, task_type)) = current else {
+        return Err(ApiError::not_found("Task not found"));
+    };
+    let Some((next_status, cancellation_pending)) =
+        cancellation_transition(&current_status, agent_provider.is_some(), &task_type)
+    else {
         return Err(ApiError {
             status: StatusCode::CONFLICT,
             message: "Task cannot be cancelled in its current state".into(),
         });
+    };
+    let changed = current_status.as_str() != next_status;
+    let mut cancellation_event = None;
+    if changed {
+        tx.execute(
+            "UPDATE tasks SET status = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, next_status, now],
+        )
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+        tx.execute(
+            "UPDATE missions SET status = 'blocked'
+             WHERE id IN (SELECT mission_id FROM mission_tasks WHERE task_id = ?1)",
+            params![id],
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+        let event = append_task_event(
+            &tx,
+            &id,
+            if cancellation_pending {
+                "task_cancellation_requested"
+            } else {
+                "task_cancelled"
+            },
+            &json!({"status": next_status}),
+            "operator",
+            now,
+        )?;
+        cancellation_event = Some(event);
     }
-    tx.execute(
-        "UPDATE missions SET status = 'blocked'
-         WHERE id IN (SELECT mission_id FROM mission_tasks WHERE task_id = ?1)",
-        params![id],
-    )
-    .map_err(|error| ApiError::internal(error.to_string()))?;
-    let event = append_task_event(
-        &tx,
-        &id,
-        "task_cancelled",
-        &json!({"status": "cancelled"}),
-        "operator",
-        now,
-    )?;
     let task = tx.query_row(
         "SELECT id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, approval_reason, created_at, updated_at
          FROM tasks WHERE id = ?1", params![id], task_from_row
     ).map_err(|e| ApiError::internal(e.to_string()))?;
     tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
-    let _ = state.events.send(event);
+    if let Some(event) = cancellation_event {
+        let _ = state.events.send(event);
+    }
     if let Ok(cancellations) = state.cancellations.lock()
         && let Some(sender) = cancellations.get(&id)
     {
         let _ = sender.send(true);
     }
-    Ok(Json(json!({"item": task, "execution_started": false})))
+    Ok(Json(json!({
+        "item": task,
+        "execution_started": cancellation_pending,
+        "cancellation_pending": cancellation_pending
+    })))
 }
 
 async fn gpu_health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -4537,6 +4971,18 @@ async fn gpu_health(State(state): State<AppState>) -> Result<Json<Value>, ApiErr
     Ok(Json(value))
 }
 
+async fn gpu_telemetry(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let supervisor = state.supervisor.as_ref().ok_or_else(|| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        message: "GPU telemetry is unavailable until the authenticated Python Supervisor bridge is configured".into(),
+    })?;
+    let telemetry = supervisor.telemetry().await.map_err(|error| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        message: format!("Python GPU Supervisor telemetry failed: {error}"),
+    })?;
+    Ok(Json(telemetry))
+}
+
 async fn gpu_models(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let models = state.gpu.models().await.map_err(|e| ApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
@@ -4546,6 +4992,108 @@ async fn gpu_models(State(state): State<AppState>) -> Result<Json<Value>, ApiErr
     serde_json::to_value(models)
         .map(Json)
         .map_err(|e| ApiError::internal(e.to_string()))
+}
+
+async fn token_usage(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT r.result_json FROM task_results r
+             INNER JOIN tasks t ON t.id = r.task_id
+             WHERE t.task_type = 'gpu_chat' AND t.status = 'completed'
+             AND r.result_json IS NOT NULL
+             ORDER BY r.completed_at DESC LIMIT 10000",
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+
+    let mut totals = TokenUsageTotals::default();
+    for row in rows {
+        let encoded = row.map_err(|error| ApiError::internal(error.to_string()))?;
+        let value: Value = serde_json::from_str(&encoded).unwrap_or(Value::Null);
+        totals.observe(&value);
+    }
+
+    Ok(Json(json!({
+        "provider": "llama.cpp-compatible local gateway",
+        "prompt_tokens": totals.prompt_tokens,
+        "completion_tokens": totals.completion_tokens,
+        "total_tokens": totals.total_tokens,
+        "measured_responses": totals.measured_responses,
+        "responses_without_usage": totals.responses_without_usage,
+        "scan_limit": 10000,
+        "note": "Only provider-reported usage from completed gpu_chat tasks is counted. Missing usage is reported separately; no token estimates are generated."
+    })))
+}
+
+async fn enhance_prompt(
+    State(state): State<AppState>,
+    Json(input): Json<EnhancePrompt>,
+) -> Result<Json<Value>, ApiError> {
+    let prompt = input.prompt.trim();
+    if prompt.is_empty() || prompt.len() > 32_768 {
+        return Err(ApiError::bad_request(
+            "prompt must contain 1 to 32768 bytes",
+        ));
+    }
+    let model = input.model.trim();
+    if model.is_empty() || model.len() > 200 {
+        return Err(ApiError::bad_request(
+            "model must contain 1 to 200 characters",
+        ));
+    }
+
+    let supervisor = state.supervisor.as_ref().ok_or_else(|| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        message: "Prompt enhancement requires the authenticated Python GPU Supervisor bridge"
+            .into(),
+    })?;
+    let available = state.gpu.models().await.map_err(|error| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        message: format!("llama.cpp model discovery failed: {error}"),
+    })?;
+    if !available.data.iter().any(|item| item.id == model) {
+        return Err(ApiError::bad_request(
+            "Requested model is not exposed by the local llama.cpp gateway",
+        ));
+    }
+
+    let request = json!({
+        "model": model,
+        "stream": false,
+        "temperature": 0.2,
+        "max_tokens": 2048,
+        "messages": [
+            {
+                "role": "system",
+                "content": "Improve the user's prompt for clarity, specificity, useful constraints, and measurable output. Preserve the user's intent. Do not answer the prompt. Return only the improved prompt, with no preamble or commentary."
+            },
+            {"role": "user", "content": prompt}
+        ]
+    });
+    let response = supervisor
+        .chat_completion(&request)
+        .await
+        .map_err(|error| ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: format!("Local prompt enhancement failed: {error}"),
+        })?;
+    let enhanced = response
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 65_536)
+        .ok_or_else(|| ApiError::internal("llama.cpp returned no usable enhanced prompt"))?;
+
+    Ok(Json(json!({
+        "model": model,
+        "enhanced_prompt": enhanced,
+        "requires_operator_review": true,
+        "submitted": false,
+        "note": "This is a preview only. It is not submitted as a task or executed; review it and explicitly apply it to the composer."
+    })))
 }
 
 async fn gpu_inference(
@@ -4588,6 +5136,146 @@ async fn gpu_inference(
             message: format!("Python GPU Supervisor inference failed: {error}"),
         })?;
     Ok(Json(result))
+}
+
+async fn repair_plan(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    use dread_agents::AgentHealthState;
+    use dread_platform::repair::{ComponentObservation, build_repair_plan};
+
+    let mut observations = Vec::new();
+
+    match state.gpu.health().await {
+        Ok(health) => observations.push(ComponentObservation {
+            component_id: "llama_cpp_gateway".into(),
+            state: if health.status.eq_ignore_ascii_case("ok")
+                || health.status.eq_ignore_ascii_case("online")
+            {
+                "online".into()
+            } else {
+                "degraded".into()
+            },
+            detail: format!("Gateway status: {}; GPU: {}", health.status, health.gpu),
+        }),
+        Err(error) => observations.push(ComponentObservation {
+            component_id: "llama_cpp_gateway".into(),
+            state: "offline".into(),
+            detail: format!("Read-only gateway health probe failed: {error}"),
+        }),
+    }
+
+    match state.supervisor.as_ref() {
+        Some(supervisor) => match supervisor.is_online().await {
+            Ok(true) => observations.push(ComponentObservation {
+                component_id: "python_gpu_supervisor".into(),
+                state: "online".into(),
+                detail: "Authenticated Supervisor health endpoint responded successfully".into(),
+            }),
+            Ok(false) => observations.push(ComponentObservation {
+                component_id: "python_gpu_supervisor".into(),
+                state: "offline".into(),
+                detail: "Authenticated Supervisor health endpoint did not report online".into(),
+            }),
+            Err(error) => observations.push(ComponentObservation {
+                component_id: "python_gpu_supervisor".into(),
+                state: "unknown".into(),
+                detail: format!("Supervisor health probe failed: {error}"),
+            }),
+        },
+        None => observations.push(ComponentObservation {
+            component_id: "python_gpu_supervisor".into(),
+            state: "not_configured".into(),
+            detail:
+                "Supervisor bridge is not configured; no attempt was made to start or replace it"
+                    .into(),
+        }),
+    }
+
+    match dread_media::ComfyUiClient::from_env() {
+        Ok(client) => {
+            let monitor = client.monitor().await;
+            observations.push(ComponentObservation {
+                component_id: "comfyui".into(),
+                state: monitor.status.clone(),
+                detail: format!(
+                    "Read-only ComfyUI probe: system={}, queue={}, history={}",
+                    monitor.system.status, monitor.queue.status, monitor.history.status
+                ),
+            });
+        }
+        Err(error) => observations.push(ComponentObservation {
+            component_id: "comfyui".into(),
+            state: "unknown".into(),
+            detail: format!("ComfyUI endpoint configuration could not be used: {error}"),
+        }),
+    }
+
+    for (provider, adapter) in state.agent_adapters.iter() {
+        let health = adapter.health().await;
+        let (state_label, detail) = match health {
+            Ok(value) => {
+                let label = match value.state {
+                    AgentHealthState::Online => "online",
+                    AgentHealthState::Degraded => "degraded",
+                    AgentHealthState::Offline => "offline",
+                    AgentHealthState::Unknown => "unknown",
+                };
+                (
+                    label.to_string(),
+                    value
+                        .detail
+                        .unwrap_or_else(|| format!("Provider health state: {:?}", value.state)),
+                )
+            }
+            Err(error) => (
+                "unknown".to_string(),
+                format!("Provider health probe did not return a confirmed state: {error}"),
+            ),
+        };
+        observations.push(ComponentObservation {
+            component_id: format!("agent_provider_{provider}"),
+            state: state_label,
+            detail,
+        });
+    }
+
+    let plan = build_repair_plan(&observations);
+    serde_json::to_value(plan).map(Json).map_err(|error| {
+        ApiError::internal(format!(
+            "Could not serialize diagnostic repair plan: {error}"
+        ))
+    })
+}
+
+async fn local_model_inventory() -> Result<Json<dread_gpu::models::LocalModelInventory>, ApiError> {
+    let inventory = tokio::task::spawn_blocking(dread_gpu::models::discover_local_models)
+        .await
+        .map_err(|error| {
+            ApiError::internal(format!("Local model discovery worker failed: {error}"))
+        })?;
+    Ok(Json(inventory))
+}
+
+async fn comfyui_monitor() -> Result<Json<dread_media::ComfyUiMonitor>, ApiError> {
+    let client = dread_media::ComfyUiClient::from_env()
+        .map_err(|error| ApiError::internal(format!("Invalid ComfyUI configuration: {error}")))?;
+    Ok(Json(client.monitor().await))
+}
+
+async fn workflow_discovery() -> Result<Json<dread_media::WorkflowInventory>, ApiError> {
+    let inventory = tokio::task::spawn_blocking(dread_media::discover_local_workflows)
+        .await
+        .map_err(|error| {
+            ApiError::internal(format!("Workflow discovery worker failed: {error}"))
+        })?;
+    Ok(Json(inventory))
+}
+
+async fn extension_discovery() -> Result<Json<dread_agents::extensions::PluginInventory>, ApiError>
+{
+    let inventory = tokio::task::spawn_blocking(dread_agents::extensions::discover_local_plugins)
+        .await
+        .map_err(|error| ApiError::internal(format!("Plugin discovery worker failed: {error}")))?;
+    Ok(Json(inventory))
 }
 
 fn constant_time_eq(expected: &[u8], actual: &[u8]) -> bool {
@@ -4638,7 +5326,15 @@ fn app(state: AppState) -> Router {
     let protected = Router::new()
         .route("/api/system/profile", get(system_profile))
         .route("/api/gpu/health", get(gpu_health))
+        .route("/api/gpu/telemetry", get(gpu_telemetry))
         .route("/api/gpu/models", get(gpu_models))
+        .route("/api/usage/tokens", get(token_usage))
+        .route("/api/prompt/enhance", axum::routing::post(enhance_prompt))
+        .route("/api/models/local", get(local_model_inventory))
+        .route("/api/repair/plan", get(repair_plan))
+        .route("/api/media/comfyui/monitor", get(comfyui_monitor))
+        .route("/api/media/workflows/discover", get(workflow_discovery))
+        .route("/api/extensions/discover", get(extension_discovery))
         .route("/api/missions", get(list_missions).post(create_mission))
         .route(
             "/api/missions/{id}/instantiate",
@@ -4660,6 +5356,10 @@ fn app(state: AppState) -> Router {
         .route("/api/gpu/{*path}", axum::routing::post(gpu_inference))
         .route("/api/services", get(services))
         .route("/api/agents", get(agents))
+        .route(
+            "/api/agents/manifests/discover",
+            get(discover_agent_manifest_inventory),
+        )
         .route("/api/agent-adapters", get(agent_adapter_registry))
         .route(
             "/api/capabilities",
@@ -4718,6 +5418,90 @@ fn validate_bind_address(addr: SocketAddr) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn parse_positive_limit(
+    name: &str,
+    raw: Option<&str>,
+    default: usize,
+    maximum: usize,
+) -> anyhow::Result<usize> {
+    let Some(raw) = raw else {
+        return Ok(default);
+    };
+    let value = raw
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| anyhow::anyhow!("{name} must be an integer from 1 through {maximum}"))?;
+    anyhow::ensure!(
+        (1..=maximum).contains(&value),
+        "{name} must be an integer from 1 through {maximum}"
+    );
+    Ok(value)
+}
+
+fn positive_limit_from_env(name: &str, default: usize, maximum: usize) -> anyhow::Result<usize> {
+    let raw = match env::var(name) {
+        Ok(value) => Some(value),
+        Err(env::VarError::NotPresent) => None,
+        Err(error) => return Err(error.into()),
+    };
+    parse_positive_limit(name, raw.as_deref(), default, maximum)
+}
+
+fn execution_settings_from_env() -> anyhow::Result<(ExecutionConfig, ResourceLimits)> {
+    const MAX_CONCURRENCY: usize = 128;
+    const MAX_ADMITTED: usize = 1024;
+
+    let defaults = ExecutionConfig::default();
+    let max_concurrency = positive_limit_from_env(
+        "DREAD_EXECUTION_MAX_CONCURRENCY",
+        defaults.max_concurrency,
+        MAX_CONCURRENCY,
+    )?;
+    let max_admitted = positive_limit_from_env(
+        "DREAD_EXECUTION_MAX_ADMITTED",
+        defaults.max_admitted,
+        MAX_ADMITTED,
+    )?;
+    anyhow::ensure!(
+        max_admitted >= max_concurrency,
+        "DREAD_EXECUTION_MAX_ADMITTED must be at least DREAD_EXECUTION_MAX_CONCURRENCY"
+    );
+    let execution = ExecutionConfig {
+        max_concurrency,
+        max_admitted,
+        ..defaults
+    };
+
+    let limits = ResourceLimits {
+        cpu: positive_limit_from_env(
+            "DREAD_RESOURCE_CPU_CONCURRENCY",
+            ResourceLimits::default().cpu,
+            MAX_CONCURRENCY,
+        )?,
+        gpu: positive_limit_from_env(
+            "DREAD_RESOURCE_GPU_CONCURRENCY",
+            ResourceLimits::default().gpu,
+            MAX_CONCURRENCY,
+        )?,
+        model: positive_limit_from_env(
+            "DREAD_RESOURCE_MODEL_CONCURRENCY",
+            ResourceLimits::default().model,
+            MAX_CONCURRENCY,
+        )?,
+        media: positive_limit_from_env(
+            "DREAD_RESOURCE_MEDIA_CONCURRENCY",
+            ResourceLimits::default().media,
+            MAX_CONCURRENCY,
+        )?,
+        agent: positive_limit_from_env(
+            "DREAD_RESOURCE_AGENT_CONCURRENCY",
+            ResourceLimits::default().agent,
+            MAX_CONCURRENCY,
+        )?,
+    };
+    Ok((execution, limits))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -4762,12 +5546,13 @@ async fn main() -> anyhow::Result<()> {
     let db = open_database(&db_path)?;
     let agent_adapters = Arc::new(load_agent_adapters_from_env()?);
     let (events, _) = broadcast::channel(256);
+    let (execution_config, resource_limits) = execution_settings_from_env()?;
     let state = AppState {
         db: Arc::new(Mutex::new(db)),
         gpu: GpuGatewayClient::from_env()?,
         supervisor,
         events,
-        execution: ExecutionGate::new(ExecutionConfig::default())
+        execution: ExecutionGate::new_with_resource_limits(execution_config, resource_limits)
             .map_err(|error| anyhow::anyhow!("Invalid execution configuration: {error:?}"))?,
         agent_adapters,
         cancellations: Arc::new(Mutex::new(HashMap::new())),
@@ -4780,7 +5565,7 @@ async fn main() -> anyhow::Result<()> {
     let recovered_tasks = recover_task_queue(&state)?;
     info!(
         recovered_tasks,
-        "Recovered eligible queued tasks; interrupted running tasks were marked failed"
+        "Recovered eligible queued tasks and resumed provider cancellation reconciliation; interrupted built-in tasks were marked failed"
     );
     info!(address = %addr, database = %db_path, "PROJECT DREAD Universal API listening");
     axum::serve(listener, app(state))
@@ -4802,12 +5587,12 @@ mod tests {
     use super::*;
     use axum::{
         body::{Body, to_bytes},
-        http::Request,
+        http::{HeaderMap, Request},
         routing::post,
     };
     use dread_agents::{
-        AdapterFuture, AgentCapability, AgentDescriptor, AgentEvent, AgentHealth, AgentHealthState,
-        AgentTask,
+        AdapterFuture, AgentAdapterError, AgentCapability, AgentDescriptor, AgentEvent,
+        AgentHealth, AgentHealthState, AgentTask,
     };
     #[cfg(test)]
     use futures::StreamExt;
@@ -4818,6 +5603,8 @@ mod tests {
     struct MockAgentAdapter {
         descriptor: AgentDescriptor,
         starts: Arc<Mutex<Vec<StartTaskRequest>>>,
+        cancel_error: Arc<Mutex<Option<String>>>,
+        status_running: Arc<Mutex<bool>>,
     }
 
     impl MockAgentAdapter {
@@ -4832,7 +5619,17 @@ mod tests {
                     enabled: true,
                 },
                 starts: Arc::new(Mutex::new(Vec::new())),
+                cancel_error: Arc::new(Mutex::new(None)),
+                status_running: Arc::new(Mutex::new(false)),
             }
+        }
+
+        fn reject_cancellation(&self) {
+            *self.cancel_error.lock().unwrap() = Some("mock provider refused cancellation".into());
+        }
+
+        fn keep_running(&self) {
+            *self.status_running.lock().unwrap() = true;
         }
     }
 
@@ -4875,10 +5672,15 @@ mod tests {
             _provider_task_id: &'a str,
         ) -> AdapterFuture<'a, AgentTask> {
             let task_id = task_id.to_string();
+            let state = if *self.status_running.lock().unwrap() {
+                AgentTaskState::Running
+            } else {
+                AgentTaskState::Succeeded
+            };
             Box::pin(async move {
                 Ok(AgentTask {
                     task_id,
-                    state: AgentTaskState::Succeeded,
+                    state,
                     provider_task_id: Some("provider-run-123".into()),
                     result: None,
                     error: None,
@@ -4915,7 +5717,15 @@ mod tests {
             _provider_task_id: &'a str,
         ) -> AdapterFuture<'a, AgentTask> {
             let task_id = task_id.to_string();
+            let error = self.cancel_error.lock().unwrap().clone();
             Box::pin(async move {
+                if let Some(message) = error {
+                    return Err(AgentAdapterError {
+                        code: "provider_cancel_not_confirmed".into(),
+                        message,
+                        retryable: false,
+                    });
+                }
                 Ok(AgentTask {
                     task_id,
                     state: AgentTaskState::Cancelled,
@@ -5275,6 +6085,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refused_provider_cancellation_keeps_task_unresolved_until_status_reconciles() {
+        let db = Arc::new(Mutex::new(open_database(":memory:").unwrap()));
+        let now = now_epoch();
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO tasks (id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, created_at, updated_at, agent_provider)
+                 VALUES ('agent-cancel-unconfirmed', 'Agent cancellation test', 'agent_task', 'hermes.capability', '{\"objective\":\"test\"}', 'queued', 1, 'test-operator', ?1, ?1, 'hermes')",
+                params![now],
+            )
+            .unwrap();
+
+        let adapter = Arc::new(MockAgentAdapter::new());
+        adapter.reject_cancellation();
+        adapter.keep_running();
+        let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
+        adapters.insert("hermes".into(), adapter.clone());
+        let (events, _) = broadcast::channel(64);
+        let cancellations = Arc::new(Mutex::new(HashMap::new()));
+        let (cancel_sender, cancel_receiver) = watch::channel(false);
+        cancellations
+            .lock()
+            .unwrap()
+            .insert("agent-cancel-unconfirmed".into(), cancel_sender);
+        let state = AppState {
+            db: Arc::clone(&db),
+            gpu: GpuGatewayClient::new("http://127.0.0.1:1").unwrap(),
+            supervisor: None,
+            events,
+            execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
+            agent_adapters: Arc::new(adapters),
+            cancellations,
+            api_token: Some("test-token".into()),
+            operator_id: "test-operator".into(),
+            auth_required: true,
+        };
+
+        let worker_state = state.clone();
+        let worker_adapter = adapter.clone();
+        let worker = tokio::spawn(async move {
+            execute_agent_task(
+                worker_state,
+                worker_adapter,
+                AgentTaskExecution {
+                    task_id: "agent-cancel-unconfirmed".into(),
+                    provider: "hermes".into(),
+                    capability_id: "hermes.capability".into(),
+                    payload: json!({"objective": "test"}),
+                    initial_event_cursor: 0,
+                },
+                cancel_receiver,
+            )
+            .await;
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if !adapter.starts.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("provider start should complete before cancellation is requested");
+
+        let response = cancel_task(
+            State(state.clone()),
+            Path("agent-cancel-unconfirmed".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.0["item"]["status"], "cancelling");
+        assert_eq!(response.0["cancellation_pending"], true);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let count: i64 = db
+                    .lock()
+                    .unwrap()
+                    .query_row(
+                        "SELECT COUNT(*) FROM task_events WHERE task_id = 'agent-cancel-unconfirmed' AND event_type = 'task_cancellation_unconfirmed'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                if count > 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("provider refusal should be recorded as unconfirmed");
+
+        let status: String = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM tasks WHERE id = 'agent-cancel-unconfirmed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "cancelling");
+        worker.abort();
+    }
+
+    #[tokio::test]
     async fn openhands_confirmation_endpoint_binds_decision_to_pending_action_and_rejects_replay() {
         use axum::{
             extract::{Path as AxumPath, State},
@@ -5495,6 +6414,23 @@ mod tests {
         Json(json!({"status": "ok", "gpu": "on-demand", "supervisor": "configured"}))
     }
 
+    async fn mock_telemetry(headers: HeaderMap) -> Json<Value> {
+        assert_eq!(
+            headers
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer test-supervisor-token-that-is-long-enough")
+        );
+        Json(json!({
+            "read_only": true,
+            "devices": [{
+                "index": 0,
+                "name": "NVIDIA GeForce RTX 3090",
+                "utilization_percent": 12.0
+            }]
+        }))
+    }
+
     async fn mock_models() -> Json<Value> {
         Json(json!({
             "object": "list",
@@ -5563,6 +6499,7 @@ mod tests {
         let mock = Router::new()
             .route("/health", get(mock_health))
             .route("/v1/models", get(mock_models))
+            .route("/v1/telemetry", get(mock_telemetry))
             .route("/v1/chat/completions", post(mock_completion))
             .route("/v1/leases", post(mock_supervisor_acquire))
             .route(
@@ -5609,6 +6546,32 @@ mod tests {
     async fn test_app() -> (Router, tokio::task::JoinHandle<()>) {
         let (router, _receiver, server) = test_app_with_events().await;
         (router, server)
+    }
+
+    #[test]
+    fn execution_limit_settings_apply_defaults_and_reject_out_of_range_values() {
+        assert_eq!(parse_positive_limit("LIMIT", None, 3, 16).unwrap(), 3);
+        assert_eq!(
+            parse_positive_limit("LIMIT", Some(" 4 "), 3, 16).unwrap(),
+            4
+        );
+        assert!(parse_positive_limit("LIMIT", Some("0"), 3, 16).is_err());
+        assert!(parse_positive_limit("LIMIT", Some("17"), 3, 16).is_err());
+        assert!(parse_positive_limit("LIMIT", Some("many"), 3, 16).is_err());
+    }
+
+    #[test]
+    fn builtin_task_resource_profiles_are_server_selected() {
+        assert_eq!(
+            builtin_resource_request("service_discovery"),
+            Some(ResourceRequest::CPU)
+        );
+        assert_eq!(
+            builtin_resource_request("gpu_chat"),
+            Some(ResourceRequest::GPU_MODEL)
+        );
+        assert_eq!(builtin_resource_request("agent_task"), None);
+        assert_eq!(builtin_resource_request("media_render"), None);
     }
 
     #[test]
@@ -5940,6 +6903,73 @@ mod tests {
                 .unwrap();
             assert!(!error.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_reconciles_cancelling_provider_tasks_without_resubmitting() {
+        let db = Arc::new(Mutex::new(open_database(":memory:").unwrap()));
+        let now = now_epoch();
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO tasks (id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, created_at, updated_at, agent_provider, provider_task_id, provider_event_cursor)
+                 VALUES ('recovered-cancellation', 'Recovered cancellation', 'agent_task', 'hermes.capability', '{}', 'cancelling', 1, 'test-operator', ?1, ?1, 'hermes', 'provider-run-123', 4)",
+                params![now],
+            )
+            .unwrap();
+
+        let adapter = Arc::new(MockAgentAdapter::new());
+        let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
+        adapters.insert("hermes".into(), adapter.clone());
+        let (events, _) = broadcast::channel(64);
+        let state = AppState {
+            db: Arc::clone(&db),
+            gpu: GpuGatewayClient::new("http://127.0.0.1:1").unwrap(),
+            supervisor: None,
+            events,
+            execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
+            agent_adapters: Arc::new(adapters),
+            cancellations: Arc::new(Mutex::new(HashMap::new())),
+            api_token: Some("test-token".into()),
+            operator_id: "test-operator".into(),
+            auth_required: true,
+        };
+
+        assert_eq!(recover_task_queue(&state).unwrap(), 1);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let status: String = db
+                    .lock()
+                    .unwrap()
+                    .query_row(
+                        "SELECT status FROM tasks WHERE id = 'recovered-cancellation'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                if status == "cancelled" {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("startup recovery should confirm provider cancellation");
+
+        assert!(
+            adapter.starts.lock().unwrap().is_empty(),
+            "recovery must reconcile the provider ID, not resubmit the task"
+        );
+        let recovery_events: i64 = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM task_events WHERE task_id = 'recovered-cancellation' AND event_type = 'task_cancellation_recovery_started'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recovery_events, 1);
     }
 
     #[tokio::test]
@@ -7285,6 +8315,153 @@ mod tests {
         server.abort();
     }
 
+    #[test]
+    fn token_usage_aggregation_counts_only_complete_provider_counters() {
+        let mut totals = TokenUsageTotals::default();
+        totals.observe(
+            &json!({"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}),
+        );
+        totals
+            .observe(&json!({"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}));
+        totals.observe(&json!({"usage":{"prompt_tokens":1,"completion_tokens":2}}));
+        totals.observe(&json!({"choices":[{"message":{"content":"no usage"}}]}));
+        assert_eq!(totals.prompt_tokens, 17);
+        assert_eq!(totals.completion_tokens, 8);
+        assert_eq!(totals.total_tokens, 25);
+        assert_eq!(totals.measured_responses, 2);
+        assert_eq!(totals.responses_without_usage, 2);
+    }
+
+    #[tokio::test]
+    async fn token_usage_route_reports_measured_provider_counters_without_estimates() {
+        let (router, server) = test_app().await;
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/usage/tokens")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["provider"], "llama.cpp-compatible local gateway");
+        assert_eq!(value["total_tokens"], 0);
+        assert_eq!(value["measured_responses"], 0);
+        assert_eq!(value["responses_without_usage"], 0);
+        assert_eq!(value["scan_limit"], 10000);
+        assert!(
+            value["note"]
+                .as_str()
+                .unwrap()
+                .contains("no token estimates")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn prompt_enhancement_uses_supervisor_and_returns_review_only_suggestion() {
+        let (router, server) = test_app().await;
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/prompt/enhance")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "qwen3.8:27b",
+                            "prompt": "write a test plan"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["enhanced_prompt"], "hello");
+        assert_eq!(value["requires_operator_review"], true);
+        assert_eq!(value["submitted"], false);
+
+        let tasks = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tasks.status(), StatusCode::OK);
+        let body = to_bytes(tasks.into_body(), usize::MAX).await.unwrap();
+        let tasks: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(tasks["items"].as_array().unwrap().len(), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn prompt_enhancement_rejects_invalid_prompt_and_unadvertised_model() {
+        let (router, server) = test_app().await;
+        let empty_prompt = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/prompt/enhance")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"model":"qwen3.8:27b","prompt":"  "}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(empty_prompt.status(), StatusCode::BAD_REQUEST);
+
+        let unknown_model = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/prompt/enhance")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"model":"not-in-gateway","prompt":"improve this"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unknown_model.status(), StatusCode::BAD_REQUEST);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn gpu_telemetry_route_uses_authenticated_read_only_supervisor_bridge() {
+        let (router, server) = test_app().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/gpu/telemetry")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["read_only"], true);
+        assert_eq!(value["devices"][0]["utilization_percent"], 12.0);
+        server.abort();
+    }
+
     #[tokio::test]
     async fn gpu_models_route_returns_gateway_models() {
         let (router, server) = test_app().await;
@@ -8082,7 +9259,130 @@ mod tests {
     }
 
     #[test]
+    fn running_provider_tasks_remain_cancelling_until_provider_confirmation() {
+        assert_eq!(
+            cancellation_transition("running", true, "agent_task"),
+            Some(("cancelling", true))
+        );
+        assert_eq!(
+            cancellation_transition("running", false, "gpu_chat"),
+            Some(("cancelling", true))
+        );
+        assert_eq!(
+            cancellation_transition("running", false, "service_discovery"),
+            Some(("cancelled", false))
+        );
+        assert_eq!(
+            cancellation_transition("cancelling", true, "agent_task"),
+            Some(("cancelling", true))
+        );
+        assert_eq!(
+            cancellation_transition("pending_approval", false, "gpu_chat"),
+            Some(("cancelled", false))
+        );
+        assert_eq!(
+            cancellation_transition("queued", true, "agent_task"),
+            Some(("cancelled", false))
+        );
+        assert_eq!(
+            cancellation_transition("completed", true, "agent_task"),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_completion_wins_a_race_with_pending_cancellation() {
+        let db = Arc::new(Mutex::new(open_database(":memory:").unwrap()));
+        let now = now_epoch();
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO tasks (id, title, task_type, payload_json, status, approval_required, created_at, updated_at, agent_provider)
+                 VALUES ('cancel-race', 'Cancel race', 'agent_task', '{}', 'cancelling', 1, ?1, ?1, 'hermes')",
+                params![now],
+            )
+            .unwrap();
+        let (events, mut receiver) = broadcast::channel(8);
+        let state = AppState {
+            db: Arc::clone(&db),
+            gpu: GpuGatewayClient::new("http://127.0.0.1:1").unwrap(),
+            supervisor: None,
+            events,
+            execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
+            agent_adapters: Arc::new(HashMap::new()),
+            cancellations: Arc::new(Mutex::new(HashMap::new())),
+            api_token: Some("test-token".into()),
+            operator_id: "test-operator".into(),
+            auth_required: true,
+        };
+
+        finish_agent_task(
+            &state,
+            "cancel-race",
+            "completed",
+            Some(json!({"answer": "provider completed before cancellation"})),
+            None,
+        );
+
+        let status: String = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM tasks WHERE id = 'cancel-race'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "completed");
+        let event = receiver.try_recv().unwrap();
+        assert_eq!(event.event_type, "task_succeeded");
+    }
+
+    #[test]
     fn timestamp_is_unix_epoch_seconds() {
         assert!(now_epoch() > 1_700_000_000);
+    }
+
+    #[tokio::test]
+    async fn local_discovery_routes_require_bearer_auth_and_return_bounded_inventory() {
+        let (router, server) = test_app_with_auth().await;
+        let protected_routes = [
+            "/api/models/local",
+            "/api/repair/plan",
+            "/api/gpu/telemetry",
+            "/api/usage/tokens",
+            "/api/prompt/enhance",
+            "/api/agents/manifests/discover",
+            "/api/media/comfyui/monitor",
+            "/api/media/workflows/discover",
+            "/api/extensions/discover",
+        ];
+
+        for uri in protected_routes {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        }
+
+        let authorized = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/models/local")
+                    .header(AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authorized.status(), StatusCode::OK);
+        let body = to_bytes(authorized.into_body(), usize::MAX).await.unwrap();
+        let inventory: Value = serde_json::from_slice(&body).unwrap();
+        assert!(inventory["models"].is_array());
+        assert!(inventory["scanned_entries"].is_number());
+        server.abort();
     }
 }

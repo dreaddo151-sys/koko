@@ -20,11 +20,18 @@ UNIT_DIR="$HOME/.config/systemd/user"
 ENV_FILE="$CONFIG_DIR/dread.env"
 SERVICE="dread-universal.service"
 UNIT_FILE="$UNIT_DIR/$SERVICE"
+WATCHDOG_SERVICE="dread-watchdog.service"
+WATCHDOG_TIMER="dread-watchdog.timer"
+WATCHDOG_SERVICE_FILE="$UNIT_DIR/$WATCHDOG_SERVICE"
+WATCHDOG_TIMER_FILE="$UNIT_DIR/$WATCHDOG_TIMER"
+WATCHDOG_STATE_DIR="$HOME/.local/state/dread-universal"
 STAMP="$(date -u +%Y%m%dT%H%M%S%N)"
 BACKUP=""
 ROLLBACK_DIR=""
 ENV_FILE_EXISTED=false
 UNIT_FILE_EXISTED=false
+WATCHDOG_SERVICE_EXISTED=false
+WATCHDOG_TIMER_EXISTED=false
 WAS_ENABLED=false
 
 for command in systemctl openssl curl install dpkg; do
@@ -42,14 +49,14 @@ case "$PREFIX" in
   *[[:space:]]*) printf 'Install directory cannot contain whitespace.\n' >&2; exit 1 ;;
 esac
 
-for required in bin/dread-universal web/dist/index.html config/services.toml config/agents.toml; do
+for required in bin/dread-universal web/dist/index.html config/services.toml config/agents.toml scripts/dread_watchdog.py systemd/dread-watchdog.service systemd/dread-watchdog.timer; do
   [[ -e "$BUNDLE_DIR/$required" ]] || {
     printf 'Bundle is incomplete: missing %s\n' "$required" >&2
     exit 1
   }
 done
 
-install -d -m 0700 "$CONFIG_DIR" "$DATA_DIR/data" "$UNIT_DIR" "$HOME/.cache"
+install -d -m 0700 "$CONFIG_DIR" "$DATA_DIR/data" "$UNIT_DIR" "$HOME/.cache" "$WATCHDOG_STATE_DIR"
 
 was_active=false
 install_complete=false
@@ -63,6 +70,14 @@ fi
 if [[ -e "$UNIT_FILE" ]]; then
   UNIT_FILE_EXISTED=true
   cp -a -- "$UNIT_FILE" "$ROLLBACK_DIR/dread-universal.service"
+fi
+if [[ -e "$WATCHDOG_SERVICE_FILE" ]]; then
+  WATCHDOG_SERVICE_EXISTED=true
+  cp -a -- "$WATCHDOG_SERVICE_FILE" "$ROLLBACK_DIR/dread-watchdog.service"
+fi
+if [[ -e "$WATCHDOG_TIMER_FILE" ]]; then
+  WATCHDOG_TIMER_EXISTED=true
+  cp -a -- "$WATCHDOG_TIMER_FILE" "$ROLLBACK_DIR/dread-watchdog.timer"
 fi
 if systemctl --user is-enabled --quiet "$SERVICE" 2>/dev/null; then
   WAS_ENABLED=true
@@ -110,9 +125,22 @@ fi
 if [[ ! -e "$ENV_FILE" ]]; then
   umask 077
   : > "$ENV_FILE"
-  if [[ -f "$PREFIX/.env" ]]; then
-    grep -E '^(DREAD_API_TOKEN|DREAD_OPERATOR_ID|DREAD_BIND|DREAD_DB_PATH|DREAD_WEB_ROOT|DREAD_SERVICES_CONFIG|DREAD_AGENTS_CONFIG|DREAD_GPU_GATEWAY_URL|DREAD_GPU_SUPERVISOR_URL|DREAD_GPU_SUPERVISOR_TOKEN|DREAD_SKILLS_ROOT|DREAD_PSTACK_VERSION|DREAD_PSTACK_REVISION)=' "$PREFIX/.env" >> "$ENV_FILE" || true
-  fi
+fi
+# Merge only recognized legacy settings that are missing from the per-user
+# environment file. Existing per-user values always win during an upgrade.
+if [[ -f "$PREFIX/.env" ]]; then
+  while IFS= read -r setting || [[ -n "$setting" ]]; do
+    [[ "$setting" == *=* ]] || continue
+    key="${setting%%=*}"
+    case "$key" in
+      DREAD_API_TOKEN|DREAD_OPERATOR_ID|DREAD_BIND|DREAD_DB_PATH|DREAD_WEB_ROOT|DREAD_SERVICES_CONFIG|DREAD_AGENTS_CONFIG|DREAD_GPU_GATEWAY_URL|DREAD_GPU_SUPERVISOR_URL|DREAD_GPU_SUPERVISOR_TOKEN|DREAD_COMFYUI_URL|DREAD_COMFYUI_ROOT|COMFYUI_HOME|DREAD_WORKSPACE|DREAD_MODEL_ROOTS|DREAD_COMFYUI_USER_ROOT|DREAD_COMFYUI_WORKFLOW_ROOTS|DREAD_PLUGIN_ROOTS|DREAD_AGENT_MANIFEST_ROOTS|DREAD_SKILLS_ROOT|DREAD_PSTACK_VERSION|DREAD_PSTACK_REVISION)
+        if ! grep -q "^${key}=" "$ENV_FILE"; then
+          printf '%s\n' "$setting" >> "$ENV_FILE"
+        fi
+        ;;
+      *) continue ;;
+    esac
+  done < "$PREFIX/.env"
 fi
 if ! grep -q '^DREAD_API_TOKEN=' "$ENV_FILE"; then
   printf 'DREAD_API_TOKEN=%s\n' "$(openssl rand -hex 32)" >> "$ENV_FILE"
@@ -124,7 +152,7 @@ chmod 0600 "$ENV_FILE"
 
 install -d -m 0700 "$(dirname -- "$PREFIX")"
 STAGE="$(mktemp -d "${PREFIX}.stage.XXXXXX")"
-cp -a "$BUNDLE_DIR/bin" "$BUNDLE_DIR/web" "$BUNDLE_DIR/scripts" "$BUNDLE_DIR/docs" "$STAGE/"
+cp -a "$BUNDLE_DIR/bin" "$BUNDLE_DIR/web" "$BUNDLE_DIR/scripts" "$BUNDLE_DIR/docs" "$BUNDLE_DIR/systemd" "$STAGE/"
 cp -a "$BUNDLE_DIR/config" "$STAGE/"
 if [[ -d "$PREFIX/config" ]]; then
   cp -a "$PREFIX/config/." "$STAGE/config/"
@@ -154,7 +182,6 @@ Environment=DREAD_DB_PATH=$DATA_DIR/data/dread_registry.sqlite3
 Environment=DREAD_WEB_ROOT=$PREFIX/web/dist
 Environment=DREAD_SERVICES_CONFIG=$CONFIG_DIR/services.toml
 Environment=DREAD_AGENTS_CONFIG=$CONFIG_DIR/agents.toml
-Environment=DREAD_GPU_GATEWAY_URL=http://127.0.0.1:11500
 WorkingDirectory=$PREFIX
 ExecStart=$PREFIX/bin/dread-universal
 Restart=on-failure
@@ -174,6 +201,20 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 WantedBy=default.target
 EOF
 chmod 0600 "$UNIT_FILE"
+
+# Install the watchdog units but leave the timer disabled. The operator must
+# explicitly enable dread-watchdog.timer after reviewing the bounded policy.
+if [[ ! -e "$WATCHDOG_SERVICE_FILE" ]]; then
+  sed \
+    -e "s|@DREAD_WATCHDOG_SCRIPT@|$PREFIX/scripts/dread_watchdog.py|g" \
+    -e "s|@DREAD_WATCHDOG_STATE_DIR@|$WATCHDOG_STATE_DIR|g" \
+    "$PREFIX/systemd/dread-watchdog.service" > "$WATCHDOG_SERVICE_FILE"
+  chmod 0600 "$WATCHDOG_SERVICE_FILE"
+fi
+if [[ ! -e "$WATCHDOG_TIMER_FILE" ]]; then
+  install -m 0600 "$PREFIX/systemd/dread-watchdog.timer" "$WATCHDOG_TIMER_FILE"
+fi
+
 
 rollback() {
   systemctl --user stop "$SERVICE" >/dev/null 2>&1 || true
@@ -201,6 +242,16 @@ rollback() {
     install -m 0600 "$ROLLBACK_DIR/dread-universal.service" "$UNIT_FILE"
   else
     rm -f -- "$UNIT_FILE"
+  fi
+  if [[ "$WATCHDOG_SERVICE_EXISTED" == true ]]; then
+    install -m 0600 "$ROLLBACK_DIR/dread-watchdog.service" "$WATCHDOG_SERVICE_FILE"
+  else
+    rm -f -- "$WATCHDOG_SERVICE_FILE"
+  fi
+  if [[ "$WATCHDOG_TIMER_EXISTED" == true ]]; then
+    install -m 0600 "$ROLLBACK_DIR/dread-watchdog.timer" "$WATCHDOG_TIMER_FILE"
+  else
+    rm -f -- "$WATCHDOG_TIMER_FILE"
   fi
   systemctl --user daemon-reload || true
   if [[ "$WAS_ENABLED" == true ]]; then
@@ -237,6 +288,8 @@ install_complete=true
 printf 'PROJECT DREAD installed and healthy at http://127.0.0.1:8765\n'
 printf 'API token file: %s (keep private; paste its value into the console)\n' "$ENV_FILE"
 printf 'Service: systemctl --user status %s\n' "$SERVICE"
+printf 'Optional watchdog installed but disabled: systemctl --user enable --now %s\n' "$WATCHDOG_TIMER"
+printf 'Watchdog restarts only %s (max 3 per 15 minutes, 60-second cooldown).\n' "$SERVICE"
 if [[ -n "$BACKUP" ]]; then
   printf 'Previous application files backed up at: %s\n' "$BACKUP"
 fi

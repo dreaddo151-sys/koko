@@ -1,6 +1,7 @@
 # PROJECT DREAD UNIVERSAL
 
-**Target:** Ubuntu 24.04 LTS and later Ubuntu releases only.  
+**Product target:** Host-agnostic dual-/multi-GPU PCs; no single-workstation path or GPU-count assumptions.
+**Current validated CI baseline:** Ubuntu 24.04 x86_64 (other OS/vendor adapters require their own CI and live acceptance).  
 **Product:** A local-first autonomous AI engineering Master Hub.  
 **Controlling specification:** [docs/MASTER-PLAN.md](docs/MASTER-PLAN.md).  
 **Workstation and engineering handoff:** [docs/WORK-LOG.md](docs/WORK-LOG.md).
@@ -13,6 +14,8 @@ DREAD is intended to provide one coherent operator environment for autonomous en
 - Preserve ComfyUI, the Python GPU Supervisor, authenticated bridge, model files, databases, configuration and user data.
 - llama.cpp is the active inference backend. Ollama is not started or used as the active model server.
 - The Python GPU Supervisor remains the only GPU lease and process-lifecycle authority. Rust must not launch a competing llama-server or bypass the authenticated bridge.
+- GPU inventory keeps vendor-reported IDs and PCI bus addresses separate from the current enumeration index; ID persistence is vendor-specific and is not assumed across hardware changes. NVIDIA uses `nvidia-smi` UUID/PCI data; AMD prefers `amd-smi` CUID/UUID alias plus BDF and static/live JSON; Intel uses `xpu-smi query --json`, a bounded discovery-JSON fallback and a CSV identity-only fallback. DREAD does not export raw AMD ASIC serials. Missing identity and telemetry fields remain unknown; they are never synthesized from array order.
+- Host adapters currently include NVIDIA `nvidia-smi`, AMD `rocm-smi`, Intel `xpu-smi` and Apple `system_profiler`; actual readings depend on the installed vendor driver and permissions.
 - Imported skills and agent prompt profiles start disabled and are untrusted reference content. Discovery/import does not execute code.
 - Changes must be backed up, reversible and verified against real postconditions.
 
@@ -22,7 +25,7 @@ The workspace includes an Axum API, SQLite-backed registry/task state, authentic
 
 This is a foundation, not the completed Universal Hub. Read [docs/WORK-LOG.md](docs/WORK-LOG.md) for dated evidence and known limitations.
 
-## Ubuntu build and test
+## Current Ubuntu build and test (first validated platform)
 
 Requirements: Ubuntu 24.04+, stable Rust with rustfmt/Clippy, Node.js 22+ and npm for the web console.
 
@@ -72,6 +75,13 @@ Open `http://127.0.0.1:5173`; Vite proxies API calls to `127.0.0.1:8765`. The to
 | `DREAD_PSTACK_VERSION` | `0.15.43` | Pstack catalog version |
 | `DREAD_PSTACK_REVISION` | unverified local copy | Verified source revision |
 | `DREAD_LLM_SERVER` | PATH discovery | Optional llama-server path |
+| `DREAD_WORKSPACE` | install-relative/current workspace discovery | Workspace root; do not assume a fixed mount point |
+| `DREAD_COMFYUI_ROOT` / `COMFYUI_HOME` | discovered/configured | ComfyUI installation root |
+| `DREAD_MODEL_ROOTS` | standard ComfyUI/Hugging Face/user roots | Optional path-separated local model inventory roots |
+| `DREAD_COMFYUI_USER_ROOT` | ComfyUI `user/default` root | Optional custom ComfyUI user directory |
+| `DREAD_COMFYUI_WORKFLOW_ROOTS` | ComfyUI user workflow locations | Optional path-separated workflow inventory roots |
+| `DREAD_PLUGIN_ROOTS` | Cursor/Claude/application roots | Optional path-separated local plugin manifest roots |
+| `DREAD_AGENT_MANIFEST_ROOTS` | install-relative and per-user `agents.d` roots | Optional path-separated local agent adapter manifest roots |
 
 Never commit API or Supervisor tokens. Store them outside the repository with restrictive permissions. Bearer authentication does not authorize LAN/public exposure.
 
@@ -80,7 +90,7 @@ Never commit API or Supervisor tokens. Store them outside the repository with re
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/health` | API liveness/version |
-| GET | `/api/system/profile` | Read-only host discovery |
+| GET | `/api/system/profile` | Read-only host discovery; reports vendor device ID, enumeration index and PCI bus address separately where available |
 | GET | `/api/services` | Configured local service health |
 | GET | `/api/agents` | Read-only configured/known endpoint probes |
 | GET | `/api/agent-adapters` | Authenticated inventory of explicitly configured provider adapters |
@@ -97,7 +107,34 @@ Never commit API or Supervisor tokens. Store them outside the repository with re
 | POST | `/api/tasks/{id}/approve` | Record approval; does not itself execute |
 | POST | `/api/tasks/{id}/run` | Queue supported approved task |
 | GET | `/api/gpu/models` | Models advertised by llama.cpp gateway |
+| GET | `/api/gpu/telemetry` | Read-only hardware telemetry via the authenticated Python GPU Supervisor bridge; bounded to 1 MiB |
+| GET | `/api/models/local` | Bounded local model-file inventory; reads selected GGUF header fields (name, architecture, context and raw file type) without loading weights |
+| GET | `/api/media/comfyui/monitor` | Read-only ComfyUI system, queue and recent history monitor |
+| GET | `/api/media/workflows/discover` | Bounded metadata-only ComfyUI workflow catalog; never submits workflows |
+| GET | `/api/extensions/discover` | Read-only Cursor/Claude/generic plugin manifest inventory; results remain untrusted/disabled |
+| GET | `/api/agents/manifests/discover` | Read-only local agent adapter manifest inventory; does not probe or start agents |
+| GET | `/api/repair/plan` | Evidence-backed diagnostic repair proposals; does not apply changes |
 | POST | `/api/gpu/v1/chat/completions` | Supervisor-managed inference |
+| GET | `/api/usage/tokens` | Aggregate exact provider-reported token counters from completed `gpu_chat` tasks; missing counters are reported separately, never estimated |
+| POST | `/api/prompt/enhance` | Generate a local-model prompt suggestion through the authenticated Python GPU Supervisor; returns a preview only and never creates or executes a task |
+
+## Host vs Supervisor GPU telemetry
+
+- `GET /api/system/profile` is the host discovery snapshot. It inventories OS/CPU/storage/GPU devices through installed host utilities and reports provider ID/PCI identity where exposed.
+- `GET /api/gpu/telemetry` is a separate read-only sample returned by the Python GPU Supervisor bridge. It includes only fields the bridge obtains from `nvidia-smi`: utilization, VRAM use/total, temperature, power and current PCIe link. It is bearer-authenticated, loopback-only through the existing bridge client, has a 1 MiB response cap and never acquires or changes a GPU lease.
+- The GPU console shows these two sources separately and polls Supervisor telemetry only while the GPU page is open (30-second interval). The Supervisor remains the single authority for GPU admission and process lifecycle.
+
+
+AMD SMI CLI references: https://rocmdocs.amd.com/projects/amdsmi/en/develop/how-to/amdsmi-cli-tool.html and https://rocmdocs.amd.com/projects/amdsmi/en/develop/reference/changelog.html. The adapter uses only read-only `list`, `static`, and `metric` JSON commands, merges by provider enumeration index, parses explicit units, prefers CUID/UUID aliases and never exposes the raw ASIC serial. Legacy `rocm-smi --showproductname` is identity-only.
+
+Intel XPU Manager CLI references: https://intel.github.io/xpumanager/2.0/xpu-smi/overview.html, https://intel.github.io/xpumanager/2.0/xpu-smi/query.html, and https://intel.github.io/xpumanager/2.0/xpu-smi/discovery.html. DREAD prefers read-only `query --json`, falls back to static `discovery --json`, then to `--query-gpu` CSV for identity only. Probes use XPU-SMI's global no-progress `--timeout` and an outer process bound; DREAD never calls config, reset or firmware-update operations.
+
+## Token observability and prompt enhancement
+
+- Token usage is aggregated only from completed `gpu_chat` results whose provider response includes complete `prompt_tokens`, `completion_tokens` and `total_tokens` counters. The API scans at most the latest 10,000 completed results per request; partial/missing counters are reported separately.
+- DREAD does not infer or estimate token counts when the provider omits usage metadata.
+- Prompt enhancement uses the selected model advertised by the local llama.cpp gateway and sends inference through the authenticated Python GPU Supervisor bridge. The endpoint returns a bounded suggestion marked `requires_operator_review`; it sets `submitted=false`, does not create a task, and never bypasses normal approval.
+- In the operator console, the enhanced prompt is a preview. The operator must explicitly apply or discard it before any separate task creation.
 
 ## Agent and extension boundaries
 
@@ -127,9 +164,24 @@ The repository's reviewed Pstack snapshot is 0.15.43 at commit `2f87c854fe3e2fcd
 
 The read-only host profile also enumerates persistent and network-mounted filesystems using GNU `df` with bounded execution. It reports source, filesystem type, mount point, total, used and available MiB, while excluding common pseudo-filesystems (for example `tmpfs`, `proc`, `sysfs` and `overlay`). The overview console renders the discovered mounts. This is mount-level capacity discovery, not physical-disk topology, SMART health or RAID status.
 
-## Ubuntu-only CI and release
+## Current CI and release baseline
 
-GitHub Actions targets Ubuntu 24.04 only. The release workflow creates an Ubuntu x86_64 build bundle and SHA-256 manifest. A production `.deb`, systemd-integrated installer, signed updater, atomic activation and rollback remain required before calling the package an installer or updater complete.
+GitHub Actions currently validates Ubuntu 24.04 x86_64. Ubuntu is the first supported/verified packaging baseline, not the product boundary. The universal architecture must not depend on Ubuntu-specific filesystem layouts, fixed GPU counts or NVIDIA-only inventory. Add Windows/macOS and other Linux platform adapters and CI before advertising those platforms as supported. The existing release workflow creates an Ubuntu x86_64 build bundle and SHA-256 manifest. A production package, signed updater, atomic activation and verified rollback remain required before calling the package or updater complete.
+
+## Optional Rust API watchdog
+
+The Ubuntu bundle includes a bounded watchdog for the DREAD Rust API only. It probes the configured loopback `/health` URL and, only when its user timer has been explicitly enabled, can restart `dread-universal.service`. It never targets ComfyUI, llama.cpp, the Python GPU Supervisor/bridge or the legacy Python Hub.
+
+Policy: at most 3 restart requests in a rolling 15-minute window, at least 60 seconds between attempts, 2-second health probe timeout, 4 KiB response limit, private state and incident files. After the ceiling is reached it escalates and stops restarting. The default manual invocation is dry-run; the systemd oneshot uses `--apply` only when an operator enables the timer.
+
+The installer places `dread-watchdog.service` and `dread-watchdog.timer` in the user unit directory but leaves the timer disabled. To opt in after reviewing the unit and policy:
+
+```bash
+systemctl --user enable --now dread-watchdog.timer
+systemctl --user list-timers dread-watchdog.timer
+```
+
+Disable it with `systemctl --user disable --now dread-watchdog.timer`. Incidents are stored privately under `~/.local/state/dread-universal/`. Existing customized watchdog units are preserved during upgrades. This is bounded service recovery, not a general repair engine.
 
 ## GPU ownership
 
@@ -137,7 +189,7 @@ The Python GPU Supervisor is the sole authority for GPU leases and process lifec
 
 ## Completion criteria
 
-See [docs/MASTER-PLAN.md](docs/MASTER-PLAN.md) for clean Ubuntu installation, real model/agent discovery and task execution, dual-3090 lease safety, valid image/video artifacts, legacy Hub regression coverage, self-repair/rollback drills and workstation acceptance.
+See [docs/MASTER-PLAN.md](docs/MASTER-PLAN.md) for the host-neutral dual-/multi-GPU architecture, Pstack and agent/model discovery, capability monitoring, GPU-safe task orchestration, verified media workflows, policy-controlled self-repair, signed upgrades, platform-adapter roadmap and live acceptance. The RTX 3090 workstation is one reference fixture, not a product-specific target.
 
 
 ## Ubuntu packaging
@@ -153,19 +205,27 @@ cd ..
 bash scripts/package-ubuntu.sh
 ```
 
-The packaging script creates an Ubuntu `.deb`, a portable `.tar.gz`, and `SHA256SUMS` under `dist/release/`. It packages the API, production console, default service/agent configuration, bridge helper, user systemd unit and operating documentation.
+The packaging script creates an Ubuntu `.deb`, a portable `.tar.gz`, and `SHA256SUMS` under `dist/release/`. The tagged GitHub release workflow additionally creates the keyless Sigstore bundle `SHA256SUMS.sigstore.json` using GitHub OIDC, verifies it against the pinned release-workflow identity, and publishes it alongside the artifacts. A locally assembled package directory is not a signed official release until that bundle has been created and verified.
 
-Portable install (run as the regular desktop user, not with sudo):
+**Verify the release before installing.** Install Sigstore Cosign using the [official instructions](https://docs.sigstore.dev/installation/), put the downloaded release assets in one directory, then run:
 
 ```bash
-tar -xzf dist/release/dread-universal-ubuntu-*.tar.gz
+./verify-release.sh ./SHA256SUMS
+```
+
+The verifier requires the adjacent `SHA256SUMS.sigstore.json` bundle, checks the GitHub release workflow identity and OIDC issuer, then validates every artifact checksum. Do not install a release that lacks the bundle or fails verification.
+
+Portable install (run as the regular desktop user, not with sudo), after successful verification:
+
+```bash
+tar -xzf dread-universal-ubuntu-*.tar.gz
 ./bundle/install-user.sh
 ```
 
-Debian package install:
+Debian package install, after successful verification:
 
 ```bash
-sudo dpkg -i dist/release/dread-universal_*.deb
+sudo dpkg -i ./dread-universal_*.deb
 /usr/share/dread-universal/configure-user.sh
 ```
 
