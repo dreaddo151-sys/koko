@@ -2035,10 +2035,7 @@ mod tests {
             amd_power_mw(&amd_number_and_unit(&json!("220.5 W")).unwrap()),
             Some(220_500)
         );
-        assert_eq!(
-            amd_pcie_generation(&json!("32 GT/s")),
-            Some(5)
-        );
+        assert_eq!(amd_pcie_generation(&json!("32 GT/s")), Some(5));
     }
 
     #[test]
