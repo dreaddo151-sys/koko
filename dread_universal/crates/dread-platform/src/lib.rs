@@ -10,9 +10,11 @@ use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
+    io::Read,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::{Mutex, OnceLock},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -133,23 +135,57 @@ fn find_binary(names: &[&str]) -> Option<PathBuf> {
     None
 }
 
+const MAX_PROBE_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+
 fn run_probe_with_timeout(program: &Path, args: &[&str], timeout_seconds: u64) -> Option<String> {
-    let timeout_arg = format!("{timeout_seconds}s");
-    let output = if let Some(timeout) = find_binary(&["timeout"]) {
-        Command::new(timeout)
-            .arg("--signal=KILL")
-            .arg(&timeout_arg)
-            .arg(program)
-            .args(args)
-            .output()
-            .ok()?
-    } else {
-        Command::new(program).args(args).output().ok()?
+    let mut child = Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = thread::spawn(move || {
+        let mut captured = Vec::new();
+        let mut buffer = [0_u8; 8192];
+        let mut exceeded_limit = false;
+        loop {
+            let count = stdout.read(&mut buffer).map_err(|_| ())?;
+            if count == 0 {
+                break;
+            }
+            let remaining = MAX_PROBE_OUTPUT_BYTES.saturating_sub(captured.len());
+            let retained = count.min(remaining);
+            captured.extend_from_slice(&buffer[..retained]);
+            exceeded_limit |= retained < count;
+        }
+        if exceeded_limit {
+            Err(())
+        } else {
+            Ok(captured)
+        }
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds.max(1));
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return None;
+            }
+        }
     };
-    if !output.status.success() {
+    let output = reader.join().ok()?.ok()?;
+    if !status.success() {
         return None;
     }
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    Some(String::from_utf8_lossy(&output).into_owned())
 }
 
 fn run_probe(program: &Path, args: &[&str]) -> Option<String> {
@@ -1623,6 +1659,19 @@ pub fn cached_host_profile() -> HostProfile {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_timeout_kills_a_stalled_process_without_gnu_timeout() {
+        let started = Instant::now();
+        let output = run_probe_with_timeout(
+            Path::new("/bin/sh"),
+            &["-c", "exec sleep 5"],
+            1,
+        );
+        assert!(output.is_none());
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
 
     #[test]
     fn cpu_topology_counts_unique_physical_and_core_pairs() {
