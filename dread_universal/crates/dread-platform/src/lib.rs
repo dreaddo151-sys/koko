@@ -141,7 +141,8 @@ fn run_probe_with_timeout(
     let timeout_arg = format!("{timeout_seconds}s");
     let output = if let Some(timeout) = find_binary(&["timeout"]) {
         Command::new(timeout)
-            .args(["--signal=KILL", &timeout_arg])
+            .arg("--signal=KILL")
+            .arg(&timeout_arg)
             .arg(program)
             .args(args)
             .output()
