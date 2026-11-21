@@ -1669,6 +1669,17 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(3));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn probe_rejects_output_larger_than_the_capture_budget() {
+        let output = run_probe_with_timeout(
+            Path::new("/usr/bin/head"),
+            &["-c", "4194305", "/dev/zero"],
+            3,
+        );
+        assert!(output.is_none());
+    }
+
     #[test]
     fn cpu_topology_counts_unique_physical_and_core_pairs() {
         let sample = "processor : 0\nphysical id : 0\ncore id : 0\n\nprocessor : 1\nphysical id : 0\ncore id : 0\n\nprocessor : 2\nphysical id : 0\ncore id : 1\n\nprocessor : 3\nphysical id : 1\ncore id : 0\n";
