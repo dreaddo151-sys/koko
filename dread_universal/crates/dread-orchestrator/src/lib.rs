@@ -366,8 +366,10 @@ impl ExecutionGate {
     /// state and performs provider-specific cancellation. It deliberately does not
     /// apply the generic attempt timeout or automatic retry: dropping a remote
     /// request can leave non-idempotent provider work running after DREAD has lost
-    /// track of it. The supplied operation must observe cancellation and return only
-    /// after it has confirmed or completed provider-side cleanup.
+    /// track of it. The supplied operation must either observe cancellation and
+    /// confirm provider-side cleanup, or remain awaited until the provider operation
+    /// is known terminal. It must never drop an in-flight remote request merely
+    /// because the local caller requested cancellation.
     pub async fn run_managed<T, F, Fut>(
         &self,
         task_id: impl Into<String>,
