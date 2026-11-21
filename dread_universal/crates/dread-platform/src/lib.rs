@@ -885,10 +885,7 @@ fn parse_amd_smi_json(list_json: &str, static_json: &str, metric_json: &str) -> 
             // Prefer the documented derived CUID. Fall back to AMD's
             // CUID-first UUID compatibility alias for older XPU Manager builds.
             // Never export the raw ASIC serial as a device ID.
-            let uuid = amd_string_at(
-                &list,
-                &[&["cuid"], &["uuid"], &["gpu_uuid"], &["hip_uuid"]],
-            );
+            let uuid = amd_string_at(&list, &[&["cuid"], &["uuid"], &["gpu_uuid"], &["hip_uuid"]]);
             let pci_bus_id = amd_string_at(&list, &[&["bdf"], &["pci_bus_id"], &["bus", "bdf"]])
                 .or_else(|| amd_string_at(&static_info, &[&["bus", "bdf"], &["bdf"]]));
 
