@@ -6,7 +6,7 @@ use axum::{
         ws::{Message, WebSocket},
     },
     http::{
-        HeaderMap, StatusCode, Uri,
+        StatusCode, Uri,
         header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE},
     },
     middleware::{self, Next},
@@ -5149,7 +5149,7 @@ mod tests {
     use super::*;
     use axum::{
         body::{Body, to_bytes},
-        http::Request,
+        http::{HeaderMap, Request},
         routing::post,
     };
     use dread_agents::{
