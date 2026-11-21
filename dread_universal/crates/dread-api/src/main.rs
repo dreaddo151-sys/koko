@@ -4480,6 +4480,80 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
     }
 
     let mut resumable = Vec::new();
+    let mut cancelling = Vec::new();
+    let cancelling_rows: Vec<(String, Option<String>, Option<String>)> = {
+        let mut statement = tx.prepare(
+            "SELECT id, agent_provider, provider_task_id FROM tasks WHERE status = 'cancelling'",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (task_id, provider, provider_task_id) in cancelling_rows {
+        let Some(provider) = provider else {
+            emitted.push(append_task_event(
+                &tx,
+                &task_id,
+                "task_cancellation_recovery_unavailable",
+                &json!({
+                    "status": "cancelling",
+                    "reason": "This execution path has no durable provider task identifier; manual outcome reconciliation is required"
+                }),
+                "recovery",
+                now,
+            ).map_err(|error| anyhow::anyhow!(error.message))?);
+            continue;
+        };
+        let Some(provider_task_id) = provider_task_id else {
+            emitted.push(append_task_event(
+                &tx,
+                &task_id,
+                "task_cancellation_recovery_unavailable",
+                &json!({
+                    "status": "cancelling",
+                    "provider": provider,
+                    "reason": "No provider task identifier was persisted before restart; DREAD will not guess or resubmit the task"
+                }),
+                "recovery",
+                now,
+            ).map_err(|error| anyhow::anyhow!(error.message))?);
+            continue;
+        };
+        let adapter_enabled = state
+            .agent_adapters
+            .get(&provider)
+            .is_some_and(|adapter| adapter.descriptor().enabled);
+        if !adapter_enabled {
+            emitted.push(append_task_event(
+                &tx,
+                &task_id,
+                "task_cancellation_recovery_unavailable",
+                &json!({
+                    "status": "cancelling",
+                    "provider": provider,
+                    "reason": "The provider adapter is not configured and enabled; task remains unresolved"
+                }),
+                "recovery",
+                now,
+            ).map_err(|error| anyhow::anyhow!(error.message))?);
+            continue;
+        }
+        emitted.push(append_task_event(
+            &tx,
+            &task_id,
+            "task_cancellation_recovery_started",
+            &json!({"status": "cancelling", "provider": provider}),
+            "recovery",
+            now,
+        ).map_err(|error| anyhow::anyhow!(error.message))?);
+        cancelling.push(CancellingTaskRecovery {
+            id: task_id,
+            provider,
+            provider_task_id,
+        });
+    }
+
     let running_agents: Vec<QueuedTaskRecovery> = {
         let mut statement = tx.prepare(
             "SELECT id, task_type, capability_id, approval_required, approved_by, payload_json, agent_provider, provider_event_cursor
