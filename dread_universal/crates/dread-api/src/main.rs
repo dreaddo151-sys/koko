@@ -42,7 +42,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{broadcast, watch};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 const MAX_API_BODY_BYTES: usize = 32 * 1024 * 1024;
@@ -4630,6 +4630,7 @@ async fn cancel_task(
             });
         }
     };
+    let mut cancellation_event = None;
     if changed {
         tx.execute(
             "UPDATE tasks SET status = ?2, updated_at = ?3 WHERE id = ?1",
@@ -4654,13 +4655,16 @@ async fn cancel_task(
             "operator",
             now,
         )?;
-        let _ = state.events.send(event);
+        cancellation_event = Some(event);
     }
     let task = tx.query_row(
         "SELECT id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, approval_reason, created_at, updated_at
          FROM tasks WHERE id = ?1", params![id], task_from_row
     ).map_err(|e| ApiError::internal(e.to_string()))?;
     tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
+    if let Some(event) = cancellation_event {
+        let _ = state.events.send(event);
+    }
     if let Ok(cancellations) = state.cancellations.lock()
         && let Some(sender) = cancellations.get(&id)
     {
