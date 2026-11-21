@@ -4122,21 +4122,27 @@ async fn execute_approved_task(
         let runner_type = task_type.clone();
         state
             .execution
-            .run_for_resources(resources, task_id.clone(), cancellation, move |_, cancellation| {
-                let runner_type = runner_type.clone();
-                async move {
-                    if *cancellation.borrow() {
-                        return Err("Task cancelled before runner start".to_string());
-                    }
-                    match runner_type.as_str() {
-                        "service_discovery" => {
-                            let Json(result) = services().await.map_err(|error| error.message)?;
-                            Ok(result)
+            .run_for_resources(
+                resources,
+                task_id.clone(),
+                cancellation,
+                move |_, cancellation| {
+                    let runner_type = runner_type.clone();
+                    async move {
+                        if *cancellation.borrow() {
+                            return Err("Task cancelled before runner start".to_string());
                         }
-                        _ => Err(format!("No reviewed runner for task type '{runner_type}'")),
+                        match runner_type.as_str() {
+                            "service_discovery" => {
+                                let Json(result) =
+                                    services().await.map_err(|error| error.message)?;
+                                Ok(result)
+                            }
+                            _ => Err(format!("No reviewed runner for task type '{runner_type}'")),
+                        }
                     }
-                }
-            })
+                },
+            )
             .await
             .map(|result| (result.result, result.attempts, result.elapsed_ms))
     };
