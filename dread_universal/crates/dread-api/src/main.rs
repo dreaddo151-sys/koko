@@ -8967,7 +8967,10 @@ mod tests {
             cancellation_transition("queued", true, "agent_task"),
             Some(("cancelled", false))
         );
-        assert_eq!(cancellation_transition("completed", true, "agent_task"), None);
+        assert_eq!(
+            cancellation_transition("completed", true, "agent_task"),
+            None
+        );
     }
 
     #[test]
