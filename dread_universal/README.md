@@ -125,7 +125,7 @@ Never commit API or Supervisor tokens. Store them outside the repository with re
 - The GPU console shows these two sources separately and polls Supervisor telemetry only while the GPU page is open (30-second interval). The Supervisor remains the single authority for GPU admission and process lifecycle.
 
 
-Intel XPU Manager CLI references: https://intel.github.io/xpumanager/2.0/xpu-smi/overview.html, https://intel.github.io/xpumanager/2.0/xpu-smi/query.html, and https://intel.github.io/xpumanager/2.0/xpu-smi/discovery.html. DREAD uses read-only query/discovery JSON only.
+Intel XPU Manager CLI references: https://intel.github.io/xpumanager/2.0/xpu-smi/overview.html, https://intel.github.io/xpumanager/2.0/xpu-smi/query.html, and https://intel.github.io/xpumanager/2.0/xpu-smi/discovery.html. DREAD prefers read-only `query --json`, falls back to static `discovery --json`, then to `--query-gpu` CSV for identity only. Probes use XPU-SMI's global no-progress `--timeout` and an outer process bound; DREAD never calls config, reset or firmware-update operations.
 
 ## Token observability and prompt enhancement
 
