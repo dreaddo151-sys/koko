@@ -401,7 +401,6 @@ fn intel_nested_number(object: &Value, path: &[&str]) -> Option<f64> {
         .filter(|number| number.is_finite())
 }
 
-
 fn intel_discovery_memory_mib(object: &Value) -> Option<f64> {
     if let Some(value) = intel_number(object, &["memory_physical_size_mib", "memory_total_mib"]) {
         return Some(value);
@@ -584,7 +583,6 @@ fn parse_intel_discovery_json(output: &str) -> Vec<GpuDevice> {
         })
         .collect()
 }
-
 
 /// Parse the documented xpu-smi --query-gpu CSV identity fallback.
 fn parse_intel_identity_csv(output: &str) -> Vec<GpuDevice> {
