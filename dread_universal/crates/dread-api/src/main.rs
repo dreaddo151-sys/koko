@@ -4092,55 +4092,62 @@ async fn execute_approved_task(
     };
     let _ = state.events.send(started_event);
 
-    let runner_type = task_type.clone();
-    let runner_payload = payload.clone();
-    let runner_gpu = state.gpu.clone();
-    let runner_supervisor = state.supervisor.clone();
-    let runner_db = state.db.clone();
-    let execution = state
-        .execution
-        .run_for_resources(resources, task_id.clone(), cancellation, move |_, cancellation| {
-            let runner_type = runner_type.clone();
-            let runner_payload = runner_payload.clone();
-            let runner_gpu = runner_gpu.clone();
-            let runner_supervisor = runner_supervisor.clone();
-            let runner_db = runner_db.clone();
-            async move {
-                if *cancellation.borrow() {
-                    return Err("Task cancelled before runner start".to_string());
-                }
-                match runner_type.as_str() {
-                    "service_discovery" => {
-                        let Json(result) = services().await.map_err(|error| error.message)?;
-                        Ok(result)
+    // GPU inference is non-interruptible through the current Supervisor bridge.
+    // Keep its HTTP future alive until the bridge returns a terminal response; a
+    // caller cancellation must not drop the request and falsely release GPU work.
+    let execution = if task_type == "gpu_chat" {
+        let runner_payload = payload.clone();
+        let runner_gpu = state.gpu.clone();
+        let runner_supervisor = state.supervisor.clone();
+        let runner_db = state.db.clone();
+        let started = std::time::Instant::now();
+        state
+            .execution
+            .run_managed_for_resources(resources, task_id.clone(), cancellation, move |_cancellation| async move {
+                let supervisor = runner_supervisor
+                    .as_ref()
+                    .ok_or_else(|| "GPU chat is disabled until the Python GPU Supervisor bridge is configured".to_string())?;
+                let contexts = load_enabled_skill_contexts(&runner_db, &runner_payload)?;
+                execute_gpu_chat(&runner_gpu, supervisor, &runner_payload, &contexts).await
+            })
+            .await
+            .map(|result| {
+                (
+                    result,
+                    1,
+                    started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                )
+            })
+    } else {
+        let runner_type = task_type.clone();
+        state
+            .execution
+            .run_for_resources(resources, task_id.clone(), cancellation, move |_, cancellation| {
+                let runner_type = runner_type.clone();
+                async move {
+                    if *cancellation.borrow() {
+                        return Err("Task cancelled before runner start".to_string());
                     }
-                    "gpu_chat" => match runner_supervisor.as_ref() {
-                        Some(supervisor) => {
-                            let contexts =
-                                load_enabled_skill_contexts(&runner_db, &runner_payload)?;
-                            execute_gpu_chat(
-                                &runner_gpu,
-                                supervisor,
-                                &runner_payload,
-                                &contexts,
-                            )
-                            .await
+                    match runner_type.as_str() {
+                        "service_discovery" => {
+                            let Json(result) = services().await.map_err(|error| error.message)?;
+                            Ok(result)
                         }
-                        None => Err("GPU chat is disabled until the Python GPU Supervisor bridge is configured".into()),
-                    },
-                    _ => Err(format!("No reviewed runner for task type '{runner_type}'")),
+                        _ => Err(format!("No reviewed runner for task type '{runner_type}'")),
+                    }
                 }
-            }
-        })
-        .await;
+            })
+            .await
+            .map(|result| (result.result, result.attempts, result.elapsed_ms))
+    };
 
     let (status, result_json, error, attempts, elapsed_ms) = match execution {
-        Ok(result) => (
+        Ok((result, attempts, elapsed_ms)) => (
             "completed",
-            Some(result.result.to_string()),
+            Some(result.to_string()),
             None,
-            result.attempts,
-            result.elapsed_ms,
+            attempts,
+            elapsed_ms,
         ),
         Err(error) => {
             let attempts = match &error {
@@ -4180,11 +4187,16 @@ async fn execute_approved_task(
         let Some(current_status) = current_status else {
             return;
         };
-        let cancellation_unconfirmed = current_status == "cancelling" && status == "cancelled";
+        let cancellation_before_start =
+            current_status == "cancelling" && status == "cancelled" && attempts == 0;
+        let cancellation_unconfirmed =
+            current_status == "cancelling" && status == "cancelled" && attempts > 0;
         let final_status = if current_status == "cancelled" {
             "cancelled"
         } else if current_status == "running" {
             status
+        } else if cancellation_before_start {
+            "cancelled"
         } else if cancellation_unconfirmed {
             "cancelling"
         } else if current_status == "cancelling" && matches!(status, "completed" | "failed") {
