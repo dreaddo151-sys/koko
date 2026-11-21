@@ -4180,16 +4180,26 @@ async fn execute_approved_task(
         let Some(current_status) = current_status else {
             return;
         };
+        let cancellation_unconfirmed = current_status == "cancelling" && status == "cancelled";
         let final_status = if current_status == "cancelled" {
             "cancelled"
         } else if current_status == "running" {
             status
+        } else if cancellation_unconfirmed {
+            "cancelling"
+        } else if current_status == "cancelling" && matches!(status, "completed" | "failed") {
+            status
         } else {
             return;
         };
-        if final_status != "cancelled"
+        let final_error = if cancellation_unconfirmed {
+            Some("The DREAD request was cancelled, but the Python GPU Supervisor bridge cannot confirm that upstream inference stopped. The task remains in cancelling state for operator reconciliation.".to_string())
+        } else {
+            error.clone()
+        };
+        if !matches!(final_status, "cancelled" | "cancelling")
             && tx.execute(
-                "UPDATE tasks SET status = ?2, updated_at = ?3 WHERE id = ?1 AND status = 'running'",
+                "UPDATE tasks SET status = ?2, updated_at = ?3 WHERE id = ?1 AND status IN ('running', 'cancelling')",
                 params![task_id, final_status, completed_at],
             ).is_err()
         {
@@ -4198,7 +4208,7 @@ async fn execute_approved_task(
         if tx.execute(
             "INSERT OR REPLACE INTO task_results (task_id, result_json, error, attempts, elapsed_ms, completed_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![task_id, result_json, error, attempts, elapsed_ms, completed_at],
+            params![task_id, result_json, final_error, attempts, elapsed_ms, completed_at],
         ).is_err()
         {
             return;
@@ -4246,14 +4256,18 @@ async fn execute_approved_task(
                 return;
             }
         }
-        let event_type = match final_status {
-            "completed" => "task_succeeded",
-            "cancelled" => "task_execution_cancelled",
-            _ => "task_failed",
+        let event_type = if cancellation_unconfirmed {
+            "task_cancellation_unconfirmed"
+        } else {
+            match final_status {
+                "completed" => "task_succeeded",
+                "cancelled" => "task_execution_cancelled",
+                _ => "task_failed",
+            }
         };
         let payload = json!({
             "status": final_status,
-            "error": error,
+            "error": final_error,
             "attempts": attempts,
             "elapsed_ms": elapsed_ms
         });
@@ -4604,10 +4618,11 @@ async fn get_task_result(
 fn cancellation_transition(
     current_status: &str,
     has_agent_provider: bool,
+    task_type: &str,
 ) -> Option<(&'static str, bool)> {
     match current_status {
         "cancelling" => Some(("cancelling", true)),
-        "running" if has_agent_provider => Some(("cancelling", true)),
+        "running" if has_agent_provider || task_type == "gpu_chat" => Some(("cancelling", true)),
         "pending_approval" | "approved" | "queued" | "running" => Some(("cancelled", false)),
         _ => None,
     }
@@ -4622,19 +4637,19 @@ async fn cancel_task(
     let tx = conn
         .transaction()
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    let current: Option<(String, Option<String>)> = tx
+    let current: Option<(String, Option<String>, String)> = tx
         .query_row(
-            "SELECT status, agent_provider FROM tasks WHERE id = ?1",
+            "SELECT status, agent_provider, task_type FROM tasks WHERE id = ?1",
             params![id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    let Some((current_status, agent_provider)) = current else {
+    let Some((current_status, agent_provider, task_type)) = current else {
         return Err(ApiError::not_found("Task not found"));
     };
     let Some((next_status, cancellation_pending)) =
-        cancellation_transition(&current_status, agent_provider.is_some())
+        cancellation_transition(&current_status, agent_provider.is_some(), &task_type)
     else {
         return Err(ApiError {
             status: StatusCode::CONFLICT,
@@ -8928,22 +8943,30 @@ mod tests {
     #[test]
     fn running_provider_tasks_remain_cancelling_until_provider_confirmation() {
         assert_eq!(
-            cancellation_transition("running", true),
+            cancellation_transition("running", true, "agent_task"),
             Some(("cancelling", true))
         );
         assert_eq!(
-            cancellation_transition("cancelling", true),
+            cancellation_transition("running", false, "gpu_chat"),
             Some(("cancelling", true))
         );
         assert_eq!(
-            cancellation_transition("pending_approval", false),
+            cancellation_transition("running", false, "service_discovery"),
             Some(("cancelled", false))
         );
         assert_eq!(
-            cancellation_transition("queued", true),
+            cancellation_transition("cancelling", true, "agent_task"),
+            Some(("cancelling", true))
+        );
+        assert_eq!(
+            cancellation_transition("pending_approval", false, "gpu_chat"),
             Some(("cancelled", false))
         );
-        assert_eq!(cancellation_transition("completed", true), None);
+        assert_eq!(
+            cancellation_transition("queued", true, "agent_task"),
+            Some(("cancelled", false))
+        );
+        assert_eq!(cancellation_transition("completed", true, "agent_task"), None);
     }
 
     #[test]
