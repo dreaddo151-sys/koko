@@ -708,3 +708,12 @@ Separate previously recorded live evidence remains valid at its own timestamps: 
 - Added an API regression test that restarts reconciliation for a cancelling agent task, verifies terminal cancellation, and asserts that the provider task is not started a second time.
 - GPU chat cancellation remains unresolved across restart when the Supervisor bridge has no durable request ID/status endpoint. This is a known contract gap, not a successful cancellation.
 - Exact-head CI is pending for the startup-recovery additions.
+
+
+## Provider cancellation and recovery validation — 2026-11-21
+
+- Follow-up review found that the startup-recovery warning attempted Display formatting for `ExecutionError`, which intentionally exposes Debug but not Display. Corrected the tracing field to use Debug formatting; no error type or behavior was weakened.
+- Exact head `864b9d0a56da6d75f0396ccaf142bd662e42b176` passed both push CI run #1320 (`44854056271`) and the matching PR run (`44854061796`). All three Ubuntu 24.04 jobs passed: Rust format, strict Clippy, workspace tests, optimized release build, Web production build, installer and release-verifier checks, portable install migration/rollback, Python bridge/importer/watchdog regressions, single-owner GPU guard, package assembly/checksum/content validation and packaged API/Web smoke test.
+- The cancellation test coverage includes provider refusal remaining `cancelling`, provider completion winning a cancellation race, and restart recovery reissuing cancellation against the stored provider ID without resubmitting the task.
+- Resource-class admission is already implemented and tested: independently configurable CPU/GPU/model/media/agent semaphores operate alongside global admission; tests verify GPU+model contention while CPU work remains available and that cancellation while waiting releases admission. Remaining orchestration gaps are mission-level retry/aggregation, resource-aware mission fairness, complete durable recovery for every runner class and live multi-GPU contention.
+- This is Ubuntu CI/package evidence only. No physical workstation, ComfyUI, Python GPU Supervisor, model, GPU lease or live provider sandbox was accessed. PR #14 remains draft/open/unmerged; PR #12/#13 and main were not changed.
