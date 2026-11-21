@@ -532,7 +532,15 @@ fn parse_intel_discovery_json(output: &str) -> Vec<GpuDevice> {
             );
             let uuid = intel_string(device, &["soc_uuid", "SOC UUID", "gpu_uuid", "uuid"]);
             let index = intel_u32(device, &["device_id", "Device ID", "device_index", "index"]);
-            let memory = intel_number(device, &["memory_physical_size_mib", "memory_total_mib"]);
+            let memory = intel_number(
+                device,
+                &[
+                    "memory_physical_size_mib",
+                    "memory_total_mib",
+                    "Memory Physical Size",
+                    "memory_physical_size",
+                ],
+            );
             let driver = intel_string(device, &["umd_version", "UMD Version"]);
             Some(GpuDevice {
                 vendor: "intel".into(),
@@ -562,6 +570,58 @@ fn parse_intel_discovery_json(output: &str) -> Vec<GpuDevice> {
         .collect()
 }
 
+
+/// Parse the documented xpu-smi --query-gpu CSV identity fallback.
+fn parse_intel_identity_csv(output: &str) -> Vec<GpuDevice> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let fields = line.split(',').map(str::trim).collect::<Vec<_>>();
+            if fields.len() < 4 {
+                return None;
+            }
+            let device_index = fields.first()?.parse::<u32>().ok()?;
+            let name = fields.get(1)?.trim();
+            if name.is_empty()
+                || name.eq_ignore_ascii_case("n/a")
+                || name.eq_ignore_ascii_case("unknown")
+            {
+                return None;
+            }
+            let optional = |index: usize| {
+                fields
+                    .get(index)
+                    .map(|value| value.trim())
+                    .filter(|value| {
+                        !value.is_empty()
+                            && !value.eq_ignore_ascii_case("n/a")
+                            && !value.eq_ignore_ascii_case("unknown")
+                    })
+                    .map(ToString::to_string)
+            };
+            Some(GpuDevice {
+                vendor: "intel".into(),
+                name: name.into(),
+                device_id: optional(2),
+                device_index: Some(device_index),
+                pci_bus_id: optional(3),
+                compute_capability: None,
+                vram_mib: None,
+                vram_used_mib: None,
+                vram_free_mib: None,
+                driver_version: None,
+                pcie_link_gen: None,
+                pcie_link_width: None,
+                pcie_link_gen_max: None,
+                pcie_link_width_max: None,
+                utilization_percent: None,
+                temperature_c: None,
+                power_draw_mw: None,
+            })
+        })
+        .collect()
+}
+
 fn intel_devices(binary: &Path) -> Vec<GpuDevice> {
     // XPU Manager's first driver query may initialize Level Zero and collect a
     // sample. Bound it independently from the short host-inventory probes.
@@ -575,6 +635,20 @@ fn intel_devices(binary: &Path) -> Vec<GpuDevice> {
         run_probe_with_timeout(binary, &["--timeout=6", "discovery", "--json"], 10)
     {
         let devices = parse_intel_discovery_json(&output);
+        if !devices.is_empty() {
+            return devices;
+        }
+    }
+    if let Some(output) = run_probe_with_timeout(
+        binary,
+        &[
+            "--timeout=6",
+            "--query-gpu=index,name,uuid,pci.bus_id",
+            "--format=csv,noheader,nounits",
+        ],
+        10,
+    ) {
+        let devices = parse_intel_identity_csv(&output);
         if !devices.is_empty() {
             return devices;
         }
@@ -1370,6 +1444,24 @@ mod tests {
         assert_eq!(parsed[1].utilization_percent, None);
         assert_eq!(parsed[1].temperature_c, None);
         assert_eq!(parsed[1].power_draw_mw, None);
+    }
+
+    #[test]
+    fn intel_csv_identity_fallback_does_not_invent_metrics() {
+        let sample = concat!(
+            "0, Intel(R) Arc(TM) B580 Graphics, GPU-INTEL-UUID-0, 0000:03:00.0\n",
+            "1, Intel(R) Data Center GPU Max, GPU-INTEL-UUID-1, 0000:4d:00.0\n"
+        );
+        let parsed = parse_intel_identity_csv(sample);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].vendor, "intel");
+        assert_eq!(parsed[0].device_index, Some(0));
+        assert_eq!(parsed[0].device_id.as_deref(), Some("GPU-INTEL-UUID-0"));
+        assert_eq!(parsed[0].pci_bus_id.as_deref(), Some("0000:03:00.0"));
+        assert_eq!(parsed[1].device_index, Some(1));
+        assert_eq!(parsed[1].device_id.as_deref(), Some("GPU-INTEL-UUID-1"));
+        assert_eq!(parsed[0].vram_mib, None);
+        assert_eq!(parsed[0].utilization_percent, None);
     }
 
     #[test]
