@@ -3683,7 +3683,10 @@ fn finish_agent_task(
         return;
     }
     // "cancelling" is deliberately not treated as "cancelled": only the
-    // provider's terminal state may resolve an active remote task.
+    // provider's terminal state may resolve an active remote task. However,
+    // a successful completion after a cancellation request must not advance
+    // the rest of the mission.
+    let cancellation_requested = current.as_deref() == Some("cancelling");
     let final_status = if current.as_deref() == Some("cancelled") {
         "cancelled"
     } else {
@@ -3720,7 +3723,14 @@ fn finish_agent_task(
         .ok()
         .flatten();
     if let Some(mission_id) = mission_id.as_deref() {
-        if final_status == "completed" {
+        if cancellation_requested {
+            if tx.execute(
+                "UPDATE missions SET status = 'blocked' WHERE id = ?1",
+                params![mission_id],
+            ).is_err() {
+                return;
+            }
+        } else if final_status == "completed" {
             let incomplete: i64 = match tx.query_row(
                 "SELECT COUNT(*)
                  FROM mission_tasks mt JOIN tasks t ON t.id = mt.task_id
@@ -3778,6 +3788,7 @@ fn finish_agent_task(
         registry.remove(task_id);
     }
     if final_status == "completed"
+        && !cancellation_requested
         && let Some(mission_id) = mission_id
     {
         dispatch_ready_mission_tasks(state.clone(), mission_id);
@@ -4256,7 +4267,17 @@ async fn execute_approved_task(
             Err(_) => return,
         };
         if let Some(mission_id) = mission_id.as_ref() {
-            if final_status == "completed" {
+            if current_status == "cancelling" {
+                if tx
+                    .execute(
+                        "UPDATE missions SET status = 'blocked' WHERE id = ?1",
+                        params![mission_id],
+                    )
+                    .is_err()
+                {
+                    return;
+                }
+            } else if final_status == "completed" {
                 let incomplete: i64 = match tx.query_row(
                     "SELECT COUNT(*)
                      FROM mission_tasks mt JOIN tasks t ON t.id = mt.task_id
@@ -4315,7 +4336,9 @@ async fn execute_approved_task(
         if tx.commit().is_err() {
             return;
         }
-        let advance_mission = final_status == "completed" && mission_id.is_some();
+        let advance_mission = final_status == "completed"
+            && current_status != "cancelling"
+            && mission_id.is_some();
         (event, mission_id, advance_mission)
     };
     let _ = state.events.send(completion_event);
