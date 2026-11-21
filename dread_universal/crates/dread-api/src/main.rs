@@ -23,7 +23,9 @@ use dread_discovery::{
     load_services,
 };
 use dread_gpu::{GpuGatewayClient, GpuSupervisorClient};
-use dread_orchestrator::{ExecutionConfig, ExecutionError, ExecutionGate, MissionGraph};
+use dread_orchestrator::{
+    ExecutionConfig, ExecutionError, ExecutionGate, MissionGraph, ResourceLimits, ResourceRequest,
+};
 use dread_platform::cached_host_profile;
 use dread_skills::{
     discover_agent_profiles, discover_skills, load_agent_profile_context, load_skill_context,
@@ -3385,7 +3387,8 @@ async fn execute_agent_task(
     let worker_state = state.clone();
     let result = state
         .execution
-        .run_managed(
+        .run_managed_for_resources(
+            ResourceRequest::AGENT,
             task_id.clone(),
             cancellation,
             move |cancellation| async move {
@@ -3995,6 +3998,14 @@ async fn execute_gpu_chat(
         .map_err(|error| format!("Python GPU Supervisor inference failed: {error}"))
 }
 
+fn builtin_resource_request(task_type: &str) -> Option<ResourceRequest> {
+    match task_type {
+        "service_discovery" => Some(ResourceRequest::CPU),
+        "gpu_chat" => Some(ResourceRequest::GPU_MODEL),
+        _ => None,
+    }
+}
+
 async fn execute_approved_task(
     state: AppState,
     task_id: String,
@@ -4002,6 +4013,12 @@ async fn execute_approved_task(
     payload: Value,
     cancellation: watch::Receiver<bool>,
 ) {
+    // queue_task admits only reviewed built-in types; keep this second boundary so
+    // a future recovery/dispatch path cannot silently classify an unknown runner.
+    let Some(resources) = builtin_resource_request(&task_type) else {
+        error!(task_id = %task_id, task_type = %task_type, "No resource profile exists for built-in runner");
+        return;
+    };
     let started_at = now_epoch();
     let started_event = {
         let Ok(mut conn) = state.db.lock() else {
@@ -4043,7 +4060,7 @@ async fn execute_approved_task(
     let runner_db = state.db.clone();
     let execution = state
         .execution
-        .run(task_id.clone(), cancellation, move |_, cancellation| {
+        .run_for_resources(resources, task_id.clone(), cancellation, move |_, cancellation| {
             let runner_type = runner_type.clone();
             let runner_payload = runner_payload.clone();
             let runner_gpu = runner_gpu.clone();
@@ -5114,8 +5131,11 @@ async fn main() -> anyhow::Result<()> {
         gpu: GpuGatewayClient::from_env()?,
         supervisor,
         events,
-        execution: ExecutionGate::new(ExecutionConfig::default())
-            .map_err(|error| anyhow::anyhow!("Invalid execution configuration: {error:?}"))?,
+        execution: ExecutionGate::new_with_resource_limits(
+            ExecutionConfig::default(),
+            ResourceLimits::default(),
+        )
+        .map_err(|error| anyhow::anyhow!("Invalid execution configuration: {error:?}"))?,
         agent_adapters,
         cancellations: Arc::new(Mutex::new(HashMap::new())),
         api_token,
@@ -5974,6 +5994,20 @@ mod tests {
     async fn test_app() -> (Router, tokio::task::JoinHandle<()>) {
         let (router, _receiver, server) = test_app_with_events().await;
         (router, server)
+    }
+
+    #[test]
+    fn builtin_task_resource_profiles_are_server_selected() {
+        assert_eq!(
+            builtin_resource_request("service_discovery"),
+            Some(ResourceRequest::CPU)
+        );
+        assert_eq!(
+            builtin_resource_request("gpu_chat"),
+            Some(ResourceRequest::GPU_MODEL)
+        );
+        assert_eq!(builtin_resource_request("agent_task"), None);
+        assert_eq!(builtin_resource_request("media_render"), None);
     }
 
     #[test]
