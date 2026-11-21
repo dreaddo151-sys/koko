@@ -5325,8 +5325,8 @@ mod tests {
         routing::post,
     };
     use dread_agents::{
-        AdapterFuture, AgentCapability, AgentDescriptor, AgentEvent, AgentHealth, AgentHealthState,
-        AgentAdapterError, AgentTask,
+        AdapterFuture, AgentAdapterError, AgentCapability, AgentDescriptor, AgentEvent,
+        AgentHealth, AgentHealthState, AgentTask,
     };
     #[cfg(test)]
     use futures::StreamExt;
@@ -5359,8 +5359,7 @@ mod tests {
         }
 
         fn reject_cancellation(&self) {
-            *self.cancel_error.lock().unwrap() =
-                Some("mock provider refused cancellation".into());
+            *self.cancel_error.lock().unwrap() = Some("mock provider refused cancellation".into());
         }
 
         fn keep_running(&self) {
