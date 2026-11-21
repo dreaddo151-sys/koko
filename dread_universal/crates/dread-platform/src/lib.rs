@@ -507,9 +507,8 @@ fn parse_intel_query_json(output: &str) -> Vec<GpuDevice> {
                 .and_then(|value| {
                     (value >= 0.0 && value <= f64::from(u32::MAX)).then_some(value as u32)
                 }),
-                utilization_percent: intel_nested_number(gpu, &["utilization", "gpu"]).and_then(
-                    |value| (value >= 0.0 && value <= 100.0).then_some(value.round() as u32),
-                ),
+                utilization_percent: intel_nested_number(gpu, &["utilization", "gpu"])
+                    .and_then(|value| (0.0..=100.0).contains(&value).then_some(value.round() as u32)),
                 temperature_c: intel_nested_number(gpu, &["temperature", "gpu_current_temp"])
                     .and_then(|value| {
                         (value >= 0.0 && value <= f64::from(u32::MAX))
@@ -1270,6 +1269,7 @@ pub fn cached_host_profile() -> HostProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn cpu_topology_counts_unique_physical_and_core_pairs() {
