@@ -20,7 +20,7 @@ use std::{
 pub struct GpuDevice {
     pub vendor: String,
     pub name: String,
-    /// Stable provider identity where available (for example NVIDIA GPU UUID).
+    /// Provider-supplied identifier when available; persistence semantics are vendor-specific.
     pub device_id: Option<String>,
     /// Current enumeration index; useful for display, not a persistent identity.
     pub device_index: Option<u32>,
@@ -882,13 +882,13 @@ fn parse_amd_smi_json(list_json: &str, static_json: &str, metric_json: &str) -> 
             )
             .or_else(|| amd_string_at(&list, &[&["market_name"], &["product_name"], &["name"]]))?;
 
-            let uuid =
-                amd_string_at(&list, &[&["uuid"], &["gpu_uuid"], &["hip_uuid"]]).or_else(|| {
-                    amd_string_at(
-                        &static_info,
-                        &[&["asic", "asic_serial"], &["asic", "serial"]],
-                    )
-                });
+            // Prefer the documented derived CUID. Fall back to AMD's
+            // CUID-first UUID compatibility alias for older XPU Manager builds.
+            // Never export the raw ASIC serial as a device ID.
+            let uuid = amd_string_at(
+                &list,
+                &[&["cuid"], &["uuid"], &["gpu_uuid"], &["hip_uuid"]],
+            );
             let pci_bus_id = amd_string_at(&list, &[&["bdf"], &["pci_bus_id"], &["bus", "bdf"]])
                 .or_else(|| amd_string_at(&static_info, &[&["bus", "bdf"], &["bdf"]]));
 
@@ -1974,6 +1974,34 @@ mod tests {
         assert_eq!(devices[1].power_draw_mw, None);
         assert_eq!(devices[1].pcie_link_width, None);
         assert_eq!(devices[1].pcie_link_gen, None);
+    }
+
+    #[test]
+    fn amd_inventory_never_exposes_raw_asic_serial_as_device_identity() {
+        let list = r#"{
+            "gpu_data": [{
+                "gpu": 7,
+                "bdf": "0000:43:00.0",
+                "cuid": "N/A",
+                "uuid": "N/A"
+            }]
+        }"#;
+        let static_info = r#"{
+            "gpu_data": [{
+                "gpu": 7,
+                "asic": {
+                    "market_name": "AMD Instinct MI300X",
+                    "asic_serial": "RAW-ASIC-SERIAL-MUST-NOT-LEAK"
+                },
+                "bus": {"bdf": "0000:43:00.0"}
+            }]
+        }"#;
+
+        let devices = parse_amd_smi_json(list, static_info, "[]");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].name, "AMD Instinct MI300X");
+        assert_eq!(devices[0].pci_bus_id.as_deref(), Some("0000:43:00.0"));
+        assert_eq!(devices[0].device_id, None);
     }
 
     #[test]
