@@ -4624,9 +4624,7 @@ async fn cancel_task(
     let (next_status, cancellation_pending, changed) = match current_status.as_str() {
         "cancelling" => ("cancelling", true, false),
         "running" if agent_provider.is_some() => ("cancelling", true, true),
-        "pending_approval" | "approved" | "queued" | "running" => {
-            ("cancelled", false, true)
-        }
+        "pending_approval" | "approved" | "queued" | "running" => ("cancelled", false, true),
         _ => {
             return Err(ApiError {
                 status: StatusCode::CONFLICT,
