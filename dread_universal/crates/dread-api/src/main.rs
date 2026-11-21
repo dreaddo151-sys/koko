@@ -4601,6 +4601,18 @@ async fn get_task_result(
     })))
 }
 
+fn cancellation_transition(
+    current_status: &str,
+    has_agent_provider: bool,
+) -> Option<(&'static str, bool)> {
+    match current_status {
+        "cancelling" => Some(("cancelling", true)),
+        "running" if has_agent_provider => Some(("cancelling", true)),
+        "pending_approval" | "approved" | "queued" | "running" => Some(("cancelled", false)),
+        _ => None,
+    }
+}
+
 async fn cancel_task(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -4621,17 +4633,15 @@ async fn cancel_task(
     let Some((current_status, agent_provider)) = current else {
         return Err(ApiError::not_found("Task not found"));
     };
-    let (next_status, cancellation_pending, changed) = match current_status.as_str() {
-        "cancelling" => ("cancelling", true, false),
-        "running" if agent_provider.is_some() => ("cancelling", true, true),
-        "pending_approval" | "approved" | "queued" | "running" => ("cancelled", false, true),
-        _ => {
-            return Err(ApiError {
-                status: StatusCode::CONFLICT,
-                message: "Task cannot be cancelled in its current state".into(),
-            });
-        }
+    let Some((next_status, cancellation_pending)) =
+        cancellation_transition(&current_status, agent_provider.is_some())
+    else {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: "Task cannot be cancelled in its current state".into(),
+        });
     };
+    let changed = current_status != next_status;
     let mut cancellation_event = None;
     if changed {
         tx.execute(
@@ -8779,6 +8789,27 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         server.abort();
+    }
+
+    #[test]
+    fn running_provider_tasks_remain_cancelling_until_provider_confirmation() {
+        assert_eq!(
+            cancellation_transition("running", true),
+            Some(("cancelling", true))
+        );
+        assert_eq!(
+            cancellation_transition("cancelling", true),
+            Some(("cancelling", true))
+        );
+        assert_eq!(
+            cancellation_transition("pending_approval", false),
+            Some(("cancelled", false))
+        );
+        assert_eq!(
+            cancellation_transition("queued", true),
+            Some(("cancelled", false))
+        );
+        assert_eq!(cancellation_transition("completed", true), None);
     }
 
     #[test]
