@@ -4206,9 +4206,9 @@ async fn execute_approved_task(
             "cancelled"
         } else if cancellation_unconfirmed {
             "cancelling"
-        } else if current_status == "cancelling" && status == "completed" {
-            status
-        } else if current_status == "cancelling" && status == "failed" && attempts == 0 {
+        } else if current_status == "cancelling"
+            && (status == "completed" || (status == "failed" && attempts == 0))
+        {
             status
         } else {
             return;
