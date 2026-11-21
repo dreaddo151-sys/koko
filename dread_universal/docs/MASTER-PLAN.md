@@ -65,7 +65,7 @@ The finished operator experience must provide:
 Detect and report, without changing the host:
 - OS, distribution/release, kernel, architecture, CPU model/topology/thread count and memory.
 - Physical disks, filesystems, workspace capacity and installation roots.
-- Every visible GPU with stable vendor identity (UUID/serial where exposed), PCI bus address, current enumeration index, vendor/model/count, VRAM, PCIe link, driver and available CUDA/ROCm/oneAPI/Metal capabilities. Vendor adapters use NVIDIA `nvidia-smi`, AMD `rocm-smi`, Intel `xpu-smi` machine-readable query/discovery, and Apple `system_profiler` where present.
+- Every visible GPU with a vendor-reported identifier where available, PCI bus address, current enumeration index, vendor/model/count, VRAM, PCIe link, driver and available CUDA/ROCm/oneAPI/Metal capabilities. Vendor adapters prefer NVIDIA `nvidia-smi`, AMD `amd-smi` JSON list/static/metric, Intel `xpu-smi` JSON query/discovery, and Apple `system_profiler`; older AMD hosts may fall back to identity-only `rocm-smi`. Enumeration indexes and vendor IDs must not be treated as universally persistent. Raw device serials are not exported.
 - Separately read runtime telemetry from the authenticated Python GPU Supervisor where configured. Keep host discovery and Supervisor runtime samples distinct; Supervisor telemetry must be read-only, size-bounded and must not acquire, release or modify GPU leases. Enumeration index is not treated as a persistent identity; missing identity fields remain unknown rather than fabricated.
 - llama.cpp binaries, gateway state, model files, model metadata and gateway-advertised model inventory.
 - ComfyUI, GPU Supervisor, bridge, existing Hub and configured local services.
@@ -714,7 +714,7 @@ Safety and release boundary:
 - AMD `rocm-smi --showproductname` records its reported GPU index where present; the current adapter does not invent UUID or PCI address. Apple `system_profiler` records the ordinal it reports through enumeration; it does not claim a stable hardware identifier.
 - The host profile and console display index, provider ID and PCI bus address separately. The index is explicitly an enumeration/display index, not a stable key.
 - Unit tests cover two RTX devices with distinct UUIDs/PCI addresses and a driver response that lacks compute capability. More vendor-specific identity coverage remains required.
-- This closes only the stable identity slice for NVIDIA reporting. Intel enumeration, AMD stable IDs/PCI address, persistent identity across hardware reordering, heterogeneous scheduling and actual multi-GPU contention remain open.
+- NVIDIA stable UUID/PCI reporting and AMD SMI CUID/UUID-alias plus PCI inventory are now implemented; Intel XPU JSON query/discovery and identity-only CSV fallback are also implemented. These are parser/build-validated, not physical-host accepted. Vendor-specific identifier persistence (including AMD auxiliary CUID semantics), cross-reboot identity, AMD/Intel live driver compatibility, heterogeneous scheduling and actual multi-GPU contention remain open.
 
 
 ### Bounded GGUF metadata inventory — 2026-11-21
@@ -759,6 +759,19 @@ The PR #9 token/prompt work lived on the older Run 81 branch and was absent from
 - Added a separate GPU-page console panel showing the bridge's actual sample timestamp, source and per-device utilization, VRAM, temperature, power and PCIe fields. It refreshes every 30 seconds only while the GPU page is open and is cleared on disconnect.
 - This is distinct from `/api/system/profile`, which reads host utilities and inventories host hardware. NVIDIA Supervisor telemetry does not replace AMD/Intel/Apple host discovery. The Python GPU Supervisor remains sole GPU lease/process owner.
 
+
+
+
+### AMD SMI inventory and telemetry adapter — 2026-11-21
+
+- Host discovery now prefers AMD's `amd-smi` CLI (the vendor's replacement for the deprecated `rocm-smi` CLI) and retains `rocm-smi --showproductname` as a legacy identity-only fallback.
+- The adapter reads only `amd-smi list --json`, `amd-smi static --json`, and `amd-smi metric --json`. It merges `gpu_data`/array reports by the tool-reported GPU enumeration index, preserving BDF, model, driver and VRAM information from static/list reports and runtime GFX utilization, power, temperature, memory usage and PCIe current link information from metric reports.
+- Metric/static units are parsed from their unit-bearing values (`MB`, `GB`, `W`, `mW`, `GT/s`); memory is normalized to MiB and power to milliwatts. Unavailable/N/A/unsupported fields remain `None`. PCIe speed is mapped only for the explicitly documented standard link rates.
+- Device ID prefers the documented derived CUID field, then AMD's CUID-first `uuid` compatibility alias (or legacy UUID where supplied by older versions). The ID may be auxiliary/vendor-specific; it is not used as a universal persistent key. The adapter does not export `ASIC_SERIAL` or `PRIMARY_CUID`, which can expose a raw device serial. If no CUID/UUID is available, `device_id` remains `None`.
+- The `rocm-smi` fallback reports only the product name and enumeration index; no VRAM or runtime values are inferred from the legacy text output.
+- Regression tests cover multiple GPUs joined across list/static/metric JSON, BDF and provider identifiers, driver/VRAM/usage/power/temperature/PCIe values, unavailable fields, unit conversions from strings and `{value, unit}` objects, and the raw-serial exclusion rule.
+- Full Ubuntu CI run #1216 (`44844349840`) passed on PR #14 head `a744380500758298b1cc7be8c6fa563535e50908`; physical AMD GPU/driver acceptance and actual multi-GPU contention remain separate open acceptance gates.
+- Official AMD SMI CLI references: https://rocmdocs.amd.com/projects/amdsmi/en/develop/how-to/amdsmi-cli-tool.html and https://rocmdocs.amd.com/projects/amdsmi/en/develop/reference/changelog.html.
 
 ### Intel XPU inventory adapter — 2026-11-21
 
