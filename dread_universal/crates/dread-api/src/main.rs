@@ -151,10 +151,10 @@ fn load_runtime_isolation_attestation(
             public_key_hex: &public_key_hex,
         },
         dread_agents::runtime_attestation::RuntimeAttestationAdapterBinding {
-            provider_id: provider_id,
-            adapter_id: adapter_id,
-            adapter_version: adapter_version,
-            endpoint: endpoint,
+            provider_id,
+            adapter_id,
+            adapter_version,
+            endpoint,
         },
         i64::try_from(now_epoch()).unwrap_or(i64::MAX),
     )
@@ -6805,10 +6805,10 @@ mod tests {
                 public_key_hex: &public_key_hex,
             },
             dread_agents::runtime_attestation::RuntimeAttestationAdapterBinding {
-                provider_id: provider_id,
+                provider_id,
                 adapter_id: provider_id,
                 adapter_version: env!("CARGO_PKG_VERSION"),
-                endpoint: endpoint,
+                endpoint,
             },
             observed_at + 1,
         )
