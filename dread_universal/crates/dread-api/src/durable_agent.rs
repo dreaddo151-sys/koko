@@ -1334,6 +1334,7 @@ pub(super) fn spawn_independent_verification_reconciler(state: AppState) {
 #[cfg(test)]
 mod durable_activation_tests {
     use super::*;
+    use std::sync::Mutex;
 
     fn trusted_status() -> Value {
         json!({
