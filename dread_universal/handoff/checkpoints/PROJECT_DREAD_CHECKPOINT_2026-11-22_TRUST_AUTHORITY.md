@@ -615,3 +615,13 @@ This is repository/build/package verification only. The example policy still req
 - This advances Kimi correction-cycle requirements for complete canonical-schema validation while preserving the existing Phase 6 task/mission tables, additive migration history, atomic admission/attempt transaction, durable evidence repository and shared ExecutionGate.
 - Evidence boundary: CI proves source compilation, tests, packaging and packaged smoke tests on Ubuntu 24.04. It does not prove live independent runtime-isolation issuance, capability-specific domain semantics, separate Unix identity deployment, live provider behavior, or physical workstation/GPU acceptance.
 - Startup dispatch barrier remains closed until startup reconciliation and worker attachment criteria are satisfied. PR #16 remains draft/open/unmerged.
+
+
+## 20. Mission-level reconciliation hold — 2026-11-22
+
+- Exact PR #16 code head: `e783e2e6b3758bc90c622a1062f12a73adce2952`.
+- GitHub Actions run [#1980](https://github.com/dreaddo151-sys/koko/actions/runs/45059393548) passed all three jobs: Rust formatting, strict Clippy, full workspace tests, optimized release build and installer/bridge/GPU-boundary checks; web production build; Debian/portable packaging and packaged API/console smoke tests.
+- `ensure_mission_task_dispatchable` now refuses to dispatch another task in a mission while a sibling task has a durable attempt in `reconciliation_required`. This prevents a queued mission from being moved back to `running` while an earlier provider outcome remains unknown.
+- Regression test opens the startup barrier after a clean recovery epoch, dispatches one task, marks its provider outcome unresolved, simulates a queued mission with a second ready task, and verifies the second dispatch is rejected while mission status remains queued.
+- The first test run exposed a fixture omission (the test had not opened the startup dispatch barrier); the fixture now performs the same recovery/barrier setup required by production. The final exact-head run #1980 is green.
+- This completes the corresponding Kimi correction-cycle mission-state guard at the source/test level. It does not resolve the independent live runtime-attestation issuer, capability-specific domain semantics, or physical deployment acceptance. Startup dispatch remains closed on boot until reconciliation and worker attachment criteria pass.
