@@ -566,3 +566,38 @@ All three jobs passed:
 This is repository/build/package verification. No trust manifest, runtime attestation issuer, adapter key file, independent verifier account, verifier key/policy, receipt directory or group ACL has been deployed on the workstation by these changes. Operator-controlled parent directories for trust-critical files must remain protected from untrusted writers; `O_NOFOLLOW` covers the final component, not arbitrary symlinked parent components. The live two-UID receipt test, canonical DB/WAL/SHM read-only ACL, fresh heartbeat, real capability semantic evidence, live provider crash/race behavior and physical workstation acceptance remain outstanding.
 
 Provider dispatch remains fail-closed. PR #16 remains draft and unmerged. No workstation service or user data was changed by these repository operations.
+
+
+## 18. Fail-closed capability policy configuration validation — 2026-11-22
+
+### Finding
+
+The packaged example capability policy intentionally contains placeholder JSON Pointers. The producer previously validated pointer syntax and uniqueness of capability IDs, but did not reject the placeholder marker itself. An operator could therefore accidentally deploy an unconfigured rule; a provider result containing the placeholder-shaped field could satisfy that rule.
+
+### Implementation
+
+The standalone producer now validates the complete parsed policy before opening the canonical database or publishing a readiness heartbeat:
+
+- Rejects any required or forbidden JSON Pointer containing the reserved `__REPLACE_WITH_` placeholder marker.
+- Requires capability IDs to use the safe label grammar (ASCII letters, digits, dot, dash and underscore).
+- Rejects duplicate rule IDs as well as duplicate capability rules.
+- Rejects repeated pointers and pointers that are both required and forbidden within one rule.
+- Retains schema-version, policy ID, per-rule size bounds, required-pointer presence and JSON Pointer escape validation.
+- Added three focused regression tests for placeholder rejection, duplicate/conflicting pointers, duplicate rule IDs and invalid capability labels.
+
+This is a startup/configuration fail-closed improvement. It does not convert structural JSON checks into semantic proof of external side effects; real capability schemas and domain evidence remain a separate acceptance requirement.
+
+### Exact-head verification
+
+**Source head:** `05db158c25abe1eacd195fa7325b47ef86c1c144`  
+**GitHub Actions run:** [#1946](https://github.com/dreaddo151-sys/koko/actions/runs/45052902864) — completed successfully on that exact SHA.
+
+All three jobs passed:
+
+1. Rust / Ubuntu 24.04 — rustfmt, strict Clippy, full workspace tests including the new policy regressions, optimized release build, installer/release checks, signed-release failure tests, portable migration/rollback, Python bridge/importer regressions and the single-owner GPU boundary.
+2. Web console / Ubuntu 24.04 — locked dependency install and production build.
+3. Ubuntu packages / smoke test — Debian and portable assembly, checksum/content validation, packaged API installation and production-console smoke test.
+
+### Acceptance boundary
+
+This is repository/build/package verification only. The example policy still requires real capability JSON Pointers and domain-specific evidence rules before any capability can be accepted as semantically verified. No verifier account, private key, policy, receipt directory, database ACL, service unit, heartbeat or provider dispatch was deployed or activated on the workstation. Runtime isolation evidence still lacks an independently operated issuer bound to live observations. Provider dispatch remains fail-closed. PR #16 remains draft and unmerged.
