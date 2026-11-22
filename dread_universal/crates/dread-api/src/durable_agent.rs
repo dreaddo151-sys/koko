@@ -1399,4 +1399,98 @@ mod durable_activation_tests {
         status["providers"][0]["revoked"] = json!(true);
         assert!(!dispatch_activation_status_ready(&status));
     }
+
+    #[test]
+    fn unresolved_attempt_lookup_distinguishes_terminal_and_remote_unknown_states() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE dread_task_attempts(
+                    request_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    attempt_number INTEGER NOT NULL,
+                    dispatch_state TEXT NOT NULL,
+                    cancellation_state TEXT NOT NULL
+                );
+                INSERT INTO dread_task_attempts VALUES
+                    ('request-failed', 'task-1', 1, 'failed', 'none'),
+                    ('request-dispatching', 'task-2', 1, 'dispatching', 'none'),
+                    ('request-cancel-unknown', 'task-3', 1, 'failed', 'unknown');",
+            )
+            .unwrap();
+
+        assert_eq!(unresolved_request_for_task(&connection, "task-missing").unwrap(), None);
+        assert_eq!(unresolved_request_for_task(&connection, "task-1").unwrap(), None);
+        assert_eq!(
+            unresolved_request_for_task(&connection, "task-2").unwrap().as_deref(),
+            Some("request-dispatching")
+        );
+        assert_eq!(
+            unresolved_request_for_task(&connection, "task-3").unwrap().as_deref(),
+            Some("request-cancel-unknown")
+        );
+    }
+
+    #[test]
+    fn preparation_failure_without_a_durable_attempt_finishes_the_queued_task() {
+        let database = Arc::new(Mutex::new(crate::open_database(":memory:").unwrap()));
+        let task_id = "prestart-failure-test";
+        let now = now_epoch_i64();
+        database
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO tasks (
+                    id, title, task_type, capability_id, payload_json, status,
+                    approval_required, approved_by, approval_reason, created_at, updated_at,
+                    agent_provider, provider_task_id
+                 ) VALUES (?1, 'Pre-start failure', 'agent_task', 'hermes.run', '{}', 'queued',
+                           1, 'test-operator', 'approved', ?2, ?2, 'hermes', NULL)",
+                rusqlite::params![task_id, now],
+            )
+            .unwrap();
+
+        let (events, mut receiver) = tokio::sync::broadcast::channel(8);
+        let state = AppState {
+            db: database.clone(),
+            gpu: crate::GpuGatewayClient::new("http://127.0.0.1:1").unwrap(),
+            supervisor: None,
+            events,
+            execution: crate::ExecutionGate::new(crate::ExecutionConfig::default()).unwrap(),
+            agent_adapters: Arc::new(std::collections::HashMap::new()),
+            execution_authority: None,
+            cancellations: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            api_token: None,
+            operator_id: "test-operator".into(),
+            auth_required: true,
+        };
+
+        handle_durable_preparation_failure(
+            &state,
+            task_id,
+            "signed provider policy is unavailable",
+        );
+
+        let connection = database.lock().unwrap();
+        let status: String = connection
+            .query_row("SELECT status FROM tasks WHERE id = ?1", [task_id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let error: String = connection
+            .query_row(
+                "SELECT error FROM task_results WHERE task_id = ?1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+        assert!(error.contains("failed before start"));
+        assert!(error.contains("signed provider policy is unavailable"));
+        drop(connection);
+
+        let event = receiver.try_recv().unwrap();
+        assert_eq!(event.task_id, task_id);
+        assert_eq!(event.event_type, "task_failed");
+    }
 }
