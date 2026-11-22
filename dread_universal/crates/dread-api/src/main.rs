@@ -103,6 +103,24 @@ struct AgentReceiptSigningKeyFile {
     seed_hex: String,
 }
 
+fn normalize_hermes_runtime_endpoint(endpoint: &str) -> Result<String, String> {
+    let mut url = reqwest::Url::parse(endpoint)
+        .map_err(|error| format!("Hermes endpoint URL is invalid: {error}"))?;
+    let normalized_path = url.path().trim_end_matches('/').to_string();
+    url.set_path(&normalized_path);
+    Ok(url.as_str().trim_end_matches('/').to_string())
+}
+
+fn normalize_origin_runtime_endpoint(endpoint: &str) -> Result<String, String> {
+    let mut url = reqwest::Url::parse(endpoint)
+        .map_err(|error| format!("provider origin URL is invalid: {error}"))?;
+    if !url.path().trim_matches('/').is_empty() {
+        return Err("provider runtime attestation endpoint must use an origin without a path".into());
+    }
+    url.set_path("");
+    Ok(url.as_str().trim_end_matches('/').to_string())
+}
+
 fn load_runtime_isolation_attestation(
     environment_path_key: &str,
     provider_id: &str,
@@ -283,12 +301,14 @@ fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn Agen
     ];
     if hermes_keys.iter().any(|key| env::var_os(key).is_some()) {
         let endpoint = env::var("DREAD_HERMES_API_URL")?;
+        let attestation_endpoint = normalize_hermes_runtime_endpoint(&endpoint)
+            .map_err(anyhow::Error::msg)?;
         let runtime_attestation = load_runtime_isolation_attestation(
             "DREAD_HERMES_RUNTIME_ATTESTATION_FILE",
             "hermes",
-            "hermes",
+            "hermes.api_server",
             env!("CARGO_PKG_VERSION"),
-            &endpoint,
+            &attestation_endpoint,
         )
         .map_err(anyhow::Error::msg)?;
         config.hermes = Some(HermesAdapterConfig {
@@ -307,18 +327,28 @@ fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn Agen
     ];
     if deerflow_keys.iter().any(|key| env::var_os(key).is_some()) {
         let endpoint = env::var("DREAD_DEERFLOW_API_URL")?;
+        let api_prefix = env::var("DREAD_DEERFLOW_API_PREFIX")
+            .unwrap_or_else(|_| "/api/langgraph".into());
+        if !matches!(api_prefix.as_str(), "/api" | "/api/langgraph") {
+            return Err(anyhow::anyhow!(
+                "DREAD_DEERFLOW_API_PREFIX must be /api or /api/langgraph"
+            ));
+        }
+        let attestation_endpoint = format!(
+            "{}{api_prefix}",
+            normalize_origin_runtime_endpoint(&endpoint).map_err(anyhow::Error::msg)?
+        );
         let runtime_attestation = load_runtime_isolation_attestation(
             "DREAD_DEERFLOW_RUNTIME_ATTESTATION_FILE",
             "deerflow",
-            "deerflow",
+            "deerflow.gateway",
             env!("CARGO_PKG_VERSION"),
-            &endpoint,
+            &attestation_endpoint,
         )
         .map_err(anyhow::Error::msg)?;
         config.deerflow = Some(DeerFlowAdapterConfig {
             endpoint,
-            api_prefix: env::var("DREAD_DEERFLOW_API_PREFIX")
-                .unwrap_or_else(|_| "/api/langgraph".into()),
+            api_prefix,
             pat: env::var("DREAD_DEERFLOW_PAT")?,
             runtime_attestation,
         });
@@ -335,12 +365,14 @@ fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn Agen
     ];
     if openhands_keys.iter().any(|key| env::var_os(key).is_some()) {
         let endpoint = env::var("DREAD_OPENHANDS_API_URL")?;
+        let attestation_endpoint =
+            normalize_origin_runtime_endpoint(&endpoint).map_err(anyhow::Error::msg)?;
         let runtime_attestation = load_runtime_isolation_attestation(
             "DREAD_OPENHANDS_RUNTIME_ATTESTATION_FILE",
             "openhands",
             "openhands",
             env!("CARGO_PKG_VERSION"),
-            &endpoint,
+            &attestation_endpoint,
         )
         .map_err(anyhow::Error::msg)?;
         config.openhands = Some(OpenHandsAdapterConfig {
@@ -6741,6 +6773,7 @@ mod tests {
 
     fn test_runtime_attestation(
         provider_id: &str,
+        adapter_id: &str,
         endpoint: &str,
         sandbox_backend: &str,
     ) -> VerifiedRuntimeIsolationAttestation {
@@ -6752,7 +6785,7 @@ mod tests {
             attestor_id: "dread-runtime-attestor-test".into(),
             provider_id: provider_id.into(),
             provider_registration_revision: 1,
-            adapter_id: provider_id.into(),
+            adapter_id: adapter_id.into()
             adapter_version: env!("CARGO_PKG_VERSION").into(),
             endpoint: endpoint.into(),
             runtime_identity: format!("{provider_id}-runtime-test"),
@@ -6806,7 +6839,7 @@ mod tests {
             },
             dread_agents::runtime_attestation::RuntimeAttestationAdapterBinding {
                 provider_id,
-                adapter_id: provider_id,
+                adapter_id,
                 adapter_version: env!("CARGO_PKG_VERSION"),
                 endpoint,
             },
