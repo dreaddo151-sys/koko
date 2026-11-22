@@ -135,7 +135,10 @@ impl VerifiedRuntimeIsolationAttestation {
         let envelope: SignedRuntimeIsolationEnvelope = serde_json::from_slice(encoded)
             .map_err(|error| format!("runtime isolation attestation JSON is invalid: {error}"))?;
         if envelope.key_id != expected_key_id {
-            return Err("runtime isolation attestation key ID does not match the configured trust anchor".into());
+            return Err(
+                "runtime isolation attestation key ID does not match the configured trust anchor"
+                    .into(),
+            );
         }
 
         let public_key = decode_hex(public_key_hex)?;
