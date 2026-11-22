@@ -118,6 +118,9 @@ jobs:
           tar -tzf dist/release/dread-universal-ubuntu-*.tar.gz > "$archive_listing"
           grep -Fqx 'bundle/bin/dread-universal' "$archive_listing"
           grep -Fqx 'bundle/bin/dread-result-verifier' "$archive_listing"
+          grep -Fqx 'bundle/config/independent-result-verifier.env.example' "$archive_listing"
+          grep -Fqx 'bundle/systemd/dread-result-verifier.service.example' "$archive_listing"
+          grep -Fqx 'bundle/systemd/dread-result-verifier.tmpfiles.example' "$archive_listing"
           grep -Fqx 'bundle/web/dist/index.html' "$archive_listing"
           grep -Fqx 'bundle/scripts/capture-workstation-baseline.sh' "$archive_listing"
           grep -Fqx 'bundle/scripts/verify-release.sh' "$archive_listing"
@@ -129,6 +132,9 @@ jobs:
           sudo dpkg -i dist/release/dread-universal_*.deb
           test -x /usr/bin/dread-universal
           test -x /usr/bin/dread-result-verifier
+          test -f /usr/share/dread-universal/config/independent-result-verifier.env.example
+          test -f /usr/share/dread-universal/systemd/dread-result-verifier.service.example
+          test -f /usr/share/dread-universal/systemd/dread-result-verifier.tmpfiles.example
           test -x /usr/share/dread-universal/configure-user.sh
           test -f /usr/lib/systemd/user/dread-universal.service
           test -x /usr/share/dread-universal/scripts/capture-workstation-baseline.sh
