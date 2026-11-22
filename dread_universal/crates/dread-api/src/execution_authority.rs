@@ -161,17 +161,15 @@ fn validate_provider_receipt_key(record: &ProviderTrustRecord) -> Result<(), Str
         .as_deref()
         .ok_or_else(|| "provider dispatch requires a manifest-pinned receipt key ID".to_string())?;
     validate_text("receipt_key_id", key_id, 128)?;
-    let public_key_hex = record
-        .receipt_public_key_hex
-        .as_deref()
-        .ok_or_else(|| "provider dispatch requires a manifest-pinned receipt public key".to_string())?;
+    let public_key_hex = record.receipt_public_key_hex.as_deref().ok_or_else(|| {
+        "provider dispatch requires a manifest-pinned receipt public key".to_string()
+    })?;
     let public_key = decode_hex(public_key_hex)?;
     if public_key.len() != 32 {
         return Err("provider receipt Ed25519 public key must be 32 bytes".into());
     }
     Ok(())
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
