@@ -409,6 +409,24 @@ impl Phase6ExecutionAuthority {
         Ok(())
     }
 
+    pub fn validate_provider_capability(
+        &self,
+        connection: &Connection,
+        capability_id: &str,
+        provider_id: &str,
+        now: i64,
+    ) -> Result<(), String> {
+        let (registration, _) = self.registration(provider_id, now)?;
+        let revision = Self::capability_revision(connection, capability_id, provider_id)?;
+        if registration.capability_id != capability_id
+            || registration.capability_revision != revision
+            || registration.operation != AGENT_OPERATION
+        {
+            return Err("signed provider trust does not match the current enabled capability".into());
+        }
+        Ok(())
+    }
+
     pub fn status(&self, now: i64) -> Value {
         self.manifest.public_status(now)
     }
