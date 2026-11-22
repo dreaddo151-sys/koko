@@ -1,13 +1,13 @@
-use crate::runtime_attestation::{
-    RuntimeIsolationAttestationSummary, RuntimeIsolationControl,
-    VerifiedRuntimeIsolationAttestation,
-};
 //! Hermes Agent API-server adapter.
 //!
 //! This adapter talks only to the documented HTTP Runs API. The API server has
 //! access to Hermes' configured toolset, so callers must keep it on loopback,
 //! require a bearer key, and apply DREAD approval before invoking start_task.
 
+use crate::runtime_attestation::{
+    RuntimeIsolationAttestationSummary, RuntimeIsolationControl,
+    VerifiedRuntimeIsolationAttestation,
+};
 use crate::{
     AdapterFuture, AgentAdapter, AgentAdapterError, AgentCapability, AgentDescriptor, AgentEvent,
     AgentExecutionIdentity, AgentHealth, AgentHealthState, AgentOperationEvidenceKind,
