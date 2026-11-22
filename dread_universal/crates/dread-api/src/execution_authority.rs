@@ -7,6 +7,7 @@
 //! The independent-result verifier is deliberately fail-closed until a
 //! separately authenticated verifier integration is configured.
 
+use crate::execution_policy::{ExecutionPolicyAuthority, ExecutionPolicyInput};
 use dread_agents::{AgentAdapter, CapabilityKind, CapabilityRecord, CapabilityStatus};
 use dread_orchestrator::persistence::{
     AdmissionRecord, AttemptRecord, AuthorizationFacts, CurrentRetryContractFacts, DispatchRequest,
@@ -274,6 +275,7 @@ pub struct Phase6ExecutionAuthority {
     manifest_path: Option<PathBuf>,
     public_key_hex: Option<String>,
     adapters: Arc<HashMap<String, Arc<dyn AgentAdapter>>>,
+    policy: Option<ExecutionPolicyAuthority>,
 }
 
 impl Phase6ExecutionAuthority {
@@ -282,12 +284,14 @@ impl Phase6ExecutionAuthority {
         adapters: Arc<HashMap<String, Arc<dyn AgentAdapter>>>,
         manifest_path: PathBuf,
         public_key_hex: String,
+        policy: Option<ExecutionPolicyAuthority>,
     ) -> Self {
         Self {
             manifest,
             manifest_path: Some(manifest_path),
             public_key_hex: Some(public_key_hex),
             adapters,
+            policy,
         }
     }
 
@@ -477,6 +481,26 @@ impl Phase6ExecutionAuthority {
         if mission_id != admission.mission_id {
             return Err("canonical mission mapping changed after admission".into());
         }
+
+        let policy = self.policy.as_ref().ok_or_else(|| {
+            "signed execution policy is not configured; provider dispatch is blocked".to_string()
+        })?;
+        let decision = policy.authorize(
+            ExecutionPolicyInput {
+                request_id: &admission.request_id,
+                requester_id: &admission.requester_id,
+                task_id: &admission.task_id,
+                mission_id: admission.mission_id.as_deref(),
+                capability_id: &admission.capability_id,
+                operation: &admission.operation,
+                permission_scope: &admission.permission_scope,
+                attempt_number: admission.attempt_number,
+            },
+            now,
+        )?;
+        if decision.decision_id != admission.policy_decision_id {
+            return Err("current signed policy decision differs from the persisted admission".into());
+        }
         Ok(())
     }
 
@@ -501,14 +525,30 @@ impl Phase6ExecutionAuthority {
     }
 
     pub fn status(&self, now: i64) -> Value {
-        match self.refresh_manifest(now) {
+        let mut status = match self.refresh_manifest(now) {
             Ok(manifest) => manifest.public_status(now),
             Err(_) => json!({
                 "status": "invalid_or_expired",
                 "dispatch": "blocked",
                 "independent_result_verification": "not_configured_fail_closed"
             }),
-        }
+        };
+        status["execution_policy"] = match self.policy.as_ref() {
+            Some(policy) => policy.status(now),
+            None => json!({
+                "status": "not_configured",
+                "dispatch": "blocked",
+                "required_environment": [
+                    "DREAD_EXECUTION_POLICY_MANIFEST",
+                    "DREAD_EXECUTION_POLICY_PUBLIC_KEY_HEX"
+                ]
+            }),
+        };
+        // Policy admission alone cannot enable dispatch: startup reattachment,
+        // authenticated provider operation evidence and independent result
+        // verification are still separate release conditions.
+        status["dispatch"] = json!("blocked");
+        status
     }
 }
 
@@ -538,10 +578,15 @@ pub fn load_from_env(
     adapters: Arc<HashMap<String, Arc<dyn AgentAdapter>>>,
     now: i64,
 ) -> Result<Option<Arc<Phase6ExecutionAuthority>>, String> {
+    let policy = ExecutionPolicyAuthority::load_from_env()?;
     let path = env::var_os("DREAD_EXECUTION_TRUST_MANIFEST");
     let key = env::var("DREAD_EXECUTION_TRUST_PUBLIC_KEY_HEX").ok();
     match (path, key) {
-        (None, None) => Ok(None),
+        (None, None) if policy.is_none() => Ok(None),
+        (None, None) => Err(
+            "a signed provider trust manifest is required when execution policy is configured"
+                .into(),
+        ),
         (Some(_), None) | (None, Some(_)) => Err(
             "DREAD_EXECUTION_TRUST_MANIFEST and DREAD_EXECUTION_TRUST_PUBLIC_KEY_HEX must be configured together"
                 .into(),
@@ -550,7 +595,7 @@ pub fn load_from_env(
             let path = PathBuf::from(path);
             let manifest = read_and_verify_manifest(&path, &key, now)?;
             Ok(Some(Arc::new(Phase6ExecutionAuthority::with_source(
-                manifest, adapters, path, key,
+                manifest, adapters, path, key, policy,
             ))))
         }
     }
@@ -575,7 +620,7 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
             .optional()
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "task not found".to_string())?;
-        let (mission_id, approval_sequence) =
+        let (mission_id, _approval_sequence) =
             Self::approved_task(connection, &request.task_id, &request.requester_id, false)?;
 
         let capability_json: String = connection
@@ -604,12 +649,30 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
         if request.attempt_number > registration.retry_contract.max_attempts {
             return Err("verified retry contract attempt limit is exhausted".into());
         }
+        let policy = self.policy.as_ref().ok_or_else(|| {
+            "signed execution policy is not configured; provider dispatch is blocked".to_string()
+        })?;
+        let policy_decision = policy.authorize(
+            ExecutionPolicyInput {
+                request_id: &request.request_id,
+                requester_id: &request.requester_id,
+                task_id: &request.task_id,
+                mission_id: mission_id.as_deref(),
+                capability_id: &capability_id,
+                operation: &registration.operation,
+                permission_scope: &request.permission_scope,
+                attempt_number: request.attempt_number,
+            },
+            now,
+        )?;
+
         let expiry = now
             .saturating_add(ADMISSION_LIFETIME)
             .min(manifest.expires_at())
             .min(registration.expires_at)
             .min(registration.isolation.expires_at)
-            .min(registration.retry_contract.expires_at);
+            .min(registration.retry_contract.expires_at)
+            .min(policy_decision.expires_at);
         if expiry <= now {
             return Err("provider trust or retry contract expires before admission".into());
         }
@@ -634,7 +697,7 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
             provider_keys_supported: registration.retry_contract.provider_keys_supported,
             max_attempts: registration.retry_contract.max_attempts,
             evidence_id: registration.isolation.evidence_id.clone(),
-            policy_decision_id: format!("task-approval:{}:{approval_sequence}", request.task_id),
+            policy_decision_id: policy_decision.decision_id,
             adapter_id: registration.adapter_id.clone(),
             adapter_version,
             provider_registration_revision: registration.registration_revision,
