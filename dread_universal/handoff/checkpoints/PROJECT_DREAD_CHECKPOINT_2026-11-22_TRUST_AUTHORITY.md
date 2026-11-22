@@ -329,3 +329,41 @@ The producer's current policy performs deterministic **structural JSON checks** 
 No verifier process, Unix service account, signing key, receipt directory, capability policy, heartbeat, API shared-group membership, SQLite ACL, or service unit has been deployed on the workstation. The service/env/tmpfiles files are examples only. The actual DREAD DB path must be discovered and mapped read-only, including its required WAL/SHM and parent-directory permissions. PR #16 remains draft/unmerged and provider dispatch remains blocked until this is installed and tested with two distinct Unix identities on the target system.
 
 The existing API integration, durable startup recovery, Python GPU Supervisor ownership boundary, ComfyUI, legacy DREAD Hub, prior Kimi deliveries, PRs #12–#15, canonical SQLite data and backups remain preserved. No workstation service was touched.
+
+## 12. Runtime-attestation adapter binding — 2026-11-22
+
+**Verified code head:** `0577ca2a247c16799db5a49cd1c2817efff18a6e`  
+**CI run:** [#1849 — all jobs passed](https://github.com/dreaddo151-sys/koko/actions/runs/45041780145)
+
+The runtime-attestation verifier now uses typed trust and provider-binding records rather than a positional list of eight arguments. The independent runtime observer signature is cross-bound to the signed provider registration: provider identity, registration revision, adapter identity/version, exact effective endpoint, runtime identity, source observation, evidence bundle digest, observation/expiry times, and all eight required unique control observations must match. The API authority retains this fail-closed cross-check at admission.
+
+### Canonical adapter identities and endpoints
+
+A runtime attestation must identify the adapter the API actually constructs, not merely the friendly provider name:
+
+- Hermes adapter identity is `hermes.api_server`; the attested endpoint follows the adapter's URL path and trailing-slash normalization.
+- DeerFlow adapter identity is `deerflow.gateway`; the attested endpoint includes the selected effective route, `/api` or `/api/langgraph`, appended to the normalized origin.
+- OpenHands adapter identity is `openhands`; the attested endpoint is the normalized origin.
+
+The production environment loader now derives these same identities/endpoints before verifying each signed report. It rejects a DeerFlow API prefix outside the two supported values and rejects an origin helper input that contains a nested path. This closes a genuine integration mismatch where the configuration loader was previously verifying friendly provider IDs/raw origins that would not match the live adapter descriptors.
+
+A new API regression test, `runtime_attestation_endpoint_normalizers_match_provider_descriptors`, covers Hermes trailing-slash/path normalization, both DeerFlow route forms, OpenHands origin normalization, and rejection of a path-bearing origin. The provider-registry test now builds each adapter using its exact descriptor identity and effective endpoint. The OpenHands confirmation test also uses the public signed-runtime-attestation path rather than a private boolean helper.
+
+### Exact-head verification
+
+Run #1849 was triggered for the exact code head above. All three GitHub Actions jobs completed successfully:
+
+1. **Rust / Ubuntu 24.04:** formatting, strict workspace Clippy, workspace tests, optimized release build, installer and signed-release checks, portable migration/rollback, Python bridge/importer regressions, and single-owner GPU boundary.
+2. **Web console / Ubuntu 24.04:** locked dependency installation and production console build.
+3. **Ubuntu packages / smoke test:** portable and Debian package assembly, checksums/content validation, packaged API installation and production-console smoke test.
+
+The workspace test output included 37 agent tests, 89 API tests, 14 discovery tests, 15 GPU tests, 6 media tests, 36 orchestrator tests, 31 platform tests, 11 standalone verifier tests, and 7 remaining workspace tests; all reported zero failures. The dedicated endpoint-normalization regression and signed-provider-registry test both passed.
+
+**Run:** https://github.com/dreaddo151-sys/koko/actions/runs/45041780145  
+**Commit:** https://github.com/dreaddo151-sys/koko/commit/0577ca2a247c16799db5a49cd1c2817efff18a6e
+
+### Remaining acceptance gates — unchanged
+
+Passing CI proves source/build/package correctness only. It does not prove that a trusted runtime observer has deployed live evidence for mount, egress, tool permission, secret handling, cancellation or restart controls. The target workstation still needs a separately operated trusted attestor, matching live observations and pinned keys. The independent verifier also remains an undeployed manual separate-UID service with unconfigured real capability policies, receipt directory/ACL and canonical database/WAL/SHM access. Two-UID receipt access, live heartbeat, real provider operation, crash/race recovery, physical Ubuntu install/reboot, actual GPU/ComfyUI contention and legacy Hub parity are still not accepted.
+
+Provider dispatch remains fail-closed. PR #16 remains draft and unmerged. No workstation service or user data was changed by these repository operations.
