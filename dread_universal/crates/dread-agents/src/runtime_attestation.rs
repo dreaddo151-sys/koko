@@ -222,6 +222,12 @@ impl VerifiedRuntimeIsolationAttestation {
             }
             validate_sha256("runtime control evidence digest", &check.evidence_sha256)?;
         }
+        if observation_ids.contains(payload.source_observation_id.as_str()) {
+            return Err(
+                "runtime source observation ID must be distinct from control observation IDs"
+                    .into(),
+            );
+        }
         if actual != expected || payload.checks.len() != RuntimeIsolationControl::ALL.len() {
             return Err(
                 "runtime isolation attestation must contain exactly the eight required controls"
@@ -551,6 +557,27 @@ mod tests {
         assert!(
             VerifiedRuntimeIsolationAttestation::verify(
                 &signed_attestation(&key, reused_observation),
+                RuntimeAttestationTrustAnchor {
+                    key_id: "runtime-attestor-key-1",
+                    public_key_hex: &public_key,
+                },
+                RuntimeAttestationAdapterBinding {
+                    provider_id: "hermes",
+                    adapter_id: "hermes",
+                    adapter_version: "0.4.0",
+                    endpoint: "http://127.0.0.1:8642",
+                },
+                1_800_000_010,
+            )
+            .is_err()
+        );
+
+        let mut reused_source_observation = payload();
+        reused_source_observation.checks[0].observation_id =
+            reused_source_observation.source_observation_id.clone();
+        assert!(
+            VerifiedRuntimeIsolationAttestation::verify(
+                &signed_attestation(&key, reused_source_observation),
                 RuntimeAttestationTrustAnchor {
                     key_id: "runtime-attestor-key-1",
                     public_key_hex: &public_key,
