@@ -724,15 +724,6 @@ pub(super) async fn recover_startup_durable_attempts(state: &AppState) -> Result
             continue;
         }
 
-        let Some(provider_execution_id) = attempt.provider_execution_id.clone() else {
-            warn!(
-                request_id = %attempt.request_id,
-                task_id = %attempt.task_id,
-                dispatch_state = %attempt.dispatch_state,
-                "Provider outcome is ambiguous and has no persisted execution ID; startup barrier remains closed and no start is replayed"
-            );
-            continue;
-        };
         let admission = {
             let connection = state.db.lock().map_err(|_| {
                 "database lock is unavailable while reading provider admission".to_string()
@@ -763,23 +754,38 @@ pub(super) async fn recover_startup_durable_attempts(state: &AppState) -> Result
             continue;
         }
 
-        let status = match adapter
-            .task_status_with_evidence(&identity, &provider_execution_id)
-            .await
-        {
+        let status = match attempt.provider_execution_id.as_deref() {
+            Some(provider_execution_id) => {
+                adapter
+                    .task_status_with_evidence(&identity, provider_execution_id)
+                    .await
+            }
+            None => adapter.reconcile_start_with_evidence(&identity).await,
+        };
+        let status = match status {
             Ok(status) => status,
             Err(error) => {
                 warn!(
                     request_id = %attempt.request_id,
                     provider = %identity.provider_id,
                     error = %error,
-                    "Authenticated provider status recovery failed; attempt remains unresolved"
+                    "Read-only provider reconciliation failed; ambiguous attempt remains unresolved and will not be resubmitted"
                 );
                 continue;
             }
         };
+        let Some(provider_execution_id) = status.response.provider_task_id.clone() else {
+            warn!(
+                request_id = %attempt.request_id,
+                "Recovered provider status contained no execution ID; attempt remains unresolved"
+            );
+            continue;
+        };
         if status.response.task_id != identity.task_id
-            || status.response.provider_task_id.as_deref() != Some(provider_execution_id.as_str())
+            || attempt
+                .provider_execution_id
+                .as_deref()
+                .is_some_and(|stored| stored != provider_execution_id)
         {
             warn!(
                 request_id = %attempt.request_id,
