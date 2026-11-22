@@ -63,6 +63,7 @@ type StoredProviderEvidence = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
 );
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +72,7 @@ pub struct SignedProviderReceipt {
     /// Exact compact JSON payload bytes over which the adapter signed.
     pub payload_json: String,
     pub signature_hex: String,
+    pub response_sha256: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1476,10 +1478,10 @@ pub fn append_provider_event_with_receipt(
             now,
         )
         .map_err(PersistenceError::Authority)?;
-    let prior: Option<(String, String, i64, Option<String>, Option<String>, Option<String>)> = tx
+    let prior: Option<(String, String, i64, Option<String>, Option<String>, Option<String>, Option<String>)> = tx
         .query_row(
             "SELECT event_type, payload_json, task_event_sequence, receipt_key_id,
-                    receipt_payload_json, receipt_signature_hex
+                    receipt_payload_json, receipt_signature_hex, receipt_response_sha256
              FROM dread_provider_event_keys
              WHERE provider_id = ?1 AND attempt_id = ?2 AND external_event_id = ?3",
             params![attempt.provider_id, attempt.attempt_id, external_event_id],
@@ -1491,18 +1493,25 @@ pub fn append_provider_event_with_receipt(
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
         .optional()?;
-    if let Some((prior_type, prior_payload, sequence, prior_key, prior_receipt, prior_signature)) = prior {
+    if let Some((prior_type, prior_payload, sequence, prior_key, prior_receipt, prior_signature, prior_hash)) = prior {
         let receipt_matches = match receipt {
             Some(receipt) => {
                 prior_key.as_deref() == Some(receipt.key_id.as_str())
                     && prior_receipt.as_deref() == Some(receipt.payload_json.as_str())
                     && prior_signature.as_deref() == Some(receipt.signature_hex.as_str())
+                    && prior_hash.as_deref() == Some(receipt.response_sha256.as_str())
             }
-            None => prior_key.is_none() && prior_receipt.is_none() && prior_signature.is_none(),
+            None => {
+                prior_key.is_none()
+                    && prior_receipt.is_none()
+                    && prior_signature.is_none()
+                    && prior_hash.is_none()
+            },
         };
         if prior_type != event_type || prior_payload != payload_json || !receipt_matches {
             return Err(PersistenceError::Conflict(
@@ -1524,8 +1533,8 @@ pub fn append_provider_event_with_receipt(
         "INSERT INTO dread_provider_event_keys (
             provider_id, attempt_id, external_event_id, event_type, payload_json,
             task_event_sequence, recorded_at, receipt_key_id, receipt_payload_json,
-            receipt_signature_hex
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            receipt_signature_hex, receipt_response_sha256
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             attempt.provider_id,
             attempt.attempt_id,
@@ -1536,7 +1545,8 @@ pub fn append_provider_event_with_receipt(
             now,
             receipt.map(|value| value.key_id.as_str()),
             receipt.map(|value| value.payload_json.as_str()),
-            receipt.map(|value| value.signature_hex.as_str())
+            receipt.map(|value| value.signature_hex.as_str()),
+            receipt.map(|value| value.response_sha256.as_str())
         ],
     )?;
     tx.commit()?;
@@ -3202,7 +3212,7 @@ fn persist_evidence(
             "SELECT attempt_id, request_id, provider_id, adapter_id, adapter_version,
                 provider_registration_revision, provider_execution_id, evidence_kind,
                 verifier_id, source_reference, observed_at, expires_at, receipt_key_id,
-                receipt_payload_json, receipt_signature_hex
+                receipt_payload_json, receipt_signature_hex, receipt_response_sha256
          FROM dread_execution_evidence WHERE evidence_id = ?1",
             [&evidence.evidence_id],
             |row| {
@@ -3222,6 +3232,7 @@ fn persist_evidence(
                     row.get(12)?,
                     row.get(13)?,
                     row.get(14)?,
+                    row.get(15)?,
                 ))
             },
         )
@@ -3243,6 +3254,7 @@ fn persist_evidence(
             evidence.receipt.as_ref().map(|receipt| receipt.key_id.clone()),
             evidence.receipt.as_ref().map(|receipt| receipt.payload_json.clone()),
             evidence.receipt.as_ref().map(|receipt| receipt.signature_hex.clone()),
+            evidence.receipt.as_ref().map(|receipt| receipt.response_sha256.clone()),
         );
         if existing == expected {
             return Ok(());
@@ -3256,8 +3268,8 @@ fn persist_evidence(
             evidence_id, attempt_id, request_id, provider_id, adapter_id, adapter_version,
             provider_registration_revision, provider_execution_id, evidence_kind,
             verifier_id, source_reference, observed_at, expires_at, receipt_key_id,
-            receipt_payload_json, receipt_signature_hex
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            receipt_payload_json, receipt_signature_hex, receipt_response_sha256
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             evidence.evidence_id,
             attempt.attempt_id,
@@ -3274,7 +3286,8 @@ fn persist_evidence(
             evidence.expires_at,
             evidence.receipt.as_ref().map(|receipt| receipt.key_id.as_str()),
             evidence.receipt.as_ref().map(|receipt| receipt.payload_json.as_str()),
-            evidence.receipt.as_ref().map(|receipt| receipt.signature_hex.as_str())
+            evidence.receipt.as_ref().map(|receipt| receipt.signature_hex.as_str()),
+            evidence.receipt.as_ref().map(|receipt| receipt.response_sha256.as_str())
         ],
     )?;
     Ok(())
