@@ -17,7 +17,7 @@ use std::{
     collections::BTreeMap,
     env, fs,
     fs::{File, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -262,23 +262,75 @@ fn has_exact_unix_permission_mode(mode: u32, expected: u32) -> bool {
     mode & 0o7777 == expected
 }
 
-fn secure_file_metadata(path: &Path, max_bytes: u64, name: &str) -> Result<fs::Metadata, String> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(|error| format!("cannot inspect {name}: {error}"))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(format!("{name} must be a regular non-symlink file"));
+fn read_nofollow_regular_file(
+    path: &Path,
+    max_bytes: u64,
+    name: &str,
+) -> Result<(Vec<u8>, fs::Metadata), String> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    if max_bytes == 0 {
+        return Err(format!("{name} size limit must be nonzero"));
     }
-    if metadata.len() == 0 || metadata.len() > max_bytes {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let file = options
+        .open(path)
+        .map_err(|error| format!("cannot safely open {name} without following symlinks: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("cannot inspect opened {name}: {error}"))?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > max_bytes {
+        return Err(format!(
+            "{name} must be a regular nonempty file no larger than {max_bytes} bytes"
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read opened {name}: {error}"))?;
+    if bytes.is_empty() || bytes.len() as u64 > max_bytes {
         return Err(format!("{name} is empty or exceeds its size limit"));
     }
-    #[cfg(unix)]
+    Ok((bytes, metadata))
+}
+
+fn read_owner_private_file(
+    path: &Path,
+    expected_uid: u32,
+    max_bytes: u64,
+    name: &str,
+) -> Result<Vec<u8>, String> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let (bytes, metadata) = read_nofollow_regular_file(path, max_bytes, name)?;
+    if metadata.uid() != expected_uid
+        || !has_exact_unix_permission_mode(metadata.permissions().mode(), 0o600)
     {
-        use std::os::unix::fs::PermissionsExt;
-        if !has_exact_unix_permission_mode(metadata.permissions().mode(), 0o600) {
-            return Err(format!("{name} must have exact owner-only mode 0600"));
-        }
+        return Err(format!(
+            "{name} must be owned by the verifier UID and have exact mode 0600"
+        ));
     }
-    Ok(metadata)
+    Ok(bytes)
+}
+
+fn read_shared_output_file(
+    path: &Path,
+    expected_uid: u32,
+    expected_gid: u32,
+) -> Result<Vec<u8>, String> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let (bytes, metadata) =
+        read_nofollow_regular_file(path, 64 * 1024, "existing verifier receipt")?;
+    if metadata.uid() != expected_uid
+        || metadata.gid() != expected_gid
+        || !has_exact_unix_permission_mode(metadata.permissions().mode(), 0o640)
+    {
+        return Err("existing verifier receipt has an unexpected owner, group or mode".into());
+    }
+    Ok(bytes)
 }
 
 fn secure_directory(
@@ -475,48 +527,28 @@ fn acquire_process_lock(receipt_dir: &Path) -> Result<ProcessLock, String> {
     Ok(ProcessLock { path, _file: file })
 }
 
-fn require_private_file_owner(path: &Path, expected_uid: u32, name: &str) -> Result<(), String> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(|error| format!("cannot inspect {name}: {error}"))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(format!("{name} must be a regular non-symlink file"));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        if metadata.uid() != expected_uid
-            || !has_exact_unix_permission_mode(metadata.permissions().mode(), 0o600)
-        {
-            return Err(format!(
-                "{name} must be owned by the verifier UID and use exact mode 0600"
-            ));
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = expected_uid;
-        return Err("separate verifier key ownership is supported only on Unix hosts".into());
-    }
-    Ok(())
-}
-
-fn load_private_key(path: &Path) -> Result<Ed25519KeyPair, String> {
-    secure_file_metadata(
+fn load_private_key(path: &Path, expected_uid: u32) -> Result<Ed25519KeyPair, String> {
+    let encoded = read_owner_private_file(
         path,
+        expected_uid,
         MAX_PRIVATE_KEY_BYTES,
         "independent verifier private key",
     )?;
-    let encoded = fs::read(path)
-        .map_err(|error| format!("cannot read independent verifier private key: {error}"))?;
     Ed25519KeyPair::from_pkcs8(&encoded).map_err(|_| {
         "independent verifier private key is not a valid Ed25519 PKCS#8 document".into()
     })
 }
 
-fn load_policy(path: &Path) -> Result<(VerificationPolicy, String), String> {
-    secure_file_metadata(path, MAX_POLICY_BYTES, "independent verifier policy")?;
-    let encoded = fs::read(path)
-        .map_err(|error| format!("cannot read independent verifier policy: {error}"))?;
+fn load_policy(
+    path: &Path,
+    expected_uid: u32,
+) -> Result<(VerificationPolicy, String), String> {
+    let encoded = read_owner_private_file(
+        path,
+        expected_uid,
+        MAX_POLICY_BYTES,
+        "independent verifier policy",
+    )?;
     let policy: VerificationPolicy = serde_json::from_slice(&encoded)
         .map_err(|error| format!("independent verifier policy JSON is invalid: {error}"))?;
     if policy.schema_version != 1 {
@@ -832,13 +864,7 @@ fn existing_receipt_is_current(
     if validate_shared_output_file(path, expected_uid, expected_gid).is_err() {
         return false;
     }
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return false;
-    };
-    if metadata.len() == 0 {
-        return false;
-    }
-    let Ok(bytes) = fs::read(path) else {
+    let Ok(bytes) = read_shared_output_file(path, expected_uid, expected_gid) else {
         return false;
     };
     let Ok(receipt) = verify_envelope::<IndependentResultReceipt>(&bytes, key_id, public_key)
@@ -1030,19 +1056,9 @@ fn check_public_key_environment(keypair: &Ed25519KeyPair) -> Result<(), String> 
 
 fn run_daemon(config: VerifierConfig, once: bool) -> Result<(), String> {
     let _lock = acquire_process_lock(&config.receipt_dir)?;
-    require_private_file_owner(
-        &config.private_key_path,
-        config.receipt_uid,
-        "independent verifier private key",
-    )?;
-    require_private_file_owner(
-        &config.policy_path,
-        config.receipt_uid,
-        "independent verifier policy",
-    )?;
-    let keypair = load_private_key(&config.private_key_path)?;
+    let keypair = load_private_key(&config.private_key_path, config.receipt_uid)?;
     check_public_key_environment(&keypair)?;
-    let (policy, policy_digest) = load_policy(&config.policy_path)?;
+    let (policy, policy_digest) = load_policy(&config.policy_path, config.receipt_uid)?;
     let connection = open_read_only_database(&config.database_path)?;
     let output = VerifierOutput {
         receipt_dir: &config.receipt_dir,
@@ -1110,7 +1126,11 @@ fn generate_key(path: &Path) -> Result<(), String> {
 }
 
 fn print_public_key(path: &Path) -> Result<(), String> {
-    let keypair = load_private_key(path)?;
+    let current_uid = std::env::var("UID")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or_else(|| "cannot determine the current verifier UID".to_string())?;
+    let keypair = load_private_key(path, current_uid)?;
     println!("{}", hex_encode(keypair.public_key().as_ref()));
     Ok(())
 }
@@ -1420,7 +1440,8 @@ mod tests {
         let directory = temp_dir();
         let path = directory.join("verifier.pk8");
         generate_key(&path).unwrap();
-        assert!(load_private_key(&path).is_ok());
+        let owner_uid = fs::metadata(&directory).unwrap().uid();
+        assert!(load_private_key(&path, owner_uid).is_ok());
         assert!(generate_key(&path).is_err());
         fs::remove_dir_all(directory).unwrap();
     }
