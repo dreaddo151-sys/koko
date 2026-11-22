@@ -218,9 +218,7 @@ impl VerifiedRuntimeIsolationAttestation {
             }
             validate_text("runtime control observation ID", &check.observation_id, 256)?;
             if !observation_ids.insert(check.observation_id.as_str()) {
-                return Err(
-                    "runtime isolation controls must have distinct observation IDs".into(),
-                );
+                return Err("runtime isolation controls must have distinct observation IDs".into());
             }
             validate_sha256("runtime control evidence digest", &check.evidence_sha256)?;
         }
