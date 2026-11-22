@@ -1,7 +1,3 @@
-use crate::runtime_attestation::{
-    RuntimeIsolationAttestationSummary, RuntimeIsolationControl,
-    VerifiedRuntimeIsolationAttestation,
-};
 //! OpenHands Agent Server adapter.
 //!
 //! Every DREAD conversation requests DockerExecutionWorkspace. The adapter only
@@ -9,6 +5,10 @@ use crate::runtime_attestation::{
 //! = "docker" and exposes the exact tools requested by DREAD. AlwaysConfirm is
 //! retained. These server claims still require live host/container validation.
 
+use crate::runtime_attestation::{
+    RuntimeIsolationAttestationSummary, RuntimeIsolationControl,
+    VerifiedRuntimeIsolationAttestation,
+};
 use crate::{
     AdapterFuture, AgentAdapter, AgentAdapterError, AgentCapability, AgentDescriptor, AgentEvent,
     AgentExecutionIdentity, AgentHealth, AgentHealthState, AgentOperationEvidenceKind,
