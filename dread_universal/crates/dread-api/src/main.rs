@@ -6424,7 +6424,11 @@ mod tests {
             "OpenHands confirmation test",
         )
         .unwrap()
-        .attest_docker_runtime(true, true)
+        .attest_runtime(test_runtime_attestation(
+            "openhands",
+            &format!("http://{address}"),
+            "docker",
+        ))
         .unwrap();
         let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
         adapters.insert("openhands".into(), Arc::new(adapter));
