@@ -6,7 +6,7 @@
 //! The API must cross-check the returned summary against the signed manifest;
 //! an environment boolean or an unsigned local assertion is never accepted.
 
-use ring::signature::{self, ED25519, UnparsedPublicKey};
+use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -108,6 +108,20 @@ pub struct RuntimeIsolationAttestationSummary {
     pub checks: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimeAttestationTrustAnchor<'a> {
+    pub key_id: &'a str,
+    pub public_key_hex: &'a str,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimeAttestationAdapterBinding<'a> {
+    pub provider_id: &'a str,
+    pub adapter_id: &'a str,
+    pub adapter_version: &'a str,
+    pub endpoint: &'a str,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedRuntimeIsolationAttestation {
     payload: RuntimeIsolationAttestationPayload,
@@ -120,28 +134,24 @@ impl VerifiedRuntimeIsolationAttestation {
     /// separately by Phase6ExecutionAuthority at every admission.
     pub fn verify(
         encoded: &[u8],
-        expected_key_id: &str,
-        public_key_hex: &str,
-        expected_provider_id: &str,
-        expected_adapter_id: &str,
-        expected_adapter_version: &str,
-        expected_endpoint: &str,
+        trust_anchor: RuntimeAttestationTrustAnchor<'_>,
+        expected: RuntimeAttestationAdapterBinding<'_>,
         now: i64,
     ) -> Result<Self, String> {
         if encoded.is_empty() || encoded.len() > MAX_ATTESTATION_BYTES {
             return Err("runtime isolation attestation is empty or exceeds 64 KiB".into());
         }
-        validate_text("runtime attestation key ID", expected_key_id, 128)?;
+        validate_text("runtime attestation key ID", trust_anchor.key_id, 128)?;
         let envelope: SignedRuntimeIsolationEnvelope = serde_json::from_slice(encoded)
             .map_err(|error| format!("runtime isolation attestation JSON is invalid: {error}"))?;
-        if envelope.key_id != expected_key_id {
+        if envelope.key_id != trust_anchor.key_id {
             return Err(
                 "runtime isolation attestation key ID does not match the configured trust anchor"
                     .into(),
             );
         }
 
-        let public_key = decode_hex(public_key_hex)?;
+        let public_key = decode_hex(trust_anchor.public_key_hex)?;
         let signature = decode_hex(&envelope.signature_hex)?;
         if public_key.len() != 32 || signature.len() != 64 {
             return Err(
@@ -167,10 +177,10 @@ impl VerifiedRuntimeIsolationAttestation {
             &payload.source_observation_id,
             256,
         )?;
-        if payload.provider_id != expected_provider_id
-            || payload.adapter_id != expected_adapter_id
-            || payload.adapter_version != expected_adapter_version
-            || payload.endpoint != expected_endpoint
+        if payload.provider_id != expected.provider_id
+            || payload.adapter_id != expected.adapter_id
+            || payload.adapter_version != expected.adapter_version
+            || payload.endpoint != expected.endpoint
         {
             return Err(
                 "runtime isolation attestation does not match the configured provider, adapter build or endpoint"
