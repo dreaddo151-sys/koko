@@ -1030,12 +1030,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            Phase6ExecutionAuthority::capability_revision(
-                &connection,
-                "hermes.run",
-                "hermes"
-            )
-            .unwrap(),
+            Phase6ExecutionAuthority::capability_revision(&connection, "hermes.run", "hermes")
+                .unwrap(),
             1
         );
         connection
@@ -1046,12 +1042,8 @@ mod tests {
             )
             .unwrap();
         assert!(
-            Phase6ExecutionAuthority::capability_revision(
-                &connection,
-                "hermes.run",
-                "hermes"
-            )
-            .is_err()
+            Phase6ExecutionAuthority::capability_revision(&connection, "hermes.run", "hermes")
+                .is_err()
         );
     }
 
@@ -1086,13 +1078,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            Phase6ExecutionAuthority::approved_task(
-                &connection,
-                "task-1",
-                "test-operator",
-                false
-            )
-            .unwrap(),
+            Phase6ExecutionAuthority::approved_task(&connection, "task-1", "test-operator", false)
+                .unwrap(),
             (None, 7)
         );
         assert!(
@@ -1105,25 +1092,18 @@ mod tests {
             .is_err()
         );
         connection
-            .execute("UPDATE tasks SET status = 'running' WHERE id = 'task-1'", [])
+            .execute(
+                "UPDATE tasks SET status = 'running' WHERE id = 'task-1'",
+                [],
+            )
             .unwrap();
         assert!(
-            Phase6ExecutionAuthority::approved_task(
-                &connection,
-                "task-1",
-                "test-operator",
-                false
-            )
-            .is_err()
+            Phase6ExecutionAuthority::approved_task(&connection, "task-1", "test-operator", false)
+                .is_err()
         );
         assert!(
-            Phase6ExecutionAuthority::approved_task(
-                &connection,
-                "task-1",
-                "test-operator",
-                true
-            )
-            .is_ok()
+            Phase6ExecutionAuthority::approved_task(&connection, "task-1", "test-operator", true)
+                .is_ok()
         );
     }
 
