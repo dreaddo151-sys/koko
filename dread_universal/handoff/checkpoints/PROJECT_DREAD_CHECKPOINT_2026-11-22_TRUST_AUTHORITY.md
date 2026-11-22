@@ -625,3 +625,11 @@ This is repository/build/package verification only. The example policy still req
 - Regression test opens the startup barrier after a clean recovery epoch, dispatches one task, marks its provider outcome unresolved, simulates a queued mission with a second ready task, and verifies the second dispatch is rejected while mission status remains queued.
 - The first test run exposed a fixture omission (the test had not opened the startup dispatch barrier); the fixture now performs the same recovery/barrier setup required by production. The final exact-head run #1980 is green.
 - This completes the corresponding Kimi correction-cycle mission-state guard at the source/test level. It does not resolve the independent live runtime-attestation issuer, capability-specific domain semantics, or physical deployment acceptance. Startup dispatch remains closed on boot until reconciliation and worker attachment criteria pass.
+
+
+## 21. Execution-policy permission regression — 2026-11-22
+
+- Exact PR #16 code head: `3fdeb621f7a2886f3e55db6fd7dfa23849a9b12d`.
+- GitHub Actions run [#1986](https://github.com/dreaddo151-sys/koko/actions/runs/45059630454) passed all three jobs: Rust format, strict Clippy, full workspace tests, optimized release build, installer/release and Python bridge/importer checks, web production build, Debian/portable package assembly, checksum/content validation, and packaged API/console smoke tests.
+- Added a filesystem-level regression proving the signed execution-policy loader rejects an actual group-writable policy file (mode 0660), in addition to the existing symlink and mode-helper tests.
+- This is a source/CI security milestone only. The verifier's separate Unix account, receipt ACLs, policy/key deployment, heartbeat and physical host acceptance remain unperformed.
