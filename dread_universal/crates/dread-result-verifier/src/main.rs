@@ -1488,12 +1488,7 @@ mod tests {
         symlink(&target, &link).unwrap();
         assert!(read_shared_output_file(&link, expected_uid, expected_gid).is_err());
         assert!(
-            read_shared_output_file(
-                &target,
-                expected_uid.saturating_add(1),
-                expected_gid
-            )
-            .is_err()
+            read_shared_output_file(&target, expected_uid.saturating_add(1), expected_gid).is_err()
         );
         fs::remove_dir_all(directory).unwrap();
     }
