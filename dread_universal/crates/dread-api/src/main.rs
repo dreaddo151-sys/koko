@@ -4634,6 +4634,28 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     for (task_id, provider, provider_task_id) in cancelling_rows {
+        let has_durable_attempt: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM dread_task_attempts WHERE task_id = ?1)",
+            params![task_id],
+            |row| row.get(0),
+        )?;
+        if has_durable_attempt {
+            emitted.push(
+                append_task_event(
+                    &tx,
+                    &task_id,
+                    "task_cancellation_recovery_deferred_durable",
+                    &json!({
+                        "status": "cancelling",
+                        "reason": "Durable signed-evidence recovery owns this attempt; legacy cancellation is not replayed"
+                    }),
+                    "recovery",
+                    now,
+                )
+                .map_err(|error| anyhow::anyhow!(error.message))?,
+            );
+            continue;
+        }
         let Some(provider) = provider else {
             emitted.push(append_task_event(
                 &tx,
@@ -4722,9 +4744,9 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
     };
 
     for task in running_agents {
-        // A provider-backed task may already have executed remotely. Until the
-        // durable attempt record can be reconciled and its worker reattached,
-        // never reset it to queued or invoke the legacy start_task path.
+        // A provider-backed task may already have executed remotely. Keep it
+        // out of the legacy worker path; the durable reconciler below performs
+        // authenticated status lookup and reattachment without another start.
         emitted.push(
             append_task_event(
                 &tx,
@@ -4734,7 +4756,7 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
                     "status": "running",
                     "provider": task.agent_provider,
                     "provider_event_cursor": task.provider_event_cursor,
-                    "reason": "Durable attempt reconciliation and worker reattachment are not yet integrated"
+                    "reason": "Durable startup reconciliation will use the persisted provider identity; no legacy start is replayed"
                 }),
                 "recovery",
                 now,
@@ -5634,20 +5656,29 @@ async fn main() -> anyhow::Result<()> {
         dread_orchestrator::persistence::begin_startup_recovery(&mut connection, startup_now)?
     };
     let recovered_tasks = recover_task_queue(&state)?;
-    // Do not release the barrier yet. The production API worker still needs
-    // durable admission/attempt preparation and provider recovery attachment
-    // wired into the only provider-start path. A clean database or signed
-    // trust manifest alone is not sufficient authorization to start providers.
-    let startup_dispatch_barrier_open = false;
-    warn!(
-        startup_generation,
-        "Startup dispatch barrier remains closed until durable provider dispatch and worker reattachment are integrated"
-    );
+    let recovered_durable_workers = durable_agent::recover_startup_durable_attempts(&state)
+        .await
+        .map_err(|error| anyhow::anyhow!("Durable provider startup recovery failed: {error}"))?;
+    let startup_dispatch_barrier_open = {
+        let connection = state
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Database lock is unavailable during dispatch gate evaluation"))?;
+        dread_orchestrator::persistence::startup_dispatch_barrier_is_open(&connection)?
+    };
+    if !startup_dispatch_barrier_open {
+        warn!(
+            startup_generation,
+            recovered_durable_workers,
+            "Startup dispatch barrier remains closed: a current-boot recovery, signed policy, or independent verifier condition is not satisfied"
+        );
+    }
     info!(
         recovered_tasks,
+        recovered_durable_workers,
         startup_generation,
         startup_dispatch_barrier_open,
-        "Completed startup recovery gate evaluation; provider dispatch is enabled only after current-boot reattachment"
+        "Completed startup recovery gate evaluation"
     );
     info!(address = %addr, database = %db_path, "PROJECT DREAD Universal API listening");
     axum::serve(listener, app(state))
