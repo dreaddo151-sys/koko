@@ -617,6 +617,8 @@ pub fn load_from_env(
 /// persistence representation. This function only transports the receipt;
 /// signature, registration, request and attempt verification remains the
 /// responsibility of `Phase6ExecutionAuthority`.
+// Staged API boundary: the durable worker integration will consume this mapper.
+#[allow(dead_code)]
 pub fn provider_evidence_from_adapter_receipt<T>(
     provider_id: &str,
     adapter_id: &str,
