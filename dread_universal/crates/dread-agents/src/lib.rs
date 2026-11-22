@@ -147,6 +147,14 @@ pub struct AgentOperationReceipt<T> {
     pub evidence: SignedAgentOperationEvidence,
 }
 
+/// Optional provider identity fields associated with one signed adapter operation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentOperationReceiptDetails {
+    pub provider_execution_id: Option<String>,
+    pub external_event_id: Option<String>,
+    pub event_type: Option<String>,
+}
+
 /// Per-adapter Ed25519 signer. Its private seed is never serialized or exposed
 /// through Debug; adapter receipts contain only the public key ID and signature.
 #[derive(Clone)]
@@ -221,9 +229,7 @@ pub fn signed_agent_operation_receipt<T: Serialize>(
     identity: &AgentExecutionIdentity,
     evidence_kind: AgentOperationEvidenceKind,
     response: T,
-    provider_execution_id: Option<String>,
-    external_event_id: Option<String>,
-    event_type: Option<String>,
+    details: AgentOperationReceiptDetails,
 ) -> AdapterResult<AgentOperationReceipt<T>> {
     validate_execution_identity(identity)?;
     if !descriptor.enabled
@@ -255,9 +261,9 @@ pub fn signed_agent_operation_receipt<T: Serialize>(
         evidence_id,
         evidence_kind,
         identity: identity.clone(),
-        provider_execution_id,
-        external_event_id,
-        event_type,
+        provider_execution_id: details.provider_execution_id,
+        external_event_id: details.external_event_id,
+        event_type: details.event_type,
         response_sha256,
         verifier_id: format!("dread-adapter-receipt:{}", identity.adapter_id),
         source_reference: source_reference.to_owned(),
