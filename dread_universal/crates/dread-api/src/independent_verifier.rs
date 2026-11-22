@@ -357,7 +357,6 @@ fn validate_secure_directory(
     Ok(())
 }
 
-
 fn validate_safe_id(name: &str, value: &str) -> Result<(), String> {
     if value.is_empty()
         || value.len() > 128
