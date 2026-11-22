@@ -181,6 +181,30 @@ impl DeerFlowApiAdapter {
         Ok(self)
     }
 
+    /// Enable DeerFlow only from an independently signed runtime report.
+    pub fn attest_runtime(
+        mut self,
+        attestation: VerifiedRuntimeIsolationAttestation,
+    ) -> Result<Self, AgentAdapterError> {
+        if attestation.provider_id() != "deerflow"
+            || attestation.adapter_id() != self.descriptor.adapter
+            || attestation.adapter_version() != self.descriptor.version.as_deref().unwrap_or_default()
+            || attestation.endpoint() != self.descriptor.endpoint.as_deref().unwrap_or_default()
+        {
+            return Err(adapter_error(
+                "runtime_attestation_mismatch",
+                "DeerFlow runtime attestation does not match the live adapter identity".into(),
+                false,
+            ));
+        }
+        let provider_class = attestation.sandbox_backend().to_owned();
+        let workspace =
+            attestation.control_verified(RuntimeIsolationControl::TaskWorkspaceBoundary);
+        self = self.attest_container_sandbox(&provider_class, workspace, None)?;
+        self.runtime_attestation = Some(attestation.summary());
+        Ok(self)
+    }
+
     fn endpoint(&self, path: &str) -> String {
         format!(
             "{}{}{}",
