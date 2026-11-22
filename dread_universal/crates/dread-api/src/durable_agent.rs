@@ -465,7 +465,43 @@ pub(super) async fn execute_durable_agent_task_inner(
         }
     }
 
-    let mut cursor = execution.initial_event_cursor;
+    monitor_durable_attempt(
+        state,
+        adapter,
+        request_id,
+        identity,
+        provider_execution_id,
+        execution.initial_event_cursor,
+        cancellation,
+    )
+    .await;
+}
+
+/// Reattach the persisted provider execution ID to an already-created local
+/// worker. This function is invoked only inside the shared ExecutionGate slot.
+fn attach_recovered_worker(state: &AppState, request_id: &str) -> Result<bool, String> {
+    let now = now_epoch_i64();
+    let mut connection = state
+        .db
+        .lock()
+        .map_err(|_| "database lock is unavailable during worker reattachment".to_string())?;
+    persistence::mark_recovery_worker_attached(&mut connection, request_id, now)
+        .map_err(|error| format!("durable recovery attachment failed: {error}"))?;
+    persistence::release_startup_dispatch_barrier(&mut connection, now)
+        .map_err(|error| format!("startup dispatch barrier evaluation failed: {error}"))
+}
+
+/// Monitor an existing provider execution. This path never issues a start
+/// request and is shared by first-run dispatch and startup reattachment.
+async fn monitor_durable_attempt(
+    state: AppState,
+    adapter: Arc<dyn AgentAdapter>,
+    request_id: String,
+    identity: dread_agents::AgentExecutionIdentity,
+    provider_execution_id: String,
+    mut cursor: u64,
+    cancellation: watch::Receiver<bool>,
+) {
     let mut cancellation_submitted = false;
     loop {
         if *cancellation.borrow() && !cancellation_submitted {
@@ -607,4 +643,313 @@ pub(super) async fn execute_durable_agent_task_inner(
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
+}
+
+/// Reconcile existing attempts on boot using authenticated status reads only.
+/// No branch in this function can call the provider start endpoint.
+pub(super) async fn recover_startup_durable_attempts(
+    state: &AppState,
+) -> Result<usize, String> {
+    if state.execution_authority.is_none() {
+        return Ok(0);
+    }
+    let attempts = {
+        let connection = state
+            .db
+            .lock()
+            .map_err(|_| "database lock is unavailable during durable startup recovery".to_string())?;
+        persistence::unresolved_attempts(&connection)
+            .map_err(|error| format!("cannot enumerate durable attempts: {error}"))?
+    };
+    let mut workers_scheduled = 0usize;
+
+    for attempt in attempts {
+        if attempt.dispatch_state == "provider_succeeded" {
+            let admission = {
+                let connection = state
+                    .db
+                    .lock()
+                    .map_err(|_| "database lock is unavailable during verification recovery".to_string())?;
+                persistence::admission_for_request(&connection, &attempt.request_id)
+                    .map_err(|error| format!("cannot read durable admission: {error}"))?
+            };
+            let authority = state.execution_authority.as_ref().ok_or_else(|| {
+                "signed Phase 6 authority disappeared during recovery".to_string()
+            })?;
+            let result = {
+                let mut connection = state.db.lock().map_err(|_| {
+                    "database lock is unavailable during independent verification".to_string()
+                })?;
+                persistence::record_independent_verification(
+                    &mut connection,
+                    &attempt.request_id,
+                    attempt.provider_result_json.as_deref(),
+                    attempt.provider_error.as_deref(),
+                    authority.as_ref(),
+                    now_epoch_i64(),
+                )
+            };
+            if let Err(error) = result {
+                warn!(
+                    request_id = %attempt.request_id,
+                    verifier = %authority.status(now_epoch_i64())["independent_result_verification"],
+                    requester = %admission.requester_id,
+                    error = %error,
+                    "Persisted provider success remains pending independent verification"
+                );
+            }
+            continue;
+        }
+
+        let Some(provider_execution_id) = attempt.provider_execution_id.clone() else {
+            warn!(
+                request_id = %attempt.request_id,
+                task_id = %attempt.task_id,
+                dispatch_state = %attempt.dispatch_state,
+                "Provider outcome is ambiguous and has no persisted execution ID; startup barrier remains closed and no start is replayed"
+            );
+            continue;
+        };
+        let admission = {
+            let connection = state.db.lock().map_err(|_| {
+                "database lock is unavailable while reading provider admission".to_string()
+            })?;
+            persistence::admission_for_request(&connection, &attempt.request_id)
+                .map_err(|error| format!("cannot read durable admission: {error}"))?
+        };
+        let identity = agent_execution_identity(&admission, &attempt)?;
+        let adapter = state
+            .agent_adapters
+            .get(&identity.provider_id)
+            .cloned()
+            .ok_or_else(|| format!("provider adapter '{}' is not configured", identity.provider_id))?;
+        if !adapter.descriptor().enabled
+            || adapter.descriptor().adapter != identity.adapter_id
+            || adapter.descriptor().version.as_deref() != Some(identity.adapter_version.as_str())
+        {
+            warn!(
+                request_id = %attempt.request_id,
+                provider = %identity.provider_id,
+                "Provider adapter descriptor differs from the durable registration; attempt remains unresolved"
+            );
+            continue;
+        }
+
+        let status = match adapter
+            .task_status_with_evidence(&identity, &provider_execution_id)
+            .await
+        {
+            Ok(status) => status,
+            Err(error) => {
+                warn!(
+                    request_id = %attempt.request_id,
+                    provider = %identity.provider_id,
+                    error = %error,
+                    "Authenticated provider status recovery failed; attempt remains unresolved"
+                );
+                continue;
+            }
+        };
+        if status.response.task_id != identity.task_id
+            || status.response.provider_task_id.as_deref() != Some(provider_execution_id.as_str())
+        {
+            warn!(
+                request_id = %attempt.request_id,
+                "Provider recovery status returned a conflicting local/provider task identity"
+            );
+            continue;
+        }
+
+        if matches!(
+            status.response.state,
+            AgentTaskState::Succeeded | AgentTaskState::Failed | AgentTaskState::Cancelled
+        ) {
+            let result = match adapter
+                .task_result_with_evidence(&identity, &provider_execution_id)
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    warn!(
+                        request_id = %attempt.request_id,
+                        error = %error,
+                        "Terminal provider result recovery failed; attempt remains unresolved"
+                    );
+                    continue;
+                }
+            };
+            if result.response.task_id != identity.task_id
+                || result.response.provider_task_id.as_deref()
+                    != Some(provider_execution_id.as_str())
+                || result.response.state != status.response.state
+            {
+                warn!(
+                    request_id = %attempt.request_id,
+                    "Recovered provider result conflicts with authenticated status"
+                );
+                continue;
+            }
+            let evidence = match provider_evidence_from_adapter_receipt(
+                &identity.provider_id,
+                &identity.adapter_id,
+                &identity.adapter_version,
+                identity.provider_registration_revision,
+                &result,
+            ) {
+                Ok(evidence) => evidence,
+                Err(error) => {
+                    warn!(request_id = %attempt.request_id, error = %error, "Recovered terminal receipt failed scope or digest validation");
+                    continue;
+                }
+            };
+            if let Err(error) =
+                persist_provider_terminal(state, &attempt.request_id, &result.response, &evidence)
+            {
+                warn!(
+                    request_id = %attempt.request_id,
+                    error = %error,
+                    "Recovered provider terminal result was rejected by durable persistence"
+                );
+            }
+            continue;
+        }
+
+        let active = match provider_evidence_from_adapter_receipt(
+            &identity.provider_id,
+            &identity.adapter_id,
+            &identity.adapter_version,
+            identity.provider_registration_revision,
+            &status,
+        ) {
+            Ok(evidence) if evidence.evidence_kind == "active" => evidence,
+            Ok(_) => {
+                warn!(request_id = %attempt.request_id, "Provider returned a nonterminal state without active evidence");
+                continue;
+            }
+            Err(error) => {
+                warn!(request_id = %attempt.request_id, error = %error, "Recovered provider status receipt failed validation");
+                continue;
+            }
+        };
+        let authority = state.execution_authority.as_ref().ok_or_else(|| {
+            "signed Phase 6 execution authority is unavailable".to_string()
+        })?;
+        {
+            let mut connection = state.db.lock().map_err(|_| {
+                "database lock is unavailable while persisting recovered provider status".to_string()
+            })?;
+            if let Err(error) = persistence::record_provider_active(
+                &mut connection,
+                &attempt.request_id,
+                &active,
+                authority.as_ref(),
+                now_epoch_i64(),
+            ) {
+                warn!(
+                    request_id = %attempt.request_id,
+                    error = %error,
+                    "Recovered active provider observation could not be persisted"
+                );
+                continue;
+            }
+        }
+
+        let cursor: u64 = {
+            let connection = state.db.lock().map_err(|_| {
+                "database lock is unavailable while reading the recovered event cursor".to_string()
+            })?;
+            connection
+                .query_row(
+                    "SELECT provider_event_cursor FROM tasks WHERE id = ?1",
+                    [&attempt.task_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| format!("cannot read recovered event cursor: {error}"))?
+        };
+        let (cancel_sender, cancel_receiver) =
+            watch::channel(attempt.cancellation_state != "none");
+        state
+            .cancellations
+            .lock()
+            .map_err(|_| "task cancellation registry is unavailable".to_string())?
+            .insert(attempt.task_id.clone(), cancel_sender);
+
+        let worker_state = state.clone();
+        let task_id = attempt.task_id.clone();
+        let request_id = attempt.request_id.clone();
+        let recovered_state = attempt.cancellation_state != "none";
+        tokio::spawn(async move {
+            let gate_state = worker_state.clone();
+            let gate_task_id = task_id.clone();
+            let run = worker_state
+                .execution
+                .run_managed_for_resources(
+                    dread_orchestrator::ResourceRequest::AGENT,
+                    gate_task_id.clone(),
+                    cancel_receiver,
+                    move |cancellation| async move {
+                        match attach_recovered_worker(&gate_state, &request_id) {
+                            Ok(opened) => info!(
+                                request_id = %request_id,
+                                task_id = %gate_task_id,
+                                barrier_open = opened,
+                                "Recovered provider worker attached without resubmitting its start"
+                            ),
+                            Err(error) => {
+                                warn!(
+                                    request_id = %request_id,
+                                    error = %error,
+                                    "Could not attach recovered provider worker; dispatch barrier remains closed"
+                                );
+                                mark_reconciliation_required(&gate_state, &request_id, &error);
+                                return Ok(());
+                            }
+                        }
+                        monitor_durable_attempt(
+                            gate_state,
+                            adapter,
+                            request_id,
+                            identity,
+                            provider_execution_id,
+                            cursor,
+                            cancellation,
+                        )
+                        .await;
+                        Ok(())
+                    },
+                )
+                .await;
+            if let Err(error) = run {
+                warn!(
+                    task_id = %task_id,
+                    error = ?error,
+                    cancellation_pending = recovered_state,
+                    "Recovered provider worker could not enter the shared ExecutionGate"
+                );
+                mark_reconciliation_required(
+                    &worker_state,
+                    &attempt.request_id,
+                    "recovered provider worker could not acquire the shared execution gate",
+                );
+            }
+        });
+        workers_scheduled = workers_scheduled.saturating_add(1);
+    }
+
+    // This succeeds only when every nonterminal attempt has been reconciled or
+    // a worker has attached for this boot. Unknown submissions and unverified
+    // provider successes remain blockers.
+    let opened = {
+        let mut connection = state.db.lock().map_err(|_| {
+            "database lock is unavailable while evaluating startup dispatch barrier".to_string()
+        })?;
+        persistence::release_startup_dispatch_barrier(&mut connection, now_epoch_i64())
+            .map_err(|error| format!("startup dispatch barrier evaluation failed: {error}"))?
+    };
+    info!(
+        workers_scheduled,
+        barrier_open = opened,
+        "Durable startup provider reconciliation completed"
+    );
+    Ok(workers_scheduled)
 }
