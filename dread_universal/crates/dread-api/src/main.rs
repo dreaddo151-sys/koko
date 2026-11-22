@@ -5904,7 +5904,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(denied.status(), StatusCode::CONFLICT);
-        assert_eq!(adapter.starts.lock().unwrap().len(), 1);
+        assert!(adapter.starts.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
