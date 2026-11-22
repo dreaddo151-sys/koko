@@ -154,6 +154,30 @@ impl HermesApiAdapter {
         Ok(self)
     }
 
+    /// Enable Hermes only from an independently signed runtime report.
+    pub fn attest_runtime(
+        mut self,
+        attestation: VerifiedRuntimeIsolationAttestation,
+    ) -> Result<Self, AgentAdapterError> {
+        if attestation.provider_id() != "hermes"
+            || attestation.adapter_id() != self.descriptor.adapter
+            || attestation.adapter_version() != self.descriptor.version.as_deref().unwrap_or_default()
+            || attestation.endpoint() != self.descriptor.endpoint.as_deref().unwrap_or_default()
+        {
+            return Err(adapter_error(
+                "runtime_attestation_mismatch",
+                "Hermes runtime attestation does not match the live adapter identity".into(),
+                false,
+            ));
+        }
+        let backend = attestation.sandbox_backend().to_owned();
+        let workspace =
+            attestation.control_verified(RuntimeIsolationControl::TaskWorkspaceBoundary);
+        self = self.attest_sandbox(&backend, workspace)?;
+        self.runtime_attestation = Some(attestation.summary());
+        Ok(self)
+    }
+
     fn require_attested(&self) -> Result<(), AgentAdapterError> {
         if self.sandbox_attested && self.descriptor.enabled {
             Ok(())
