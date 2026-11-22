@@ -469,6 +469,7 @@ impl Phase6ExecutionAuthority {
         connection: &Connection,
         capability_id: &str,
         provider_id: &str,
+        now: i64,
     ) -> Result<i64, String> {
         let encoded: String = connection
             .query_row(
@@ -502,22 +503,52 @@ impl Phase6ExecutionAuthority {
             .get("approved_at")
             .and_then(Value::as_u64)
             .ok_or_else(|| "capability approval has no timestamp".to_string())?;
-        if approved_at == 0 {
-            return Err("capability approval timestamp is invalid".into());
+        let approved_at = i64::try_from(approved_at)
+            .map_err(|_| "capability approval timestamp is out of range".to_string())?;
+        let approved_reason = approval
+            .get("reason")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty() && value.len() <= 2000)
+            .ok_or_else(|| "capability approval has no valid review reason".to_string())?;
+        if approved_at <= 0 || approved_at > now {
+            return Err("capability approval timestamp is invalid or future-dated".into());
         }
 
-        let (revision, event_type, actor): (i64, String, String) = connection
+        let (revision, event_type, actor, event_reason, event_created_at): (
+            i64,
+            String,
+            String,
+            String,
+            i64,
+        ) = connection
             .query_row(
-                "SELECT id, event_type, actor FROM capability_events
+                "SELECT id, event_type, actor, reason, created_at FROM capability_events
                  WHERE capability_id = ?1 ORDER BY id DESC LIMIT 1",
                 [capability_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .optional()
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "capability has no durable approval event".to_string())?;
-        if event_type != "enabled" || actor != approved_by || revision <= 0 {
-            return Err("latest capability audit event is not the current approval".into());
+        if event_type != "enabled"
+            || actor != approved_by
+            || event_reason != approved_reason
+            || event_created_at != approved_at
+            || event_created_at > now
+            || revision <= 0
+        {
+            return Err(
+                "latest capability audit event does not exactly match the current approval actor, reason and timestamp"
+                    .into(),
+            );
         }
         Ok(revision)
     }
@@ -527,18 +558,28 @@ impl Phase6ExecutionAuthority {
         task_id: &str,
         requester_id: &str,
         allow_active: bool,
+        now: i64,
     ) -> Result<(Option<String>, i64), String> {
-        let (status, task_type, approved_by, capability_id): (
+        let (status, task_type, approved_by, approval_reason, capability_id): (
             String,
             String,
+            Option<String>,
             Option<String>,
             Option<String>,
         ) = connection
             .query_row(
-                "SELECT status, task_type, approved_by, capability_id
+                "SELECT status, task_type, approved_by, approval_reason, capability_id
                  FROM tasks WHERE id = ?1",
                 [task_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .optional()
             .map_err(|error| error.to_string())?
@@ -547,26 +588,36 @@ impl Phase6ExecutionAuthority {
             || (allow_active && matches!(status.as_str(), "running" | "cancelling")))
             || task_type != "agent_task"
             || approved_by.as_deref() != Some(requester_id)
+            || approval_reason
+                .as_deref()
+                .is_none_or(|reason| reason.trim().is_empty() || reason.len() > 2000)
             || capability_id.is_none()
         {
             return Err("task is not queued with the matching operator approval".into());
         }
-        let (sequence, actor, payload): (i64, String, String) = connection
+        let (sequence, actor, payload, event_created_at): (i64, String, String, i64) = connection
             .query_row(
-                "SELECT sequence, actor, payload_json FROM task_events
+                "SELECT sequence, actor, payload_json, created_at FROM task_events
                  WHERE task_id = ?1 AND event_type = 'task_approved'
                  ORDER BY sequence DESC LIMIT 1",
                 [task_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "task has no durable approval event".to_string())?;
         let payload: Value = serde_json::from_str(&payload).map_err(|error| error.to_string())?;
-        if actor != requester_id
+        if sequence <= 0
+            || event_created_at <= 0
+            || event_created_at > now
+            || actor != requester_id
             || payload.get("approved_by").and_then(Value::as_str) != Some(requester_id)
+            || payload.get("reason").and_then(Value::as_str) != approval_reason.as_deref()
         {
-            return Err("task approval event does not match the dispatch requester".into());
+            return Err(
+                "task approval event does not match the current operator, reason and event timestamp"
+                    .into(),
+            );
         }
         let mission_id = connection
             .query_row(
@@ -601,6 +652,7 @@ impl Phase6ExecutionAuthority {
             connection,
             &admission.capability_id,
             &admission.provider_id,
+            now,
         )?;
         if revision != admission.capability_revision {
             return Err("capability approval revision changed after admission".into());
@@ -610,6 +662,7 @@ impl Phase6ExecutionAuthority {
             &admission.task_id,
             &admission.requester_id,
             true,
+            now,
         )?;
         if mission_id != admission.mission_id {
             return Err("canonical mission mapping changed after admission".into());
@@ -648,7 +701,7 @@ impl Phase6ExecutionAuthority {
     ) -> Result<(), String> {
         let (_, registration, _) = self.registration(provider_id, now)?;
         validate_provider_receipt_key(&registration)?;
-        let revision = Self::capability_revision(connection, capability_id, provider_id)?;
+        let revision = Self::capability_revision(connection, capability_id, provider_id, now)?;
         if registration.capability_id != capability_id
             || registration.capability_revision != revision
             || registration.operation != AGENT_OPERATION
@@ -994,7 +1047,7 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "task not found".to_string())?;
         let (mission_id, _approval_sequence) =
-            Self::approved_task(connection, &request.task_id, &request.requester_id, false)?;
+            Self::approved_task(connection, &request.task_id, &request.requester_id, false, now)?;
 
         let capability_json: String = connection
             .query_row(
@@ -1011,7 +1064,7 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
             .ok_or_else(|| "agent capability has no provider adapter".to_string())?;
         let (manifest, registration, adapter_version) = self.registration(provider_id, now)?;
         validate_provider_receipt_key(&registration)?;
-        let actual_revision = Self::capability_revision(connection, &capability_id, provider_id)?;
+        let actual_revision = Self::capability_revision(connection, &capability_id, provider_id, now)?;
         if registration.capability_id != capability_id
             || registration.capability_revision != actual_revision
             || registration.operation != AGENT_OPERATION
@@ -2121,7 +2174,9 @@ mod tests {
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     capability_id TEXT NOT NULL,
                     event_type TEXT NOT NULL,
-                    actor TEXT NOT NULL
+                    actor TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
                  );",
             )
             .unwrap();
@@ -2134,25 +2189,25 @@ mod tests {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO capability_events(capability_id, event_type, actor)
-                 VALUES ('hermes.run', 'enabled', 'test-operator')",
+                "INSERT INTO capability_events(capability_id, event_type, actor, reason, created_at)
+                 VALUES ('hermes.run', 'enabled', 'test-operator', 'verified test fixture', 100)",
                 [],
             )
             .unwrap();
         assert_eq!(
-            Phase6ExecutionAuthority::capability_revision(&connection, "hermes.run", "hermes")
+            Phase6ExecutionAuthority::capability_revision(&connection, "hermes.run", "hermes", 200)
                 .unwrap(),
             1
         );
         connection
             .execute(
-                "INSERT INTO capability_events(capability_id, event_type, actor)
-                 VALUES ('hermes.run', 'disabled', 'test-operator')",
+                "INSERT INTO capability_events(capability_id, event_type, actor, reason, created_at)
+                 VALUES ('hermes.run', 'disabled', 'test-operator', 'disabled for test', 101)",
                 [],
             )
             .unwrap();
         assert!(
-            Phase6ExecutionAuthority::capability_revision(&connection, "hermes.run", "hermes")
+            Phase6ExecutionAuthority::capability_revision(&connection, "hermes.run", "hermes", 200)
                 .is_err()
         );
     }
@@ -2167,6 +2222,7 @@ mod tests {
                     status TEXT NOT NULL,
                     task_type TEXT NOT NULL,
                     approved_by TEXT,
+                    approval_reason TEXT,
                     capability_id TEXT
                  );
                  CREATE TABLE task_events (
@@ -2174,21 +2230,22 @@ mod tests {
                     task_id TEXT NOT NULL,
                     event_type TEXT NOT NULL,
                     actor TEXT NOT NULL,
-                    payload_json TEXT NOT NULL
+                    payload_json TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
                  );
                  CREATE TABLE mission_tasks (
                     mission_id TEXT NOT NULL,
                     task_id TEXT NOT NULL
                  );
-                 INSERT INTO tasks(id, status, task_type, approved_by, capability_id)
-                 VALUES ('task-1', 'queued', 'agent_task', 'test-operator', 'hermes.run');
-                 INSERT INTO task_events(sequence, task_id, event_type, actor, payload_json)
+                 INSERT INTO tasks(id, status, task_type, approved_by, approval_reason, capability_id)
+                 VALUES ('task-1', 'queued', 'agent_task', 'test-operator', 'approved', 'hermes.run');
+                 INSERT INTO task_events(sequence, task_id, event_type, actor, payload_json, created_at)
                  VALUES (7, 'task-1', 'task_approved', 'test-operator',
-                         '{\"approved_by\":\"test-operator\",\"reason\":\"approved\"}');",
+                         '{\"approved_by\":\"test-operator\",\"reason\":\"approved\"}', 100);",
             )
             .unwrap();
         assert_eq!(
-            Phase6ExecutionAuthority::approved_task(&connection, "task-1", "test-operator", false)
+            Phase6ExecutionAuthority::approved_task(&connection, "task-1", "test-operator", false, 200)
                 .unwrap(),
             (None, 7)
         );
@@ -2197,7 +2254,8 @@ mod tests {
                 &connection,
                 "task-1",
                 "different-operator",
-                false
+                false,
+                200
             )
             .is_err()
         );
@@ -2208,11 +2266,11 @@ mod tests {
             )
             .unwrap();
         assert!(
-            Phase6ExecutionAuthority::approved_task(&connection, "task-1", "test-operator", false)
+            Phase6ExecutionAuthority::approved_task(&connection, "task-1", "test-operator", false, 200)
                 .is_err()
         );
         assert!(
-            Phase6ExecutionAuthority::approved_task(&connection, "task-1", "test-operator", true)
+            Phase6ExecutionAuthority::approved_task(&connection, "task-1", "test-operator", true, 200)
                 .is_ok()
         );
     }
