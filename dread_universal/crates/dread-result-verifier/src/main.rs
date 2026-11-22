@@ -1336,6 +1336,51 @@ mod tests {
     }
 
     #[test]
+    fn canonical_database_is_opened_read_only_and_query_only() {
+        let directory = temp_dir();
+        let database_path = directory.join("canonical-phase6.sqlite");
+        let writable = Connection::open(&database_path).unwrap();
+        writable
+            .execute_batch(
+                "CREATE TABLE dread_execution_schema_migrations(version INTEGER NOT NULL);
+                 INSERT INTO dread_execution_schema_migrations(version) VALUES (7);
+                 CREATE TABLE dread_task_attempts(
+                    request_id TEXT, attempt_id TEXT, task_id TEXT, worker_id TEXT,
+                    provider_id TEXT, capability_id TEXT, provider_result_json TEXT,
+                    provider_error TEXT, dispatch_state TEXT
+                 );
+                 CREATE TABLE dread_dispatch_admissions(request_id TEXT, requester_id TEXT);
+                 CREATE TABLE dread_execution_evidence(
+                    attempt_id TEXT, evidence_id TEXT, evidence_kind TEXT,
+                    verifier_id TEXT, observed_at INTEGER
+                 );",
+            )
+            .unwrap();
+        drop(writable);
+
+        let readonly = open_read_only_database(&database_path).unwrap();
+        let query_only: i64 = readonly
+            .query_row("PRAGMA query_only", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(query_only, 1);
+        assert!(
+            readonly
+                .execute(
+                    "INSERT INTO dread_task_attempts(request_id) VALUES ('must-not-write')",
+                    []
+                )
+                .is_err()
+        );
+        assert!(
+            readonly
+                .execute_batch("CREATE TABLE must_not_be_created(id INTEGER)")
+                .is_err()
+        );
+        drop(readonly);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn atomic_publication_refuses_symlink_and_preserves_existing_file_without_replace() {
         let directory = temp_dir();
         let metadata = fs::metadata(&directory).unwrap();
