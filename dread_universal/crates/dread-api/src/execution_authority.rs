@@ -2108,6 +2108,31 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn manifest_loader_rejects_symlink_before_signature_verification() {
+        use std::{fs, os::unix::fs::symlink};
+
+        let now = 1_800_000_000;
+        let (encoded, key) = signed_manifest(now);
+        let directory = std::env::temp_dir().join(format!(
+            "dread-execution-trust-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let target = directory.join("signed-manifest-target.json");
+        let manifest_path = directory.join("execution-trust.json");
+        fs::write(&target, encoded).unwrap();
+        symlink(&target, &manifest_path).unwrap();
+
+        assert!(
+            read_and_verify_manifest(&manifest_path, &key, now).is_err(),
+            "trust manifest loader must reject a symlink even when its target is validly signed"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn verifies_signed_manifest_and_reports_only_public_metadata() {
         let now = 1_800_000_000;
