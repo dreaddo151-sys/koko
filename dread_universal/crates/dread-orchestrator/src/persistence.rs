@@ -3874,6 +3874,41 @@ mod tests {
     }
 
     #[test]
+    fn startup_barrier_stays_closed_for_dispatch_with_lost_acknowledgement() {
+        let mut db = canonical_db();
+        let authority = TestAuthority;
+        install(&mut db, 100).unwrap();
+        assert!(release_startup_dispatch_barrier(&mut db, 100).unwrap());
+
+        let request = dispatch_request("request-lost-ack", 1);
+        authorize_and_persist(&mut db, &request, &authority, 100).unwrap();
+        let attempt = match prepare_dispatch(&mut db, &request, &authority, 101).unwrap() {
+            DispatchPreparation::Created(attempt) => attempt,
+            DispatchPreparation::Existing(_) => panic!("first preparation must create the attempt"),
+        };
+        assert_eq!(attempt.dispatch_state, "dispatching");
+        assert!(attempt.provider_execution_id.is_none());
+
+        // Crash after the durable local dispatch reservation but before the
+        // acknowledgement was persisted. The next boot must reconcile this
+        // exact request/idempotency identity; it cannot treat the missing
+        // provider ID as proof that no remote side effect occurred.
+        begin_startup_recovery(&mut db, 102).unwrap();
+
+        let unresolved = unresolved_attempts(&db).unwrap();
+        assert_eq!(unresolved.len(), 1);
+        assert_eq!(unresolved[0].request_id, "request-lost-ack");
+        assert!(unresolved[0].provider_execution_id.is_none());
+        assert!(recovery_worker_attachment_candidates(&db).unwrap().is_empty());
+
+        // An unacknowledged dispatch is not attachable yet, and must keep the
+        // global dispatch barrier closed until provider reconciliation proves
+        // a safe outcome.
+        assert!(!release_startup_dispatch_barrier(&mut db, 103).unwrap());
+        assert!(!startup_dispatch_barrier_is_open(&db).unwrap());
+    }
+
+    #[test]
     fn verified_pre_side_effect_retry_reuses_key_and_accepts_fresh_admission() {
         let mut db = canonical_db();
         let authority = TestAuthority;
