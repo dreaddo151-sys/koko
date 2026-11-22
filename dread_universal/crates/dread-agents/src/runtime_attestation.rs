@@ -397,12 +397,16 @@ mod tests {
         let public_key = encode_hex(key.public_key().as_ref());
         let verified = VerifiedRuntimeIsolationAttestation::verify(
             &encoded,
-            "runtime-attestor-key-1",
-            &public_key,
-            "hermes",
-            "hermes",
-            "0.4.0",
-            "http://127.0.0.1:8642",
+            RuntimeAttestationTrustAnchor {
+                key_id: "runtime-attestor-key-1",
+                public_key_hex: &public_key,
+            },
+            RuntimeAttestationAdapterBinding {
+                provider_id: "hermes",
+                adapter_id: "hermes",
+                adapter_version: "0.4.0",
+                endpoint: "http://127.0.0.1:8642",
+            },
             1_800_000_010,
         )
         .unwrap();
@@ -422,41 +426,53 @@ mod tests {
         let encoded = signed_attestation(&key, payload());
         assert!(
             VerifiedRuntimeIsolationAttestation::verify(
-                &encoded,
-                "wrong-key-id",
-                &public_key,
-                "hermes",
-                "hermes",
-                "0.4.0",
-                "http://127.0.0.1:8642",
-                1_800_000_010
-            )
+            &encoded,
+            RuntimeAttestationTrustAnchor {
+                key_id: "wrong-key-id",
+                public_key_hex: &public_key,
+            },
+            RuntimeAttestationAdapterBinding {
+                provider_id: "hermes",
+                adapter_id: "hermes",
+                adapter_version: "0.4.0",
+                endpoint: "http://127.0.0.1:8642",
+            },
+            1_800_000_010,
+        )
             .is_err()
         );
         assert!(
             VerifiedRuntimeIsolationAttestation::verify(
-                &encoded,
-                "runtime-attestor-key-1",
-                &public_key,
-                "hermes",
-                "hermes",
-                "0.5.0",
-                "http://127.0.0.1:8642",
-                1_800_000_010
-            )
+            &encoded,
+            RuntimeAttestationTrustAnchor {
+                key_id: "runtime-attestor-key-1",
+                public_key_hex: &public_key,
+            },
+            RuntimeAttestationAdapterBinding {
+                provider_id: "hermes",
+                adapter_id: "hermes",
+                adapter_version: "0.5.0",
+                endpoint: "http://127.0.0.1:8642",
+            },
+            1_800_000_010,
+        )
             .is_err()
         );
         assert!(
             VerifiedRuntimeIsolationAttestation::verify(
-                &encoded,
-                "runtime-attestor-key-1",
-                &public_key,
-                "hermes",
-                "hermes",
-                "0.4.0",
-                "http://127.0.0.1:8642",
-                1_800_000_181
-            )
+            &encoded,
+            RuntimeAttestationTrustAnchor {
+                key_id: "runtime-attestor-key-1",
+                public_key_hex: &public_key,
+            },
+            RuntimeAttestationAdapterBinding {
+                provider_id: "hermes",
+                adapter_id: "hermes",
+                adapter_version: "0.4.0",
+                endpoint: "http://127.0.0.1:8642",
+            },
+            1_800_000_181,
+        )
             .is_err()
         );
     }
@@ -469,15 +485,19 @@ mod tests {
         missing.checks.pop();
         assert!(
             VerifiedRuntimeIsolationAttestation::verify(
-                &signed_attestation(&key, missing),
-                "runtime-attestor-key-1",
-                &public_key,
-                "hermes",
-                "hermes",
-                "0.4.0",
-                "http://127.0.0.1:8642",
-                1_800_000_010
-            )
+            &signed_attestation(&key, missing),
+            RuntimeAttestationTrustAnchor {
+                key_id: "runtime-attestor-key-1",
+                public_key_hex: &public_key,
+            },
+            RuntimeAttestationAdapterBinding {
+                provider_id: "hermes",
+                adapter_id: "hermes",
+                adapter_version: "0.4.0",
+                endpoint: "http://127.0.0.1:8642",
+            },
+            1_800_000_010,
+        )
             .is_err()
         );
 
@@ -485,15 +505,19 @@ mod tests {
         unverified.checks[0].verified = false;
         assert!(
             VerifiedRuntimeIsolationAttestation::verify(
-                &signed_attestation(&key, unverified),
-                "runtime-attestor-key-1",
-                &public_key,
-                "hermes",
-                "hermes",
-                "0.4.0",
-                "http://127.0.0.1:8642",
-                1_800_000_010
-            )
+            &signed_attestation(&key, unverified),
+            RuntimeAttestationTrustAnchor {
+                key_id: "runtime-attestor-key-1",
+                public_key_hex: &public_key,
+            },
+            RuntimeAttestationAdapterBinding {
+                provider_id: "hermes",
+                adapter_id: "hermes",
+                adapter_version: "0.4.0",
+                endpoint: "http://127.0.0.1:8642",
+            },
+            1_800_000_010,
+        )
             .is_err()
         );
 
@@ -501,15 +525,19 @@ mod tests {
         duplicate.checks[1].control = duplicate.checks[0].control;
         assert!(
             VerifiedRuntimeIsolationAttestation::verify(
-                &signed_attestation(&key, duplicate),
-                "runtime-attestor-key-1",
-                &public_key,
-                "hermes",
-                "hermes",
-                "0.4.0",
-                "http://127.0.0.1:8642",
-                1_800_000_010
-            )
+            &signed_attestation(&key, duplicate),
+            RuntimeAttestationTrustAnchor {
+                key_id: "runtime-attestor-key-1",
+                public_key_hex: &public_key,
+            },
+            RuntimeAttestationAdapterBinding {
+                provider_id: "hermes",
+                adapter_id: "hermes",
+                adapter_version: "0.4.0",
+                endpoint: "http://127.0.0.1:8642",
+            },
+            1_800_000_010,
+        )
             .is_err()
         );
     }
