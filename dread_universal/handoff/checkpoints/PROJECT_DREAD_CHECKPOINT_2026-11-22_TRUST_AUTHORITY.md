@@ -214,3 +214,56 @@ Next implementation must establish trusted policy-decision provenance and a requ
 ### Remaining implementation boundary
 
 The API does not yet call `authorize_and_persist`, `prepare_dispatch`, or the receipt conversion helper from the production provider worker. The existing direct-start worker remains behind the closed startup dispatch barrier. The new test strengthens the lost-ack crash invariant; it does not complete startup reconciliation. Keep the barrier closed and PR #16 draft. Continue with production policy binding, durable API admission/attempt preparation, receipt-backed provider lifecycle persistence, startup reattachment, and an independently trusted result verifier.
+
+## 10. Durable API execution + independent verification milestone — 2026-11-22
+
+This addendum supersedes earlier statements that durable API dispatch, startup reattachment, and independent result verification had not yet been integrated. It does **not** supersede the remaining physical workstation and trusted-runtime acceptance gates below.
+
+### Exact source and CI evidence
+
+- **Active PR:** #16, still open and draft.
+- **Branch:** `work/kimi003-phase6-api-integration-2026-11-22`
+- **Verified source HEAD:** `a6c48814056d7bd1b9afa892f9dcbe385547a842`
+- **GitHub Actions:** DREAD Universal CI run **#1684**, ID **45033888462**.
+- **Result:** all three jobs passed on that exact SHA:
+  1. Rust / Ubuntu 24.04 — formatting, strict Clippy, workspace tests, release build, installer/release verification, signed-release verifier failure paths, portable migration/rollback, Python bridge/importer regression, and the single-owner GPU boundary.
+  2. Web console / Ubuntu 24.04 — locked dependency install and production build.
+  3. Ubuntu packages / smoke test — Debian and portable package creation, checksums/content verification, and packaged API/console smoke tests.
+
+Run URL: https://github.com/dreaddo151-sys/koko/actions/runs/45033888462  
+Source commit: https://github.com/dreaddo151-sys/koko/commit/a6c48814056d7bd1b9afa892f9dcbe385547a842
+
+The Rust suite reported 87 API tests passing, with the orchestrator, agents, discovery, GPU, media and other workspace crate tests also green. The OpenHands test suite includes authenticated lifecycle tests; the new verifier tests cover heartbeat signature/freshness and exact per-attempt result digest binding. These are CI/mock contract tests, not live provider execution.
+
+### Implemented in this continuation
+
+1. **Durable API dispatch path** — `dread-api/src/durable_agent.rs` is wired into the existing Axum worker and shared `ExecutionGate`. Admission and atomic attempt preparation are persisted before the remote side effect. Only `DispatchPreparation::Created` can call `start_task_with_evidence`; `Existing` never starts a second request. The provider acknowledgement is verified and persisted before polling begins.
+
+2. **Authenticated lifecycle** — adapter-receipt conversion validates response digests against the actual returned object. Provider events carry signed receipt context into canonical durable event persistence. Active status, provider terminal outcomes, and cancellation progression use the attempt/request/adapter/registration identity. A provider success remains `provider_succeeded` until independent verification accepts the exact stored result/error.
+
+3. **Ambiguous start and crash recovery** — `AgentAdapter::reconcile_start_with_evidence` defaults to a fail-closed unsupported result; OpenHands implements read-only GET reconciliation through its deterministic conversation ID. Hermes and DeerFlow do not blindly replay ambiguous starts. Startup enumerates unresolved attempts, queries known IDs or the provider's read-only reconciliation hook, persists status/result observations, and attaches known-active workers inside the shared `ExecutionGate`. Unknown outcomes without IDs remain nonterminal; no start is replayed. Legacy cancellation recovery skips tasks with durable attempts.
+
+4. **Startup barrier and late-verifier worker** — the release predicate requires a valid signed policy, a fresh signed independent-verifier heartbeat, at least one enabled provider, and valid non-revoked isolation evidence plus a manifest-pinned adapter receipt key for each enabled provider. The independent-verification background worker retries only durable `provider_succeeded` attempts every five seconds; if a receipt arrives late and is accepted transactionally, it can then reevaluate the gate and resume queued durable tasks. This worker never sends provider starts itself.
+
+5. **Independent result verifier contract** — `dread-api/src/independent_verifier.rs` verifies a separately keyed Ed25519 heartbeat and per-request signed receipt from an owner-only, non-symlink receipt directory. The receipt binds canonical request, attempt, task, requester, worker and provider-receipt-verifier identities, plus SHA-256 of the exact persisted result JSON and provider-error bytes. A negative verifier decision is stored as a failed task; missing, stale, mismatched or tampered receipts leave provider success pending. Both new admission and attempt revalidation require a live heartbeat, while active provider lifecycle reconciliation may continue when the verifier is temporarily unavailable.
+
+6. **Schema migration 0007** — `0007_extended_cancellation_evidence.sql` expands the append-only evidence table's allowed signed cancellation receipt kinds while copying all existing audit/receipt rows and restoring append-only triggers. Schema installer and version regression tests now support schema version 7.
+
+7. **Adapter identity pinning** — Hermes, DeerFlow and OpenHands expose `CARGO_PKG_VERSION` as the adapter version. OpenHands' descriptor adapter key now matches the canonical provider ID `openhands` while retaining its descriptive descriptor ID.
+
+### Operational status and hard boundaries
+
+- **The startup dispatch barrier is still expected to remain closed on the user's actual machine** until the signed execution trust manifest, signed policy, provider receipt public keys, and independent verifier process/key/heartbeat are installed and verified there. The CI uses fixtures and does not deploy or configure these services.
+- No independent verifier process was deployed or launched as part of this GitHub source work. The new receipt directory protocol is documented in `docs/INDEPENDENT_RESULT_VERIFIER.md`; the operator must run a separate verifier that reads the canonical Phase 6 DB read-only, applies an independent result policy, and writes signed receipts/heartbeats.
+- Granular isolation remains signed provisioner/trust-authority evidence. The production issuer is not yet bound to live runtime observations of mounts, egress, tool permissions, secret handling, cancellation and restart reconciliation. Do not describe those flags as independently verified physical isolation.
+- The CI is repository code/package proof only. No provider task, live Hermes/DeerFlow/OpenHands session, actual ComfyUI/media generation, dual-3090 contention, physical installation, reboot, or workstation Hub parity test was performed.
+- No workstation service, file, database, model, workflow, output, session, backup, ComfyUI instance, legacy DREAD Hub, or Python GPU Supervisor was touched. Existing `ExecutionGate` and the Python GPU Supervisor ownership boundary remain unchanged.
+- PR #16 remains draft and unmerged. Do not open the dispatch barrier or mark production activation accepted until the independent verifier and live runtime evidence issuer are deployed/configured and physical acceptance checks pass.
+
+### Next engineering steps
+
+- Add an executable independent-verifier producer/tool or reference implementation that reads canonical SQLite read-only, applies a defined result policy, and atomically writes heartbeat and result receipt files without sharing API/provider secrets.
+- Implement the trusted runtime isolation evidence issuer and key lifecycle; replace operator-asserted isolation booleans/evidence records with durable observations from the actual provider/container/runtime.
+- Add direct API integration tests for durable start/replay/ack-lost/reattach/cancellation/terminal-verification and provider mock servers, including races between verifier expiry, provider completion and cancellation.
+- Verify real adapter API behavior and run physical Ubuntu acceptance without stopping or replacing ComfyUI, the legacy Hub, or the single Python GPU Supervisor.
+- Re-run full CI on every resulting code head and keep the startup barrier fail-closed until all required controls are actually deployed and validated.
