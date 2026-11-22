@@ -48,7 +48,10 @@ Each provider entry must include:
 - `capability_revision`: the current `capability_events.id` for the latest `enabled` approval event.
 - `operation`: currently `agent.execute`.
 - `enabled`, `revoked`, evidence identity/source, and observation/expiry timestamps.
-- All eight isolation controls: `per_task_workspace`, `filesystem_scope`, `network_egress_restricted`, `secret_scoping`, `process_isolation`, `resource_limits`, `audit_logging`, and `cleanup_verified`. Every control must be true for an enabled registration.
+- A nested `isolation` evidence record bound to the provider ID, adapter ID/version, provider-registration revision, and runtime identity.
+- Authenticated provenance: source observation ID, recording adapter ID/version, evidence SHA-256, observation time, and an `authenticated` marker covered by the Ed25519 signature.
+- Exactly eight individually evidenced controls: `runtime_identity`, `task_workspace_boundary`, `mount_policy`, `egress_policy`, `tool_permissions`, `stable_secret_handling`, `cancellation_propagation`, and `restart_reconciliation`. Each control needs `verified: true` and its own non-empty durable observation ID.
+- Isolation evidence must be observed no later than now, remain unexpired, and have a lifetime no longer than 300 seconds.
 - A retry contract with contract/evidence IDs, revision, expiry, SHA-256 digest, verifier/source, observation time, idempotency class, idempotency/provider-key support, and a bounded maximum attempt count.
 
 Provider endpoints must use HTTPS or an approved local endpoint. The configured endpoint must match the signed value exactly.
@@ -57,7 +60,7 @@ Provider endpoints must use HTTPS or an approved local endpoint. The configured 
 
 The signature is Ed25519 over the compact UTF-8 JSON serialization of the typed `ExecutionTrustManifest` payload, using the Rust field order and `serde_json::to_vec` serialization used by the API. The signature is not over the outer envelope. The raw 32-byte public key and 64-byte signature are represented as hexadecimal strings.
 
-The verifier rejects invalid signatures, unknown JSON fields, unsupported providers, duplicate provider entries, unsafe isolation settings, malformed digests, future observations, expired evidence, and lifetimes outside the configured bounds.
+The verifier rejects invalid signatures, unknown JSON fields, unsupported providers, duplicate provider entries, missing per-control observations, unauthenticated provenance, adapter/revision mismatches, malformed digests, future observations, expired evidence, and lifetimes outside the configured bounds. The API re-reads and re-verifies the signed manifest at each trust preflight, so the provisioner must refresh the short-lived isolation evidence in the file at least every five minutes. Updates should be written atomically; a stale or invalid manifest blocks new provider dispatch.
 
 Do not place private signing keys, provider API tokens, or secret values in the manifest. The manifest contains public attestation and registration metadata only.
 
@@ -81,6 +84,6 @@ Provider event/evidence verification is only called from the internal authentica
 - The durable startup dispatch barrier remains closed by default. Do not open it merely because a manifest is present.
 - The independent result verifier is not configured. Provider success must remain nonterminal and unverified until a separate verifier produces scoped evidence.
 - The existing adapter sandbox environment booleans are not accepted as signed proof by this module. They must not be represented as sufficient isolation verification.
-- This manifest is read at API startup. Revocation/update takes effect on a controlled restart with a newer signed manifest; live hot-reload/revocation is not implemented here.
+- The manifest is validated at startup and re-read on every trust preflight. Revocation/update takes effect on the next preflight after an atomically replaced, newly signed manifest is written.
 
 This document describes the current implementation boundary, not a declaration of provider dispatch readiness or release acceptance.
