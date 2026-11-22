@@ -203,7 +203,8 @@ impl OpenHandsAgentServerAdapter {
         {
             return Err(adapter_error(
                 "runtime_attestation_mismatch",
-                "OpenHands runtime attestation does not match the live Docker adapter identity".into(),
+                "OpenHands runtime attestation does not match the live Docker adapter identity"
+                    .into(),
                 false,
             ));
         }
