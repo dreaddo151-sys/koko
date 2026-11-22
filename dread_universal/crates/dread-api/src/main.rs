@@ -4,6 +4,7 @@ mod execution_policy;
 mod independent_verifier;
 mod provider_probe;
 mod providers;
+mod scheduler;
 mod secure_file;
 mod skills;
 
@@ -5282,7 +5283,7 @@ async fn gpu_inference(
     Ok(Json(result))
 }
 
-async fn repair_observations(
+pub(crate) async fn repair_observations(
     state: &AppState,
 ) -> Vec<dread_platform::repair::ComponentObservation> {
     use dread_agents::AgentHealthState;
@@ -6514,6 +6515,7 @@ async fn main() -> anyhow::Result<()> {
         "Completed startup recovery gate evaluation"
     );
     durable_agent::spawn_independent_verification_reconciler(state.clone());
+    scheduler::maybe_spawn_scheduler(&state);
     info!(address = %addr, database = %db_path, "PROJECT DREAD Universal API listening");
     axum::serve(listener, app(state))
         .with_graceful_shutdown(async {
