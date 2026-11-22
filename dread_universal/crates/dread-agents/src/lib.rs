@@ -217,9 +217,13 @@ fn validate_operation_evidence_payload(
     if payload.response_sha256.len() != 64
         || decode_receipt_hex(&payload.response_sha256).is_err()
         || payload.observed_at == 0
-        || payload.expires_at.is_some_and(|expiry| expiry <= payload.observed_at)
+        || payload
+            .expires_at
+            .is_some_and(|expiry| expiry <= payload.observed_at)
     {
-        return Err(durable_evidence_error("receipt evidence digest or timestamp is invalid"));
+        return Err(durable_evidence_error(
+            "receipt evidence digest or timestamp is invalid",
+        ));
     }
     if matches!(
         payload.evidence_kind,
@@ -689,7 +693,10 @@ mod tests {
         };
         let signed = signer.sign(payload).unwrap();
         assert_eq!(signed.key_id, "hermes-receipt-key");
-        assert_eq!(signed.payload.response_sha256, response_sha256(&response).unwrap());
+        assert_eq!(
+            signed.payload.response_sha256,
+            response_sha256(&response).unwrap()
+        );
 
         let public_key = decode_receipt_hex(&signer.public_key_hex().unwrap()).unwrap();
         let signature_bytes = decode_receipt_hex(&signed.signature_hex).unwrap();
@@ -710,8 +717,7 @@ mod tests {
 
     #[test]
     fn adapter_acknowledgement_receipt_requires_provider_execution_identity() {
-        let signer =
-            AgentReceiptSigner::from_seed_hex("receipt-key", &"31".repeat(32)).unwrap();
+        let signer = AgentReceiptSigner::from_seed_hex("receipt-key", &"31".repeat(32)).unwrap();
         let payload = AgentOperationEvidencePayload {
             evidence_id: "evidence-2".into(),
             evidence_kind: AgentOperationEvidenceKind::Acknowledged,
