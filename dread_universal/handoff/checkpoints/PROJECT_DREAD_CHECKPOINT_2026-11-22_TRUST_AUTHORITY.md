@@ -520,3 +520,49 @@ All three jobs passed:
 ### Acceptance boundary
 
 This is source-level and CI verification only. It does not deploy the verifier identity, keys, policy, receipt directory, API shared-group membership, SQLite/WAL/SHM ACLs, system unit or heartbeat on the user's workstation. Real capability result semantics, trusted runtime observation issuance, live provider behavior, crash/race acceptance, physical install/reboot, dual-GPU/ComfyUI contention and legacy Hub parity remain unaccepted. Keep provider dispatch fail-closed and PR #16 draft/unmerged.
+
+## 17. Shared no-follow reader for trust-critical API inputs — 2026-11-22
+
+### Finding
+
+Receipt reads had been hardened to inspect the opened file descriptor, but three other trust-critical startup inputs still used a path metadata check followed by a separate read:
+- The signed Phase 6 execution trust manifest.
+- Each provider's signed runtime-isolation attestation.
+- Each provider adapter's local receipt-signing key file.
+
+That left a final-component symlink/time-of-check/time-of-use window between metadata validation and file reading.
+
+### Implementation
+
+Added `crates/dread-api/src/secure_file.rs` with a bounded Unix reader shared by the API startup paths:
+
+- Opens with `O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK`; it does not follow a symlink at the final path component and cannot block waiting on a FIFO.
+- Checks regular-file type, nonempty size and byte limit on the opened descriptor.
+- Reads from that same descriptor with a max-bytes-plus-one bound, so a path swap after open does not redirect the read and growth cannot exceed the read limit.
+- Returns the opened descriptor metadata so each caller enforces its specific owner, group and mode policy.
+
+Integrated callers:
+- Signed execution trust manifest: no-follow read, bounded to `MAX_MANIFEST_BYTES`, then existing signature, issuer, time and provider-registration verification.
+- Signed runtime-isolation attestation: no-follow read, 64 KiB bound, rejects group/world-writable and special permission bits before signature and live-adapter binding verification.
+- Adapter receipt-signing key file: no-follow read, 4096-byte bound, requires exact owner-only mode `0600` before parsing the Ed25519 seed.
+- Independent verifier heartbeat/result receipt: now uses the same shared no-follow reader, then verifies verifier UID/GID and exact `0640` mode on the opened descriptor before signature and canonical identity/digest checks.
+
+Added API secure-file regression tests for regular-file acceptance, symlink rejection and size-limit enforcement. The separate heartbeat symlink test confirms the API reports the verifier unavailable rather than following a signed-heartbeat symlink.
+
+The verifier receipt directory parent is root-owned mode `0711` in the deployment tmpfiles template, preventing the verifier identity from renaming/replacing the directory itself. The verifier may create/replace files inside its owned `02750` receipt directory, while the API shared group remains read-only.
+
+### Exact-head verification
+
+**Source head:** `8065df7722c814115701d8f7f53a3f3dbee2c1eb`  
+**GitHub Actions run:** [#1925](https://github.com/dreaddo151-sys/koko/actions/runs/45049692850) — completed successfully on that exact SHA.
+
+All three jobs passed:
+1. Rust / Ubuntu 24.04 — rustfmt, strict workspace Clippy, complete workspace tests, optimized release build, installer/release checks, portable migration/rollback, Python bridge/importer regressions and the single-owner GPU boundary.
+2. Web console / Ubuntu 24.04 — locked dependencies and production build.
+3. Ubuntu packages / smoke test — Debian/portable assembly, checksum/content verification, packaged API install and production-console smoke test.
+
+### Acceptance boundary
+
+This is repository/build/package verification. No trust manifest, runtime attestation issuer, adapter key file, independent verifier account, verifier key/policy, receipt directory or group ACL has been deployed on the workstation by these changes. Operator-controlled parent directories for trust-critical files must remain protected from untrusted writers; `O_NOFOLLOW` covers the final component, not arbitrary symlinked parent components. The live two-UID receipt test, canonical DB/WAL/SHM read-only ACL, fresh heartbeat, real capability semantic evidence, live provider crash/race behavior and physical workstation acceptance remain outstanding.
+
+Provider dispatch remains fail-closed. PR #16 remains draft and unmerged. No workstation service or user data was changed by these repository operations.
