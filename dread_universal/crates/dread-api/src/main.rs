@@ -1,4 +1,5 @@
 mod durable_agent;
+mod secure_file;
 mod execution_authority;
 mod execution_policy;
 mod independent_verifier;
@@ -135,23 +136,19 @@ fn load_runtime_isolation_attestation(
         .ok_or_else(|| {
             format!("{environment_path_key} is required when configuring {provider_id}")
         })?;
-    let metadata = fs::symlink_metadata(&path)
-        .map_err(|error| format!("cannot inspect {environment_path_key}: {error}"))?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.len() == 0
-        || metadata.len() > 64 * 1024
-    {
-        return Err(format!(
-            "{environment_path_key} must name a regular non-symlink attestation file no larger than 64 KiB"
-        ));
-    }
+    let opened = secure_file::read_regular_file_no_follow(
+        &path,
+        64 * 1024,
+        environment_path_key,
+    )?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o022 != 0 {
+        // Runtime attestations may be readable by the API service, but must
+        // not be writable by another group/user or carry special mode bits.
+        if opened.metadata.permissions().mode() & 0o7022 != 0 {
             return Err(format!(
-                "{environment_path_key} must not be group- or world-writable"
+                "{environment_path_key} must not be group/world-writable or carry special permission bits"
             ));
         }
     }
@@ -162,8 +159,7 @@ fn load_runtime_isolation_attestation(
         env::var("DREAD_RUNTIME_ISOLATION_ATTESTATION_PUBLIC_KEY_HEX").map_err(|_| {
             "DREAD_RUNTIME_ISOLATION_ATTESTATION_PUBLIC_KEY_HEX is required".to_string()
         })?;
-    let encoded =
-        fs::read(&path).map_err(|error| format!("cannot read {environment_path_key}: {error}"))?;
+    let encoded = opened.bytes;
     VerifiedRuntimeIsolationAttestation::verify(
         &encoded,
         dread_agents::runtime_attestation::RuntimeAttestationTrustAnchor {
@@ -204,29 +200,18 @@ fn load_agent_receipt_signer(environment_key: &str) -> Result<Option<AgentReceip
         return Ok(None);
     };
     let path = PathBuf::from(path);
-    let metadata = fs::symlink_metadata(&path)
-        .map_err(|error| format!("cannot inspect {environment_key}: {error}"))?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.len() == 0
-        || metadata.len() > 4096
-    {
-        return Err(format!(
-            "{environment_key} must name a regular non-symlink key file no larger than 4096 bytes"
-        ));
-    }
+    let opened =
+        secure_file::read_regular_file_no_follow(&path, 4096, environment_key)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
+        if opened.metadata.permissions().mode() & 0o7777 != 0o600 {
             return Err(format!(
-                "{environment_key} must have owner-only permissions (0600 or stricter)"
+                "{environment_key} must have exact owner-only permissions (0600)"
             ));
         }
     }
-    let encoded = fs::read_to_string(&path)
-        .map_err(|error| format!("cannot read {environment_key}: {error}"))?;
-    let key: AgentReceiptSigningKeyFile = serde_json::from_str(&encoded)
+    let key: AgentReceiptSigningKeyFile = serde_json::from_slice(&opened.bytes)
         .map_err(|error| format!("invalid receipt key file for {environment_key}: {error}"))?;
     AgentReceiptSigner::from_seed_hex(&key.key_id, &key.seed_hex)
         .map(Some)
