@@ -85,32 +85,44 @@ pub fn boost_advice(
         "q8_0".to_owned(),
     ];
 
+    let mut head_dim_note: Option<String> = None;
     let head_dim = match (metadata.embedding_length, metadata.head_count) {
-        (Some(emb), Some(heads)) if heads > 0 => Some(emb / heads),
-        _ => None,
-    };
-
-    let kv_f16 = match (
-        metadata.block_count,
-        metadata.head_count_kv,
-        head_dim,
-    ) {
-        (Some(layers), Some(kv_heads), Some(dim)) if layers > 0 && kv_heads > 0 && dim > 0 => {
-            Some(layers.saturating_mul(2).saturating_mul(kv_heads).saturating_mul(dim).saturating_mul(F16_BYTES_PER_ELEMENT))
+        (Some(emb), Some(heads)) if heads > 0 => {
+            if emb % heads != 0 {
+                head_dim_note = Some(
+                    "embedding_length is not divisible by head_count: head_dim is rounded down"
+                        .to_owned(),
+                );
+            }
+            Some(emb / heads)
         }
         _ => None,
     };
-    let kv_q8_0 = kv_f16.map(|bytes| {
-        bytes
-            .saturating_mul(Q8_0_BLOCK_BYTES)
-            .saturating_div(Q8_0_BLOCK_ELEMENTS * F16_BYTES_PER_ELEMENT)
+
+    // KV elements per token, exactly: one vector each for K and V per kv
+    // head per layer. q8_0 packs 32 elements into a 36-byte block, so its
+    // cost is whole blocks per token - never fewer than ceil(blocks) x 36.
+    // Hostile metadata that overflows u64 degrades to "unknown", never to
+    // a wrong number.
+    let kv_elements = match (metadata.block_count, metadata.head_count_kv, head_dim) {
+        (Some(layers), Some(kv_heads), Some(dim)) if layers > 0 && kv_heads > 0 && dim > 0 => {
+            layers
+                .checked_mul(2)
+                .and_then(|v| v.checked_mul(kv_heads))
+                .and_then(|v| v.checked_mul(dim))
+        }
+        _ => None,
+    };
+    let kv_f16 = kv_elements.and_then(|e| e.checked_mul(F16_BYTES_PER_ELEMENT));
+    let kv_q8_0 = kv_elements.and_then(|e| {
+        e.div_ceil(Q8_0_BLOCK_ELEMENTS)
+            .checked_mul(Q8_0_BLOCK_BYTES)
     });
 
-    // Free space for KV once weights and runtime overhead are placed. This is
-    // valid whatever else is known, so it survives into Partial advice.
-    let kv_budget = total_vram_bytes
-        .checked_sub(runtime_overhead_bytes)
-        .and_then(|after_runtime| after_runtime.checked_sub(file_size_bytes));
+    // Free space for KV once weights and runtime overhead are placed. This
+    // is valid whatever else is known, so it survives into Partial advice.
+    let after_runtime = total_vram_bytes.checked_sub(runtime_overhead_bytes);
+    let kv_budget = after_runtime.and_then(|free| free.checked_sub(file_size_bytes));
 
     let (max_ctx_q8_0, max_ctx_f16) = match kv_budget {
         Some(budget) => (
@@ -120,36 +132,53 @@ pub fn boost_advice(
         None => (None, None),
     };
 
+    // Offload advice requires the exact KV cost: without it no context can
+    // be reserved, so we report the budget and refuse to guess layers.
     let mut n_gpu_layers = None;
     let mut estimated = false;
-    if let (Some(layers), Some(budget)) = (metadata.block_count, kv_budget) {
-        // No per-layer size means no offload suggestion. Note budget can
-        // only exist if the weights themselves fit, so the only question
-        // left is whether the full training-context KV cache also fits.
-        let per_layer = (layers > 0)
-            .then(|| file_size_bytes.checked_div(layers))
-            .flatten()
-            .filter(|bytes| *bytes > 0);
-        if let Some(per_layer) = per_layer {
+    let mut ctx_guaranteed: Option<u64> = None;
+    if let (Some(layers), Some(per_token_q8)) = (metadata.block_count, kv_q8_0) {
+        let full_context_fits = kv_budget.zip(metadata.context_length).is_some_and(
+            |(budget, train_ctx)| per_token_q8.saturating_mul(train_ctx) <= budget,
+        );
+        if full_context_fits {
+            n_gpu_layers = Some(-1);
+            ctx_guaranteed = max_ctx_q8_0;
+        } else if let Some(free) = after_runtime {
+            // Weights do not all fit with the trained context. Budget a
+            // modest context first, then size the GPU-resident layer slice
+            // against the REAL free memory (post-weights budgets double-
+            // count, because offloaded layers come back as free space).
             let modest_ctx_tokens: u64 = 4_096;
-            let full_context_fits = kv_q8_0
-                .zip(metadata.context_length)
-                .is_some_and(|(per_token, train_ctx)| {
-                    per_token.saturating_mul(train_ctx) <= budget
-                });
-            if full_context_fits {
-                n_gpu_layers = Some(-1);
+            let ctx_target = metadata
+                .context_length
+                .unwrap_or(modest_ctx_tokens)
+                .min(modest_ctx_tokens);
+            let kv_reserve = per_token_q8.saturating_mul(ctx_target);
+            if let Some(weights_budget) = free.checked_sub(kv_reserve) {
+                // layers x weights_budget >= file_size x N guarantees the
+                // N-th layer plus the reserved KV cache both fit.
+                let fits = if file_size_bytes > 0 {
+                    weights_budget
+                        .checked_mul(layers)
+                        .map_or(0, |scaled| scaled / file_size_bytes)
+                        .min(layers)
+                } else {
+                    layers
+                };
+                if fits >= layers {
+                    n_gpu_layers = Some(-1);
+                    ctx_guaranteed = Some(ctx_target);
+                } else {
+                    n_gpu_layers = Some(i64::try_from(fits).unwrap_or(i64::MAX));
+                    estimated = true;
+                    if fits > 0 {
+                        ctx_guaranteed = Some(ctx_target);
+                    }
+                }
             } else {
-                // Average-layer-size heuristic: transformer layers are close
-                // to equal in size, and the advice flags itself estimated.
-                // The reservation keeps a modest context resident; when the
-                // KV size is unknown there is nothing to reserve.
-                let reserve = kv_q8_0
-                    .map(|per_token| per_token.saturating_mul(modest_ctx_tokens))
-                    .unwrap_or(0);
-                let usable = budget.saturating_sub(reserve);
-                let fits = usable.checked_div(per_layer).unwrap_or(0);
-                n_gpu_layers = Some(i64::try_from(fits.min(layers)).unwrap_or(i64::MAX));
+                // Not even a modest context fits next to the runtime.
+                n_gpu_layers = Some(0);
                 estimated = true;
             }
         }
@@ -159,7 +188,9 @@ pub fn boost_advice(
         launch_args.push("--n-gpu-layers".to_owned());
         launch_args.push(layers.to_string());
     }
-    if let Some(ctx) = max_ctx_q8_0 {
+    // The emitted --ctx-size is only what the advice has actually budgeted;
+    // max_resident_context_* fields stay as separate full-offload ceilings.
+    if let Some(ctx) = ctx_guaranteed {
         let capped = match metadata.context_length {
             Some(train_ctx) if train_ctx > 0 => ctx.min(train_ctx),
             _ => ctx,
@@ -170,7 +201,9 @@ pub fn boost_advice(
         }
     }
 
-    let (confidence, reason) = if kv_f16.is_some() && kv_q8_0.is_some() {
+    let (confidence, reason) = if let Some(note) = head_dim_note {
+        (AdviceConfidence::Partial, note)
+    } else if kv_f16.is_some() && kv_q8_0.is_some() {
         (AdviceConfidence::Precise, "all KV math inputs parsed from GGUF".to_owned())
     } else if metadata.block_count.is_some() {
         (
@@ -206,10 +239,7 @@ pub fn advice_for_model_path(
     total_vram_bytes: u64,
     runtime_overhead_bytes: u64,
 ) -> Result<TokenBoostAdvice, String> {
-    let metadata = crate::models::read_gguf_metadata(path)?;
-    let size = std::fs::metadata(path)
-        .map_err(|error| format!("could not stat {}: {error}", path.display()))?
-        .len();
+    let (metadata, size) = crate::models::read_gguf_metadata_with_size(path)?;
     Ok(boost_advice(&metadata, size, total_vram_bytes, runtime_overhead_bytes))
 }
 
@@ -238,38 +268,76 @@ mod tests {
 
     #[test]
     fn kv_math_matches_the_ceiling_formula() {
-        // 80 layers × 2 × 8 kv heads × 128 dim × 2 B = 327_680 B/token f16.
+        // 80 layers x 2 x 8 kv heads x 128 dim = 163_840 elements/token.
         let advice = boost_advice(&meta_full(), 40 * GIB, 48 * GIB, GIB);
         assert_eq!(advice.head_dim, Some(128));
+        // f16: 163_840 x 2 B = 327_680 B/token.
         assert_eq!(advice.kv_bytes_per_token_f16, Some(327_680));
-        // q8_0 costs 1.125 B/element vs 2 B for f16: exactly 9/16 of f16.
+        // q8_0: 5_120 whole 36-byte blocks = 184_320 B/token (exactly
+        // 9/16 of f16 here because the element count is block-aligned).
         assert_eq!(advice.kv_bytes_per_token_q8_0, Some(184_320));
         assert_eq!(advice.confidence, AdviceConfidence::Precise);
     }
 
     #[test]
+    fn q8_0_costs_whole_blocks_per_token() {
+        // Head dim 33: 4 x 2 x 2 x 33 = 528 elements = 16.5 q8_0 blocks.
+        // The 17th block is paid in full: 612 B, not the pro-rated 594.
+        let mut meta = meta_full();
+        meta.block_count = Some(4);
+        meta.head_count = Some(1);
+        meta.head_count_kv = Some(2);
+        meta.embedding_length = Some(33);
+        let advice = boost_advice(&meta, GIB, GIB, GIB);
+        assert_eq!(advice.head_dim, Some(33));
+        assert_eq!(advice.kv_bytes_per_token_f16, Some(1_056));
+        assert_eq!(advice.kv_bytes_per_token_q8_0, Some(612));
+        // 33 % 1 == 0, so the division is exact and stays Precise.
+        assert_eq!(advice.confidence, AdviceConfidence::Precise);
+    }
+
+    #[test]
+    fn lossy_head_dim_division_degrades_confidence() {
+        // 3585 / 28 rounds down: honest advice says so and goes Partial.
+        let mut meta = meta_full();
+        meta.head_count = Some(28);
+        meta.embedding_length = Some(3_585);
+        let advice = boost_advice(&meta, GIB, GIB, GIB);
+        assert_eq!(advice.head_dim, Some(128));
+        assert_eq!(advice.confidence, AdviceConfidence::Partial);
+        assert!(advice.reason.contains("divisible"));
+    }
+
+    #[test]
     fn budget_and_context_are_honest_arithmetic() {
-        // 48 GiB VRAM - 1 GiB overhead - 44 GiB weights = 3 GiB KV budget.
-        let advice = boost_advice(&meta_full(), 44 * GIB, 48 * GIB, GIB);
-        let budget = advice.kv_budget_bytes.expect("budget");
-        assert_eq!(budget, 3 * GIB);
-        assert_eq!(advice.max_resident_context_q8_0, Some((3 * GIB) / 184_320));
-        assert_eq!(advice.max_resident_context_f16, Some((3 * GIB) / 327_680));
-        // The f16 cache always allows strictly less context.
-        assert!(advice.max_resident_context_f16 < advice.max_resident_context_q8_0);
-        // Full train context (32_768 × 184_320 = ~6.0e9 B) does NOT fit in
-        // 3 GiB: partial offload via the average-layer heuristic.
-        assert!(advice.n_gpu_layers.is_some());
-        assert_ne!(advice.n_gpu_layers, Some(-1));
+        // 48 GiB VRAM - 1 GiB overhead = 47 GiB free; 48_600 MiB of
+        // weights leave less KV headroom than the trained context needs.
+        let file = 48_600 * 1024 * 1024;
+        let free = 47 * GIB;
+        let advice = boost_advice(&meta_full(), file, 48 * GIB, GIB);
+        assert_eq!(advice.kv_budget_bytes, None); // weights beat full free
+        assert_eq!(advice.max_resident_context_q8_0, None);
+        assert_eq!(advice.max_resident_context_f16, None);
+        // The honest answer: a maximal layer slice that fits alongside a
+        // reserved 4096-token q8_0 cache inside FREE memory.
+        let kv_reserve = 4_096 * 184_320;
+        let expected = (free - kv_reserve) * 80 / file;
+        assert!(expected > 0 && expected < 80, "fixture must be partial");
+        let n = advice.n_gpu_layers.expect("layers");
+        assert_eq!(u64::try_from(n).expect("non-negative"), expected);
         assert!(advice.n_gpu_layers_estimated);
-        // ctx-size flag must never exceed the model's own train length.
+        // Invariants: the slice + reserved KV fit, and one more layer not.
+        let per_layer = file / 80;
+        assert!(expected * per_layer + kv_reserve <= free);
+        assert!((expected + 1) * per_layer + kv_reserve > free);
+        // ctx-size flag carries the reserved, budgeted context.
         let idx = advice
             .launch_args
             .iter()
             .position(|arg| arg == "--ctx-size")
             .expect("ctx-size flag");
         let ctx: u64 = advice.launch_args[idx + 1].parse().unwrap();
-        assert!(ctx <= 32_768);
+        assert_eq!(ctx, 4_096);
     }
 
     #[test]
@@ -284,18 +352,32 @@ mod tests {
             .position(|arg| arg == "--n-gpu-layers")
             .unwrap();
         assert_eq!(advice.launch_args[idx + 1], "-1");
+        // Full offload: the ctx-size flag carries the ceiling, capped at
+        // the model's trained context - advice never exceeds the model.
+        let idx = advice
+            .launch_args
+            .iter()
+            .position(|arg| arg == "--ctx-size")
+            .unwrap();
+        let ctx: u64 = advice.launch_args[idx + 1].parse().unwrap();
+        assert_eq!(ctx, 32_768);
+        assert!(ctx <= advice.max_resident_context_q8_0.expect("ceiling"));
     }
 
     #[test]
-    fn missing_kv_fields_degrade_to_partial_never_panic() {
+    fn missing_kv_fields_never_emit_launch_guesses() {
         let mut meta = meta_full();
         meta.head_count_kv = None;
         let advice = boost_advice(&meta, 40 * GIB, 48 * GIB, GIB);
         assert_eq!(advice.confidence, AdviceConfidence::Partial);
         assert_eq!(advice.kv_bytes_per_token_f16, None);
-        // The layer heuristic still works from block_count + sizes.
-        assert!(advice.n_gpu_layers.is_some());
-        assert!(advice.n_gpu_layers_estimated);
+        assert_eq!(advice.kv_bytes_per_token_q8_0, None);
+        // No KV cost means no reserved context, so no layers and no ctx.
+        assert_eq!(advice.n_gpu_layers, None);
+        assert!(!advice.launch_args.contains(&"--n-gpu-layers".to_owned()));
+        assert!(!advice.launch_args.contains(&"--ctx-size".to_owned()));
+        // The byte budget is still honest arithmetic.
+        assert_eq!(advice.kv_budget_bytes, Some(7 * GIB));
     }
 
     #[test]
@@ -325,19 +407,32 @@ mod tests {
         entry("qwen2.context_length", 4, u32le(32_768));
         entry("general.file_type", 4, u32le(15));
 
-        let dir = std::env::temp_dir().join(format!("dread-booster-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("tiny.gguf");
-        std::fs::write(&path, &bytes).unwrap();
+        struct TempDir(std::path::PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = TempDir(
+            std::env::temp_dir().join(format!(
+                "dread-booster-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or_else(|_| 0, |d| d.subsec_nanos())
+            )),
+        );
+        std::fs::create_dir_all(&dir.0).expect("temp dir");
+        let path = dir.0.join("tiny.gguf");
+        std::fs::write(&path, &bytes).expect("write fixture");
 
         let advice = advice_for_model_path(&path, 24 * GIB, GIB).expect("advice");
-        // 28 layers x 2 x 4 kv heads x (3584/28=128 dim) x 2 B = 57_344 B/tok
+        // 28 layers x 2 x 4 kv heads x (3584/28=128 dim) = 28_672 elements.
         assert_eq!(advice.kv_bytes_per_token_f16, Some(57_344));
         assert_eq!(advice.kv_bytes_per_token_q8_0, Some(32_256));
         assert_eq!(advice.confidence, AdviceConfidence::Precise);
         // Tiny file on a 24 GiB card: full residency.
         assert_eq!(advice.n_gpu_layers, Some(-1));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -351,13 +446,37 @@ mod tests {
     }
 
     #[test]
-    fn zero_vram_budget_never_wraps() {
-        // Weights bigger than the whole card: budget underflows to None,
-        // context advice disappears, no nonsense layers.
+    fn oversized_weights_answer_partial_offload_not_wrapping() {
+        // 80 GiB weights on a 24 GiB card: full residency is impossible,
+        // but a maximal layer slice + reserved modest context DOES fit,
+        // and that is the honest answer. No wrapping, no panics, ever.
         let advice = boost_advice(&meta_full(), 80 * GIB, 24 * GIB, GIB);
         assert_eq!(advice.kv_budget_bytes, None);
         assert_eq!(advice.max_resident_context_q8_0, None);
-        assert_eq!(advice.n_gpu_layers, None);
+        let n = u64::try_from(advice.n_gpu_layers.expect("layers")).expect("non-negative");
+        assert!(n < 80);
+        assert!(advice.n_gpu_layers_estimated);
+        // Invariant holds even here: slice + reserved KV fit in free.
+        let free = 23 * GIB;
+        assert!(n.saturating_mul((80 * GIB) / 80) + 4_096 * 184_320 <= free);
+        let idx = advice
+            .launch_args
+            .iter()
+            .position(|arg| arg == "--ctx-size")
+            .unwrap();
+        let ctx: u64 = advice.launch_args[idx + 1].parse().unwrap();
+        assert_eq!(ctx * 184_320 + n * ((80 * GIB) / 80), ctx * 184_320 + n * GIB);
+    }
+
+    #[test]
+    fn tiny_card_refuses_layers_instead_of_guessing() {
+        // 3 GiB card, 44 GiB weights: not even 4096 tokens of KV fit next
+        // to the runtime, so layer advice would be a lie. Honest answer:
+        // zero GPU layers, no context flag.
+        let advice = boost_advice(&meta_full(), 44 * GIB, 3 * GIB, 2 * GIB);
+        assert_eq!(advice.n_gpu_layers, Some(0));
+        assert!(advice.launch_args.contains(&"--n-gpu-layers".to_owned()));
+        assert!(!advice.launch_args.contains(&"--ctx-size".to_owned()));
     }
 
     #[test]

@@ -261,8 +261,20 @@ impl GgufHeaderReader {
 }
 
 /// Parse only the bounded GGUF header and selected scalar metadata; never load tensors.
-pub(crate) fn read_gguf_metadata(path: &Path) -> Result<GgufMetadata, String> {
+/// Read the bounded GGUF header and the file size from the SAME open
+/// descriptor, so advice math can never mix metadata with a file that was
+/// swapped between the parse and a separate stat.
+pub(crate) fn read_gguf_metadata_with_size(path: &Path) -> Result<(GgufMetadata, u64), String> {
     let mut reader = GgufHeaderReader::open(path)?;
+    let file_size = reader.file_size;
+    Ok((read_gguf_from(&mut reader)?, file_size))
+}
+
+pub(crate) fn read_gguf_metadata(path: &Path) -> Result<GgufMetadata, String> {
+    read_gguf_metadata_with_size(path).map(|(metadata, _)| metadata)
+}
+
+fn read_gguf_from(reader: &mut GgufHeaderReader) -> Result<GgufMetadata, String> {
     let mut magic = [0u8; 4];
     reader
         .file

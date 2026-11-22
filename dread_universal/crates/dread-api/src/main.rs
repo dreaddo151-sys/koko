@@ -5713,11 +5713,17 @@ async fn model_token_advice(
                 telemetry.get("gpus").and_then(Value::as_array).map(|gpus| {
                     gpus.iter()
                         .filter_map(|gpu| {
-                            gpu.get("memory_total_mb")
-                                .and_then(Value::as_f64)
-                                .map(|mb| (mb * 1024.0 * 1024.0) as u64)
+                            let mb = gpu.get("memory_total_mb").and_then(Value::as_f64)?;
+                            // Fail closed on hostile telemetry: finite,
+                            // positive, under a plausible 1 TiB per GPU.
+                            if !mb.is_finite() || mb <= 0.0 || mb > 1_048_576.0 {
+                                return None;
+                            }
+                            // Range validated above: 0 < mb*2^20 <= 2^40,
+                            // so the truncating cast cannot wrap or lie.
+                            Some((mb * 1_048_576.0).trunc() as u64)
                         })
-                        .sum()
+                        .fold(0_u64, u64::saturating_add)
                 })
             })
             .unwrap_or(0),
