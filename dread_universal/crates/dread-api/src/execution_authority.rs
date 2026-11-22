@@ -16,7 +16,12 @@ use ring::{digest, signature};
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::HashMap, env, fs, path::Path, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    env, fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 const MAX_MANIFEST_BYTES: u64 = 1_048_576;
 const MAX_MANIFEST_LIFETIME: i64 = 30 * 24 * 60 * 60;
@@ -60,33 +65,81 @@ pub struct ProviderTrustRecord {
     pub source_reference: String,
     pub observed_at: i64,
     pub expires_at: i64,
-    pub isolation: IsolationControls,
+    pub isolation: IsolationEvidenceRecord,
     pub retry_contract: RetryContractTrust,
+}
+
+pub const PREFLIGHT_CONTRACT_VERSION: &str = "provider-isolation-preflight-v1";
+pub const MAX_PREFLIGHT_LIFETIME_SECONDS: i64 = 300;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IsolationControl {
+    RuntimeIdentity,
+    TaskWorkspaceBoundary,
+    MountPolicy,
+    EgressPolicy,
+    ToolPermissions,
+    StableSecretHandling,
+    CancellationPropagation,
+    RestartReconciliation,
+}
+
+impl IsolationControl {
+    pub const ALL: [Self; 8] = [
+        Self::RuntimeIdentity,
+        Self::TaskWorkspaceBoundary,
+        Self::MountPolicy,
+        Self::EgressPolicy,
+        Self::ToolPermissions,
+        Self::StableSecretHandling,
+        Self::CancellationPropagation,
+        Self::RestartReconciliation,
+    ];
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct IsolationControls {
-    pub per_task_workspace: bool,
-    pub filesystem_scope: bool,
-    pub network_egress_restricted: bool,
-    pub secret_scoping: bool,
-    pub process_isolation: bool,
-    pub resource_limits: bool,
-    pub audit_logging: bool,
-    pub cleanup_verified: bool,
+pub struct ControlEvidence {
+    pub verified: bool,
+    pub durable_observation_id: String,
 }
 
-impl IsolationControls {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceProvenance {
+    pub source_observation_id: String,
+    pub recorded_by_adapter_id: String,
+    pub recorded_by_adapter_version: String,
+    pub evidence_sha256: String,
+    pub recorded_at: i64,
+    pub authenticated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IsolationEvidenceRecord {
+    pub contract_version: String,
+    pub evidence_id: String,
+    pub provider_id: String,
+    pub provider_registration_revision: i64,
+    pub adapter_id: String,
+    pub adapter_version: String,
+    pub runtime_identity: String,
+    pub provenance: EvidenceProvenance,
+    pub checks: BTreeMap<IsolationControl, ControlEvidence>,
+    pub checked_at: i64,
+    pub expires_at: i64,
+}
+
+impl IsolationEvidenceRecord {
     fn all_verified(&self) -> bool {
-        self.per_task_workspace
-            && self.filesystem_scope
-            && self.network_egress_restricted
-            && self.secret_scoping
-            && self.process_isolation
-            && self.resource_limits
-            && self.audit_logging
-            && self.cleanup_verified
+        let expected: BTreeSet<_> = IsolationControl::ALL.into_iter().collect();
+        let actual: BTreeSet<_> = self.checks.keys().copied().collect();
+        expected == actual
+            && self.checks.values().all(|evidence| {
+                evidence.verified && !evidence.durable_observation_id.trim().is_empty()
+            })
     }
 }
 
@@ -194,6 +247,8 @@ impl VerifiedExecutionTrustManifest {
                     "revoked": provider.revoked,
                     "expires_at": provider.expires_at,
                     "isolation_verified": provider.isolation.all_verified(),
+                    "isolation_evidence_id": provider.isolation.evidence_id,
+                    "runtime_identity": provider.isolation.runtime_identity,
                     "retry_contract_id": provider.retry_contract.contract_id,
                     "retry_contract_expires_at": provider.retry_contract.expires_at
                 })
@@ -215,7 +270,9 @@ impl VerifiedExecutionTrustManifest {
 }
 
 pub struct Phase6ExecutionAuthority {
-    manifest: Arc<VerifiedExecutionTrustManifest>,
+    manifest: VerifiedExecutionTrustManifest,
+    manifest_path: Option<PathBuf>,
+    public_key_hex: Option<String>,
     adapters: Arc<HashMap<String, Arc<dyn AgentAdapter>>>,
 }
 
@@ -225,8 +282,32 @@ impl Phase6ExecutionAuthority {
         adapters: Arc<HashMap<String, Arc<dyn AgentAdapter>>>,
     ) -> Self {
         Self {
-            manifest: Arc::new(manifest),
+            manifest,
+            manifest_path: None,
+            public_key_hex: None,
             adapters,
+        }
+    }
+
+    fn with_source(
+        manifest: VerifiedExecutionTrustManifest,
+        adapters: Arc<HashMap<String, Arc<dyn AgentAdapter>>>,
+        manifest_path: PathBuf,
+        public_key_hex: String,
+    ) -> Self {
+        Self {
+            manifest,
+            manifest_path: Some(manifest_path),
+            public_key_hex: Some(public_key_hex),
+            adapters,
+        }
+    }
+
+    fn refresh_manifest(&self, now: i64) -> Result<VerifiedExecutionTrustManifest, String> {
+        match (&self.manifest_path, &self.public_key_hex) {
+            (Some(path), Some(public_key)) => read_and_verify_manifest(path, public_key, now),
+            _ if self.manifest.expires_at() > now => Ok(self.manifest.clone()),
+            _ => Err("execution trust manifest has expired".into()),
         }
     }
 
@@ -234,8 +315,9 @@ impl Phase6ExecutionAuthority {
         &self,
         provider_id: &str,
         now: i64,
-    ) -> Result<(&ProviderTrustRecord, String), String> {
-        let record = self.manifest.provider(provider_id, now)?;
+    ) -> Result<(VerifiedExecutionTrustManifest, ProviderTrustRecord, String), String> {
+        let manifest = self.refresh_manifest(now)?;
+        let record = manifest.provider(provider_id, now)?.clone();
         let adapter = self
             .adapters
             .get(provider_id)
@@ -251,7 +333,7 @@ impl Phase6ExecutionAuthority {
                 "live adapter '{provider_id}' does not match its signed registration"
             ));
         }
-        Ok((record, version.to_owned()))
+        Ok((manifest, record, version.to_owned()))
     }
 
     fn capability_revision(
@@ -374,14 +456,14 @@ impl Phase6ExecutionAuthority {
         admission: &AdmissionRecord,
         now: i64,
     ) -> Result<(), String> {
-        let (record, _) = self.registration(&admission.provider_id, now)?;
+        let (_, record, _) = self.registration(&admission.provider_id, now)?;
         if record.capability_id != admission.capability_id
             || record.operation != admission.operation
             || record.adapter_id != admission.adapter_id
             || record.adapter_version != admission.adapter_version
             || record.registration_revision != admission.provider_registration_revision
             || record.capability_revision != admission.capability_revision
-            || record.evidence_id != admission.evidence_id
+            || record.isolation.evidence_id != admission.evidence_id
         {
             return Err("signed provider registration no longer matches the admission".into());
         }
@@ -412,7 +494,7 @@ impl Phase6ExecutionAuthority {
         provider_id: &str,
         now: i64,
     ) -> Result<(), String> {
-        let (registration, _) = self.registration(provider_id, now)?;
+        let (_, registration, _) = self.registration(provider_id, now)?;
         let revision = Self::capability_revision(connection, capability_id, provider_id)?;
         if registration.capability_id != capability_id
             || registration.capability_revision != revision
@@ -426,8 +508,37 @@ impl Phase6ExecutionAuthority {
     }
 
     pub fn status(&self, now: i64) -> Value {
-        self.manifest.public_status(now)
+        match self.refresh_manifest(now) {
+            Ok(manifest) => manifest.public_status(now),
+            Err(_) => json!({
+                "status": "invalid_or_expired",
+                "dispatch": "blocked",
+                "independent_result_verification": "not_configured_fail_closed"
+            }),
+        }
     }
+}
+
+fn read_and_verify_manifest(
+    path: &Path,
+    public_key_hex: &str,
+    now: i64,
+) -> Result<VerifiedExecutionTrustManifest, String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect execution trust manifest: {error}"))?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_MANIFEST_BYTES
+    {
+        return Err(
+            "execution trust manifest must be a regular non-symlink file no larger than 1 MiB"
+                .into(),
+        );
+    }
+    let encoded =
+        fs::read(path).map_err(|error| format!("cannot read execution trust manifest: {error}"))?;
+    VerifiedExecutionTrustManifest::verify(&encoded, public_key_hex, now)
 }
 
 pub fn load_from_env(
@@ -443,24 +554,10 @@ pub fn load_from_env(
                 .into(),
         ),
         (Some(path), Some(key)) => {
-            let path = Path::new(&path);
-            let metadata = fs::symlink_metadata(path)
-                .map_err(|error| format!("cannot inspect execution trust manifest: {error}"))?;
-            if metadata.file_type().is_symlink()
-                || !metadata.is_file()
-                || metadata.len() == 0
-                || metadata.len() > MAX_MANIFEST_BYTES
-            {
-                return Err(
-                    "execution trust manifest must be a regular non-symlink file no larger than 1 MiB"
-                        .into(),
-                );
-            }
-            let encoded = fs::read(path)
-                .map_err(|error| format!("cannot read execution trust manifest: {error}"))?;
-            let manifest = VerifiedExecutionTrustManifest::verify(&encoded, &key, now)?;
-            Ok(Some(Arc::new(Phase6ExecutionAuthority::new(
-                manifest, adapters,
+            let path = PathBuf::from(path);
+            let manifest = read_and_verify_manifest(&path, &key, now)?;
+            Ok(Some(Arc::new(Phase6ExecutionAuthority::with_source(
+                manifest, adapters, path, key,
             ))))
         }
     }
@@ -501,7 +598,7 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
             .adapter
             .as_deref()
             .ok_or_else(|| "agent capability has no provider adapter".to_string())?;
-        let (registration, adapter_version) = self.registration(provider_id, now)?;
+        let (manifest, registration, adapter_version) = self.registration(provider_id, now)?;
         let actual_revision = Self::capability_revision(connection, &capability_id, provider_id)?;
         if registration.capability_id != capability_id
             || registration.capability_revision != actual_revision
@@ -516,7 +613,7 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
         }
         let expiry = now
             .saturating_add(ADMISSION_LIFETIME)
-            .min(self.manifest.expires_at())
+            .min(manifest.expires_at())
             .min(registration.expires_at)
             .min(registration.retry_contract.expires_at);
         if expiry <= now {
@@ -542,7 +639,7 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
             idempotent_operation: registration.retry_contract.idempotent_operation,
             provider_keys_supported: registration.retry_contract.provider_keys_supported,
             max_attempts: registration.retry_contract.max_attempts,
-            evidence_id: registration.evidence_id.clone(),
+            evidence_id: registration.isolation.evidence_id.clone(),
             policy_decision_id: format!("task-approval:{}:{approval_sequence}", request.task_id),
             adapter_id: registration.adapter_id.clone(),
             adapter_version,
@@ -573,7 +670,7 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
     ) -> Result<(), String> {
         let admission = load_admission_for_authority(connection, &attempt.request_id)?;
         self.verify_admission_scope(connection, &admission, now)?;
-        let (registration, _) = self.registration(&attempt.provider_id, now)?;
+        let (_, registration, _) = self.registration(&attempt.provider_id, now)?;
         if evidence.provider_id != attempt.provider_id
             || evidence.adapter_id != registration.adapter_id
             || evidence.adapter_version != registration.adapter_version
@@ -660,7 +757,7 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
     ) -> Result<CurrentRetryContractFacts, String> {
         let admission = load_admission_for_authority(connection, &attempt.request_id)?;
         self.verify_admission_scope(connection, &admission, now)?;
-        let (registration, _) = self.registration(&attempt.provider_id, now)?;
+        let (_, registration, _) = self.registration(&attempt.provider_id, now)?;
         let contract = &registration.retry_contract;
         Ok(CurrentRetryContractFacts {
             contract_id: contract.contract_id.clone(),
