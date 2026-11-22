@@ -85,8 +85,7 @@ mod tests {
         let directory = temp_dir();
         let target = directory.join("target.json");
         fs::write(&target, b"{\"signed\":true}").unwrap();
-        let opened =
-            read_regular_file_no_follow(&target, 1024, "test evidence file").unwrap();
+        let opened = read_regular_file_no_follow(&target, 1024, "test evidence file").unwrap();
         assert_eq!(opened.bytes, b"{\"signed\":true}");
         assert!(opened.metadata.is_file());
 
