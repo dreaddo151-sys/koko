@@ -243,8 +243,8 @@ dependencies = [
  "dread-orchestrator",
  "dread-platform",
  "dread-skills",
- "libc",
  "futures",
+ "libc",
  "reqwest",
  "ring",
  "rusqlite",
@@ -287,9 +287,11 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "tokio",
+ "url",
 ]
 
 [[package]]

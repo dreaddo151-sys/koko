@@ -5576,20 +5576,39 @@ const COMFY_KIND: &str = "comfyui.instance";
 
 /// Candidate ComfyUI base URLs. Loopback-only by default (RFC safety rule:
 /// LAN scanning stays opt-in); override with DREAD_COMFY_CANDIDATES.
-fn comfy_candidates() -> Vec<String> {
-    if let Some(raw) = env::var_os("DREAD_COMFY_CANDIDATES") {
-        let list: Vec<String> = env::split_paths(&raw)
-            .map(|p| p.to_string_lossy().trim().to_string())
-            .filter(|s| !s.is_empty())
-            .take(64)
-            .collect();
-        if !list.is_empty() {
-            return list;
-        }
+/// Max candidate URLs per scan; protects the handler from a fat-fingered env.
+const MAX_COMFY_CANDIDATES: usize = 64;
+
+/// Split the raw `DREAD_COMFY_CANDIDATES` value on commas/whitespace (NOT
+/// `env::split_paths`, which splits on ':' and would shred every URL), keep
+/// only values that canonicalize as http(s) URLs, and cap the list.
+fn parse_comfy_candidates(raw: Option<&std::ffi::OsStr>) -> Vec<String> {
+    let Some(raw) = raw else {
+        return default_comfy_candidates();
+    };
+    let list: Vec<String> = raw
+        .to_string_lossy()
+        .split([',', ' ', '\t', '\n'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(dread_media::comfyui_discovery::normalize_base_url)
+        .take(MAX_COMFY_CANDIDATES)
+        .collect();
+    if list.is_empty() {
+        default_comfy_candidates()
+    } else {
+        list
     }
+}
+
+fn default_comfy_candidates() -> Vec<String> {
     (8188..=8198)
         .map(|port| format!("http://127.0.0.1:{port}"))
         .collect()
+}
+
+fn comfy_candidates() -> Vec<String> {
+    parse_comfy_candidates(env::var_os("DREAD_COMFY_CANDIDATES").as_deref())
 }
 
 async fn comfyui_scan(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -5599,15 +5618,21 @@ async fn comfyui_scan(State(state): State<AppState>) -> Result<Json<Value>, ApiE
         .build()
         .map_err(|e| ApiError::internal(e.to_string()))?;
     let facts = dread_media::comfyui_discovery::discover_endpoints(&client, &candidates).await;
-    let conn = db_lock(&state)?;
+    let mut conn = db_lock(&state)?;
     let now = i64::try_from(now_epoch()).unwrap_or(i64::MAX);
+    let tx = conn
+        .transaction()
+        .map_err(|e| ApiError::internal(format!("could not begin scan transaction: {e}")))?;
     let mut instances = Vec::new();
     for fact in &facts {
         let mut metadata =
             serde_json::to_value(fact).map_err(|e| ApiError::internal(e.to_string()))?;
         metadata["scanned_at"] = json!(now);
-        conn.execute(
-            "INSERT INTO registry (id, name, kind, endpoint, metadata, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO UPDATE SET name=excluded.name, endpoint=excluded.endpoint, metadata=excluded.metadata",
+        // The WHERE guard means an id collision with a row of a different kind
+        // is skipped, never overwritten: discovery must not corrupt unrelated
+        // registry entries (registry ids are global; kind is not in the PK).
+        tx.execute(
+            "INSERT INTO registry (id, name, kind, endpoint, metadata, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO UPDATE SET name=excluded.name, endpoint=excluded.endpoint, metadata=excluded.metadata WHERE registry.kind = excluded.kind",
             rusqlite::params![
                 fact.identity,
                 format!("ComfyUI {}", fact.comfyui_version),
@@ -5620,6 +5645,8 @@ async fn comfyui_scan(State(state): State<AppState>) -> Result<Json<Value>, ApiE
         .map_err(|error| ApiError::internal(format!("could not register ComfyUI instance: {error}")))?;
         instances.push(metadata);
     }
+    tx.commit()
+        .map_err(|e| ApiError::internal(format!("could not commit scan: {e}")))?;
     // Never prune: a ComfyUI that is briefly down keeps its registration
     // (invariant learned from the B5 hostile review, applied from day one).
     Ok(Json(json!({
@@ -5647,7 +5674,10 @@ async fn comfyui_instances(State(state): State<AppState>) -> Result<Json<Value>,
     let mut instances = Vec::new();
     for row in rows {
         let (id, name, endpoint, metadata) = row.map_err(|e| ApiError::internal(e.to_string()))?;
-        let meta: Value = serde_json::from_str(&metadata).unwrap_or(Value::Null);
+        let meta: Value = match serde_json::from_str(&metadata) {
+            Ok(meta) => meta,
+            Err(e) => json!({ "metadata_error": e.to_string() }),
+        };
         instances.push(json!({
             "id": id,
             "name": name,
@@ -6111,6 +6141,85 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn comfy_candidate_parsing_survives_colons_and_caps() {
+        use std::ffi::OsStr;
+        // Unset env: loopback sweep 8188..=8198.
+        assert_eq!(parse_comfy_candidates(None).len(), 11);
+        // Colon-containing URLs must survive intact (split_paths would shred
+        // them); ftp:// is rejected; separators may mix.
+        let raw = "http://127.0.0.1:8188,http://[::1]:8188 ftp://bad http://host:8189";
+        assert_eq!(
+            parse_comfy_candidates(Some(OsStr::new(raw))),
+            vec![
+                "http://127.0.0.1:8188",
+                "http://[::1]:8188",
+                "http://host:8189"
+            ]
+        );
+        // Hard cap on candidate count.
+        let many = (0..100)
+            .map(|i| format!("http://h{i}.local"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(
+            parse_comfy_candidates(Some(OsStr::new(&many))).len(),
+            MAX_COMFY_CANDIDATES
+        );
+        // Unparseable-only env (no host, bad scheme) falls back to the default
+        // sweep, never an empty scan. Note: bare words ARE valid hostnames and
+        // correctly become candidates.
+        assert_eq!(
+            parse_comfy_candidates(Some(OsStr::new("http://, ftp://x"))).len(),
+            11
+        );
+    }
+
+    #[test]
+    fn comfy_upsert_guard_never_touches_foreign_kind_rows() {
+        // Same statement as comfyui_scan: an id collision with a different
+        // kind must be a no-op, never an overwrite of the foreign row.
+        let conn = open_database(":memory:").expect("in-memory database should initialize");
+        conn.execute(
+            "INSERT INTO registry (id, name, kind, endpoint, metadata, created_at) VALUES ('comfy-collide', 'victim', 'provider.x', 'http://victim', '{}', 1)",
+            [],
+        )
+        .expect("seed victim row");
+        conn.execute(
+            "INSERT INTO registry (id, name, kind, endpoint, metadata, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO UPDATE SET name=excluded.name, endpoint=excluded.endpoint, metadata=excluded.metadata WHERE registry.kind = excluded.kind",
+            rusqlite::params!["comfy-collide", "ComfyUI 1", COMFY_KIND, "http://x", "{}", 2],
+        )
+        .expect("guarded upsert should succeed as a no-op");
+        let (name, kind): (String, String) = conn
+            .query_row(
+                "SELECT name, kind FROM registry WHERE id = 'comfy-collide'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("victim row must still exist");
+        assert_eq!(name, "victim");
+        assert_eq!(kind, "provider.x");
+        // And the same-kind path still updates in place (idempotent scan).
+        conn.execute(
+            "INSERT INTO registry (id, name, kind, endpoint, metadata, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO UPDATE SET name=excluded.name, endpoint=excluded.endpoint, metadata=excluded.metadata WHERE registry.kind = excluded.kind",
+            rusqlite::params!["comfy-own", "ComfyUI 1", COMFY_KIND, "http://x", "{}", 2],
+        )
+        .expect("own insert");
+        conn.execute(
+            "INSERT INTO registry (id, name, kind, endpoint, metadata, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO UPDATE SET name=excluded.name, endpoint=excluded.endpoint, metadata=excluded.metadata WHERE registry.kind = excluded.kind",
+            rusqlite::params!["comfy-own", "ComfyUI 2", COMFY_KIND, "http://x", "{}", 3],
+        )
+        .expect("same-kind upsert");
+        let name: String = conn
+            .query_row(
+                "SELECT name FROM registry WHERE id = 'comfy-own'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("own row");
+        assert_eq!(name, "ComfyUI 2");
+    }
+
     #[test]
     fn autoconfigure_registers_launchable_models_and_is_idempotent() {
         let conn = open_database(":memory:").expect("in-memory database should initialize");

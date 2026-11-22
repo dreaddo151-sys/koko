@@ -16,6 +16,9 @@ use tokio::time::timeout;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_CONCURRENT_PROBES: usize = 8;
+/// Hard wall-clock bound for one full sweep (64 worst-case hostile candidates
+/// at 8 slots x 10s budget = 80s; we stop at 60s and report what we have).
+const SWEEP_DEADLINE: Duration = Duration::from_secs(60);
 // One probe = up to three sequential requests; the sweep bounds the whole
 // probe so a slow-but-valid endpoint is not killed by a single-request cap.
 const PROBE_BUDGET: Duration = Duration::from_secs(10);
@@ -28,15 +31,24 @@ async fn read_capped_json(
     resp: reqwest::Response,
     cap: usize,
 ) -> anyhow::Result<serde_json::Value> {
+    // reqwest's .timeout() stops counting once response headers arrive, so a
+    // hostile server that trickles the body can hang the read forever. Bound
+    // the body read itself.
+    let acc = timeout(PROBE_TIMEOUT, read_capped_bytes(resp, cap))
+        .await
+        .map_err(|_| anyhow::anyhow!("response body read timed out"))??;
+    Ok(serde_json::from_slice(&acc)?)
+}
+
+async fn read_capped_bytes(mut resp: reqwest::Response, cap: usize) -> anyhow::Result<Vec<u8>> {
     let mut acc: Vec<u8> = Vec::new();
-    let mut resp = resp;
     while let Some(chunk) = resp.chunk().await? {
         if acc.len() + chunk.len() > cap {
             anyhow::bail!("response body exceeds {cap} bytes");
         }
         acc.extend_from_slice(&chunk);
     }
-    Ok(serde_json::from_slice(&acc)?)
+    Ok(acc)
 }
 const HEALTHY_REFRESH: Duration = Duration::from_secs(30);
 const DEGRADED_REFRESH: Duration = Duration::from_secs(120);
@@ -116,15 +128,15 @@ pub fn next_refresh(consecutive_failures: u32) -> Duration {
 /// Normalize a base URL for identity purposes: lowercase scheme, no trailing
 /// slash. Host casing is left to `reqwest`/URL parsing during probes; for the
 /// pure identity function we lowercase the scheme and authority defensively.
-pub fn identity_for(normalized_base_url: &str) -> String {
-    let normalized = normalize_base_url(normalized_base_url);
+pub fn identity_for(base_url: &str) -> Option<String> {
+    let normalized = normalize_base_url(base_url)?;
     let digest = ring::digest::digest(&ring::digest::SHA256, normalized.as_bytes());
     let hex = digest
         .as_ref()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
-    format!("comfy-{hex}")
+    Some(format!("comfy-{hex}"))
 }
 
 /// Extract `(node_type_count, checkpoints)` from a 2.7MB `/object_info` value
@@ -161,7 +173,7 @@ pub fn snapshot_checkpoints(object_info: &Value) -> (usize, Vec<String>) {
 /// validate. `/object_info` is best-effort and never affects detection.
 pub async fn probe_comfyui(client: &reqwest::Client, base_url: &str) -> Option<ComfyUiFacts> {
     let started = Instant::now();
-    let base = normalize_base_url(base_url);
+    let base = normalize_base_url(base_url)?;
 
     let stats_url = format!("{base}/system_stats");
     let queue_url = format!("{base}/queue");
@@ -243,7 +255,7 @@ pub async fn probe_comfyui(client: &reqwest::Client, base_url: &str) -> Option<C
         _ => (None, Vec::new()),
     };
 
-    let identity = identity_for(&base);
+    let identity = identity_for(&base)?;
     Some(ComfyUiFacts {
         base_url: base,
         identity,
@@ -267,45 +279,74 @@ pub async fn discover_endpoints(
     let mut iter = candidates.iter();
     let mut results = Vec::new();
 
-    loop {
-        while set.len() < MAX_CONCURRENT_PROBES {
-            let Some(candidate) = iter.next() else { break };
-            let client = Arc::clone(&client);
-            let candidate = candidate.clone();
-            set.spawn(async move {
-                timeout(PROBE_BUDGET, probe_comfyui(&client, &candidate))
-                    .await
-                    .unwrap_or_default()
-            });
-        }
+    let sweep = async {
+        loop {
+            while set.len() < MAX_CONCURRENT_PROBES {
+                let Some(candidate) = iter.next() else { break };
+                let client = Arc::clone(&client);
+                let candidate = candidate.clone();
+                set.spawn(async move {
+                    timeout(PROBE_BUDGET, probe_comfyui(&client, &candidate))
+                        .await
+                        .unwrap_or_default()
+                });
+            }
 
-        if set.is_empty() {
-            break;
+            if set.is_empty() {
+                return;
+            }
+            if let Some(Ok(Some(facts))) = set.join_next().await {
+                results.push(facts);
+            }
+            if set.is_empty() && iter.len() == 0 {
+                return; // trait-len: ExactSizeIterator::is_empty is unstable
+            }
         }
-        if let Some(Ok(Some(facts))) = set.join_next().await {
-            results.push(facts);
-        }
-        if set.is_empty() && iter.len() == 0 {
-            break; // reason for this being trait-len: ExactSizeIterator::is_empty is unstable
-        }
-    }
+    };
+    // On deadline we lose nothing: probes already collected are kept, and the
+    // dropped JoinSet aborts the stragglers.
+    let _ = timeout(SWEEP_DEADLINE, sweep).await;
 
     results.sort_by(|a, b| a.base_url.cmp(&b.base_url));
     results
 }
 
-fn normalize_base_url(input: &str) -> String {
-    let trimmed = input.trim().trim_end_matches('/');
-    let (scheme, rest) = match trimmed.split_once("://") {
-        Some((s, r)) => (s.to_ascii_lowercase(), r.to_owned()),
-        None => ("http".to_owned(), trimmed.to_owned()),
+/// Canonicalize a ComfyUI base URL: lowercased scheme+host, canonical bracketed
+/// IPv6, default port stripped, path preserved without trailing slash.
+/// Rejects (returns `None`): non-http(s) schemes, missing host, and embedded
+/// credentials - a secret must never be hashed into an identity nor silently
+/// mutated by case-folding.
+pub fn normalize_base_url(input: &str) -> Option<String> {
+    let raw = input.trim();
+    let with_scheme = if raw.contains("://") {
+        std::borrow::Cow::Borrowed(raw)
+    } else {
+        std::borrow::Cow::Owned(format!("http://{raw}"))
     };
-    // Lowercase only the authority (host:port), leaving any path intact.
-    let (authority, path) = match rest.split_once('/') {
-        Some((a, p)) => (a.to_ascii_lowercase(), format!("/{p}")),
-        None => (rest.to_ascii_lowercase(), String::new()),
+    let url = url::Url::parse(with_scheme.as_ref()).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = url.host_str()?;
+    if host.is_empty() {
+        return None;
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return None;
+    }
+    // url::Url already lowercased the host, canonicalized IPv6 (keeping its
+    // required brackets), and dropped default ports during parsing.
+    let host_part = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
     };
-    format!("{scheme}://{authority}{path}")
+    let mut out = format!("{}://{host_part}", url.scheme());
+    if let Some(port) = url.port() {
+        out.push_str(&format!(":{port}"));
+    }
+    out.push_str(url.path().trim_end_matches('/'));
+    Some(out)
 }
 
 fn basename(path: &str) -> String {
@@ -324,7 +365,9 @@ pub async fn fetch_object_info_snapshot(
     client: &reqwest::Client,
     base_url: &str,
 ) -> anyhow::Result<(usize, Vec<String>)> {
-    let url = format!("{}/object_info", normalize_base_url(base_url));
+    let base = normalize_base_url(base_url)
+        .ok_or_else(|| anyhow::anyhow!("invalid ComfyUI base URL: {base_url}"))?;
+    let url = format!("{base}/object_info");
     let value: Value = read_capped_json(
         client
             .get(url)
@@ -471,12 +514,86 @@ mod tests {
 
     #[test]
     fn identity_stable_and_normalized() {
-        let a = identity_for("HTTP://LOCALHOST:8188/");
-        let b = identity_for("http://localhost:8188");
+        let a = identity_for("HTTP://LOCALHOST:8188/").unwrap();
+        let b = identity_for("http://localhost:8188").unwrap();
         assert_eq!(a, b);
         assert_eq!(a.len(), 6 + 64);
         assert!(a.chars().skip(6).all(|c| c.is_ascii_hexdigit()));
-        assert_ne!(a, identity_for("http://localhost:8189"));
+        assert_ne!(a, identity_for("http://localhost:8189").unwrap());
+    }
+
+    #[test]
+    fn identity_table_from_hostile_review() {
+        // Canonical spelling itself, not just hash consistency.
+        assert_eq!(
+            normalize_base_url("http://[0:0:0:0:0:0:0:1]:8188").as_deref(),
+            Some("http://[::1]:8188")
+        );
+        assert_eq!(
+            normalize_base_url("HTTP://LOCALHOST:8188/").as_deref(),
+            Some("http://localhost:8188")
+        );
+        assert_eq!(
+            normalize_base_url("http://host:80/x/").as_deref(),
+            Some("http://host/x")
+        );
+        // Case, whitespace, trailing slash: same server.
+        assert_eq!(
+            identity_for("  HTTP://LOCALHOST:8188/  ").unwrap(),
+            identity_for("http://localhost:8188").unwrap()
+        );
+        // Default ports are stripped, not hashed.
+        assert_eq!(
+            identity_for("http://host:80").unwrap(),
+            identity_for("http://host").unwrap()
+        );
+        assert_eq!(
+            identity_for("https://host:443").unwrap(),
+            identity_for("https://host").unwrap()
+        );
+        // The same IPv6 server in two spellings is one identity.
+        assert_eq!(
+            identity_for("http://[0:0:0:0:0:0:0:1]:8188").unwrap(),
+            identity_for("http://[::1]:8188").unwrap()
+        );
+        // Credentials are rejected outright: never hashed, never case-folded.
+        assert!(identity_for("http://User:Secret@host:8188").is_none());
+        // Non-http(s) schemes are rejected, not silently probed.
+        assert!(identity_for("ftp://host:8188").is_none());
+        assert!(identity_for("ws://host:8188").is_none());
+        assert!(identity_for("file:///tmp/comfy").is_none());
+    }
+
+    #[tokio::test]
+    async fn trickle_body_cannot_hang_a_probe() {
+        // Hostile server: valid headers, then holds the body open forever.
+        // reqwest's per-request timeout stops at headers, so without the
+        // inner body-read timeout this probe would hang until PROBE_BUDGET.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = socket.read(&mut buf).await;
+                    // Valid headers + an unterminated "{" that is never
+                    // finished: a body read with no timeout hangs here.
+                    let head = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{";
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                });
+            }
+        });
+        let url = format!("http://{addr}");
+        let started = Instant::now();
+        let facts = probe_comfyui(&client(), &url).await;
+        let elapsed = started.elapsed();
+        assert!(facts.is_none(), "trickling server must not yield facts");
+        assert!(
+            elapsed < Duration::from_secs(8),
+            "probe took {elapsed:?}; body-read timeout missing"
+        );
+        server.abort();
     }
 
     #[test]
