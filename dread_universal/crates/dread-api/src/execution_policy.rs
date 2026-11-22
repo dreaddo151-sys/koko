@@ -529,6 +529,31 @@ mod tests {
     }
 
     #[test]
+    fn policy_file_replacement_is_reverified_for_each_decision() {
+        let now = 1_800_000_000;
+        let (encoded, key) = signed_policy(now, vec![allow_rule()]);
+        let path = std::env::temp_dir().join(format!(
+            "dread-execution-policy-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        fs::write(&path, encoded).unwrap();
+
+        let authority = ExecutionPolicyAuthority {
+            manifest_path: path.clone(),
+            public_key_hex: key,
+        };
+        assert!(authority.authorize(input("request-a"), now).is_ok());
+
+        let mut revoked = allow_rule();
+        revoked.effect = ExecutionPolicyEffect::Deny;
+        let (replacement, _) = signed_policy(now, vec![revoked]);
+        fs::write(&path, replacement).unwrap();
+        assert!(authority.authorize(input("request-a"), now).is_err());
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn rejects_expired_policy_and_modified_signature() {
         let now = 1_800_000_000;
         let (encoded, key) = signed_policy(now, vec![allow_rule()]);
