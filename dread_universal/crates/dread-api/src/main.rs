@@ -20,8 +20,10 @@ use axum::{
 };
 use dread_agents::{
     AgentAdapter, AgentReceiptSigner, AgentTaskState, CapabilityKind, CapabilityProvenance,
-    CapabilityRecord, CapabilityStatus, StartTaskRequest, deerflow::DeerFlowApiAdapter,
-    hermes::HermesApiAdapter, openhands::OpenHandsAgentServerAdapter,
+    CapabilityRecord, CapabilityStatus, StartTaskRequest,
+    runtime_attestation::VerifiedRuntimeIsolationAttestation,
+    deerflow::DeerFlowApiAdapter, hermes::HermesApiAdapter,
+    openhands::OpenHandsAgentServerAdapter,
 };
 use dread_discovery::{
     discover, discover_agent_manifests, discover_agents, known_agent_endpoints, load_agents,
@@ -77,19 +79,14 @@ struct AgentAdapterConfig {
 struct HermesAdapterConfig {
     endpoint: String,
     api_key: String,
-    terminal_backend: String,
-    isolated_workspace_per_task: bool,
-    sandbox_policy_verified: bool,
+    runtime_attestation: VerifiedRuntimeIsolationAttestation,
 }
 
 struct DeerFlowAdapterConfig {
     endpoint: String,
     api_prefix: String,
     pat: String,
-    provider_class: String,
-    isolated_workspace_per_task: bool,
-    sandbox_policy_verified: bool,
-    provisioner_url: Option<String>,
+    runtime_attestation: VerifiedRuntimeIsolationAttestation,
 }
 struct OpenHandsAdapterConfig {
     endpoint: String,
@@ -97,9 +94,7 @@ struct OpenHandsAdapterConfig {
     llm_model: String,
     llm_api_key: String,
     llm_base_url: String,
-    docker_runtime_enabled: bool,
-    secret_store_configured: bool,
-    sandbox_policy_verified: bool,
+    runtime_attestation: VerifiedRuntimeIsolationAttestation,
 }
 
 #[derive(Deserialize)]
@@ -107,6 +102,74 @@ struct OpenHandsAdapterConfig {
 struct AgentReceiptSigningKeyFile {
     key_id: String,
     seed_hex: String,
+}
+
+fn load_runtime_isolation_attestation(
+    environment_path_key: &str,
+    provider_id: &str,
+    adapter_id: &str,
+    adapter_version: &str,
+    endpoint: &str,
+) -> Result<VerifiedRuntimeIsolationAttestation, String> {
+    let path = env::var_os(environment_path_key)
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("{environment_path_key} is required when configuring {provider_id}"))?;
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|error| format!("cannot inspect {environment_path_key}: {error}"))?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > 64 * 1024
+    {
+        return Err(format!(
+            "{environment_path_key} must name a regular non-symlink attestation file no larger than 64 KiB"
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o022 != 0 {
+            return Err(format!(
+                "{environment_path_key} must not be group- or world-writable"
+            ));
+        }
+    }
+
+    let key_id = env::var("DREAD_RUNTIME_ISOLATION_ATTESTATION_KEY_ID")
+        .map_err(|_| "DREAD_RUNTIME_ISOLATION_ATTESTATION_KEY_ID is required".to_string())?;
+    let public_key_hex = env::var("DREAD_RUNTIME_ISOLATION_ATTESTATION_PUBLIC_KEY_HEX")
+        .map_err(|_| "DREAD_RUNTIME_ISOLATION_ATTESTATION_PUBLIC_KEY_HEX is required".to_string())?;
+    let encoded = fs::read(&path)
+        .map_err(|error| format!("cannot read {environment_path_key}: {error}"))?;
+    VerifiedRuntimeIsolationAttestation::verify(
+        &encoded,
+        &key_id,
+        &public_key_hex,
+        provider_id,
+        adapter_id,
+        adapter_version,
+        endpoint,
+        i64::try_from(now_epoch()).unwrap_or(i64::MAX),
+    )
+    .map_err(|error| format!("invalid runtime isolation attestation for {provider_id}: {error}"))
+}
+
+fn reject_legacy_isolation_booleans() -> Result<(), String> {
+    const LEGACY_FLAGS: &[&str] = &[
+        "DREAD_HERMES_ISOLATED_WORKSPACE_PER_TASK",
+        "DREAD_HERMES_SANDBOX_POLICY_VERIFIED",
+        "DREAD_DEERFLOW_ISOLATED_WORKSPACE_PER_TASK",
+        "DREAD_DEERFLOW_SANDBOX_POLICY_VERIFIED",
+        "DREAD_OPENHANDS_DOCKER_RUNTIME_ENABLED",
+        "DREAD_OPENHANDS_SECRET_STORE_CONFIGURED",
+        "DREAD_OPENHANDS_SANDBOX_POLICY_VERIFIED",
+    ];
+    if let Some(name) = LEGACY_FLAGS.iter().find(|name| env::var_os(name).is_some()) {
+        return Err(format!(
+            "{name} is an obsolete unsigned isolation flag; use a signed runtime attestation file"
+        ));
+    }
+    Ok(())
 }
 
 fn load_agent_receipt_signer(environment_key: &str) -> Result<Option<AgentReceiptSigner>, String> {
