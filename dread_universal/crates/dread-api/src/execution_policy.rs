@@ -261,9 +261,7 @@ impl ExecutionPolicyAuthority {
         )?;
         #[cfg(unix)]
         if !policy_file_mode_is_safe(opened.metadata.permissions().mode()) {
-            return Err(
-                "execution policy manifest must not be group- or world-writable".into(),
-            );
+            return Err("execution policy manifest must not be group- or world-writable".into());
         }
         VerifiedExecutionPolicy::verify(&opened.bytes, &self.public_key_hex, now)
     }
