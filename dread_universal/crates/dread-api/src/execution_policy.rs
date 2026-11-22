@@ -567,6 +567,29 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn policy_authority_rejects_group_writable_manifest() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let now = 1_800_000_000;
+        let (encoded, key) = signed_policy(now, vec![allow_rule()]);
+        let path = std::env::temp_dir().join(format!(
+            "dread-execution-policy-mode-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        fs::write(&path, encoded).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o660)).unwrap();
+
+        let authority = ExecutionPolicyAuthority {
+            manifest_path: path.clone(),
+            public_key_hex: key,
+        };
+        assert!(authority.authorize(input("request-a"), now).is_err());
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn policy_authority_rejects_symlink_even_when_target_is_valid() {
         use std::os::unix::fs::symlink;
 
