@@ -594,6 +594,16 @@ fn open_database(path: &str) -> anyhow::Result<Connection> {
             ))?;
         }
     }
+    // Install the durable execution schema on the same canonical Phase 6
+    // connection used by the API. This is additive and validates the existing
+    // missions/tasks/events/results tables before applying its private migrations.
+    // The installer deliberately leaves the startup dispatch barrier closed;
+    // provider reconciliation must explicitly open it before durable dispatch.
+    dread_orchestrator::persistence::install(
+        &mut conn,
+        i64::try_from(now_epoch()).unwrap_or(i64::MAX),
+    )?;
+
     Ok(conn)
 }
 
@@ -9336,6 +9346,34 @@ mod tests {
         assert_eq!(status, "completed");
         let event = receiver.try_recv().unwrap();
         assert_eq!(event.event_type, "task_succeeded");
+    }
+
+    #[test]
+    fn api_database_installs_durable_execution_schema_on_canonical_tables() {
+        let connection = open_database(":memory:").unwrap();
+        let version: i64 = connection
+            .query_row(
+                "SELECT MAX(version) FROM dread_execution_schema_migrations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 4);
+        assert!(
+            !dread_orchestrator::persistence::startup_dispatch_barrier_is_open(&connection)
+                .unwrap(),
+            "dispatch must remain blocked until provider reconciliation is integrated"
+        );
+        for table in ["tasks", "task_events", "task_results", "missions", "mission_tasks"] {
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "canonical table {table} must remain present");
+        }
     }
 
     #[test]
