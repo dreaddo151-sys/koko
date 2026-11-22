@@ -133,4 +133,25 @@ The verifier needs read-only access to the canonical SQLite database **and its r
 
 The producer uses `.dread-verifier.lock` to prevent duplicate instances. If the process is killed and leaves a stale lock, first verify that no verifier process is running; only then remove that lock file. Do not routinely delete locks or receipts.
 
-No verifier process, service account, signing key, receipt directory, policy, heartbeat, or database ACL is deployed by this source change. These steps are an operator deployment and acceptance gate. Keep provider dispatch blocked until the separate account, database read-only access, API group-only receipt access, live heartbeat, and capability policy are tested on the target workstation.
+### Manual systemd deployment template
+
+The package includes these examples, but the installer does not create accounts, install this unit into the system unit directory, enable it, or start it:
+
+- `systemd/dread-result-verifier.service.example`
+- `systemd/dread-result-verifier.tmpfiles.example`
+- `config/independent-result-verifier.env.example`
+
+A reviewed deployment sequence is:
+
+1. Create a dedicated `dread-verifier` service user and a dedicated `dread-api-verifier` shared group. Add the API service account to the shared group; add the verifier account as a supplementary member if needed by the local group policy. The API account must not be the verifier UID.
+2. Install the tmpfiles example as `/etc/tmpfiles.d/dread-result-verifier.conf`, review its paths, then run `systemd-tmpfiles --create /etc/tmpfiles.d/dread-result-verifier.conf`. Confirm the parent directory is verifier-owned mode `0751`, the private config directory is verifier-owned mode `0700`, and the receipt directory is verifier UID/shared GID mode `2750`.
+3. As the verifier account, copy the packaged policy template to `/var/lib/dread-verifier/config/policy.json` with mode `0600`; replace every placeholder with real capability result-schema paths and review each allow/deny rule.
+4. As the verifier account, run `dread-result-verifier keygen /var/lib/dread-verifier/config/verifier.pk8`. Record the displayed public key and key ID in the API configuration. Do not copy the private key to the API account.
+5. Install the env example as `/etc/dread-result-verifier.env`, root-owned mode `0600`. Set the real canonical database path, verifier identity, key ID/public key, key/policy paths and numeric receipt UID/GID. The example's database and key values are placeholders, not ready-to-run defaults.
+6. Review the service unit's `ReadOnlyPaths`. They must cover the actual canonical SQLite database parent and its existing WAL/SHM files, plus the verifier config directory. The verifier needs read-only traversal/read permission for these paths. Do not grant database, WAL, SHM, task-table or result-table write permission. The unit uses `ProtectHome=read-only` so a canonical database under a home directory can be readable without becoming writable; keep the read-only path list exact for the actual host.
+7. Copy the service example to `/etc/systemd/system/dread-result-verifier.service`, inspect every path and hardening directive, then run `systemctl daemon-reload`. Enable/start it only after testing receipt readability from the API account and proving the API account cannot create, replace or remove receipt files.
+8. Confirm the API configuration contains the matching verifier ID/key/public key and the same receipt path/UID/GID. The API account must be a member of the shared group and must see a fresh signed heartbeat before new admissions can pass the fail-closed gate.
+
+The service runs with no ambient capabilities, no new privileges, a private temporary directory/device namespace, a strict read-only system view except for the receipt spool, restricted address families and system-call hardening. It is an example to be reviewed against the host's actual database path; do not copy it verbatim with the placeholder path.
+
+No verifier process, service account, signing key, receipt directory, policy, heartbeat, system unit, or database ACL is deployed by this source change. These steps are an operator deployment and acceptance gate. Keep provider dispatch blocked until the separate account, database read-only access, API group-only receipt access, live heartbeat, and capability policy are tested on the target workstation.
