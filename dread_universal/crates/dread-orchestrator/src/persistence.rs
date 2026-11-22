@@ -1277,12 +1277,14 @@ pub fn mark_recovery_worker_attached(
     let changed = tx.execute(
         "UPDATE dread_task_attempts SET recovery_attached_at = ?2, recovery_generation = ?3
          WHERE request_id = ?1 AND dispatch_state = 'running'
-           AND provider_execution_id IS NOT NULL AND recovery_generation != ?3",
+           AND provider_execution_id IS NOT NULL
+           AND (recovery_generation != ?3 OR recovery_attached_at IS NULL)",
         params![request_id, now, generation],
     )?;
     if changed != 1 {
         let already_attached = tx.query_row(
-            "SELECT recovery_generation = ?2 FROM dread_task_attempts WHERE request_id = ?1",
+            "SELECT recovery_generation = ?2 AND recovery_attached_at IS NOT NULL
+             FROM dread_task_attempts WHERE request_id = ?1",
             params![request_id, generation],
             |row| row.get::<_, bool>(0),
         )?;
