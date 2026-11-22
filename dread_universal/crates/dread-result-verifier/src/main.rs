@@ -120,6 +120,15 @@ struct VerifierConfig {
     poll_interval: Duration,
 }
 
+struct VerifierOutput<'a> {
+    receipt_dir: &'a Path,
+    verifier_id: &'a str,
+    key_id: &'a str,
+    keypair: &'a Ed25519KeyPair,
+    receipt_uid: u32,
+    receipt_gid: u32,
+}
+
 struct ProcessLock {
     path: PathBuf,
     _file: File,
@@ -260,7 +269,7 @@ fn secure_file_metadata(path: &Path, max_bytes: u64, name: &str) -> Result<fs::M
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::os::unix::fs::PermissionsExt;
         if metadata.permissions().mode() & 0o077 != 0 {
             return Err(format!("{name} must be owner-only (0600 or stricter)"));
         }
@@ -908,41 +917,42 @@ fn write_heartbeat(
 
 fn run_cycle(
     connection: &Connection,
-    receipt_dir: &Path,
-    verifier_id: &str,
-    key_id: &str,
-    keypair: &Ed25519KeyPair,
+    output: &VerifierOutput<'_>,
     policy: &VerificationPolicy,
     policy_digest: &str,
-    receipt_uid: u32,
-    receipt_gid: u32,
 ) -> Result<(usize, usize), String> {
     let pending = load_pending_attempts(connection)?;
     let mut created_or_refreshed = 0usize;
     for attempt in &pending {
         let now = now_epoch_seconds()?;
-        let receipt = build_result_receipt(attempt, policy, policy_digest, verifier_id, now)?;
+        let receipt = build_result_receipt(
+            attempt,
+            policy,
+            policy_digest,
+            output.verifier_id,
+            now,
+        )?;
         if publish_result_receipt(
-            receipt_dir,
+            output.receipt_dir,
             attempt,
             &receipt,
-            key_id,
-            keypair,
-            receipt_uid,
-            receipt_gid,
+            output.key_id,
+            output.keypair,
+            output.receipt_uid,
+            output.receipt_gid,
         )? {
             created_or_refreshed = created_or_refreshed.saturating_add(1);
         }
     }
     let now = now_epoch_seconds()?;
     write_heartbeat(
-        receipt_dir,
-        verifier_id,
-        key_id,
-        keypair,
+        output.receipt_dir,
+        output.verifier_id,
+        output.key_id,
+        output.keypair,
         now,
-        receipt_uid,
-        receipt_gid,
+        output.receipt_uid,
+        output.receipt_gid,
     )?;
     Ok((pending.len(), created_or_refreshed))
 }
@@ -1033,6 +1043,14 @@ fn run_daemon(config: VerifierConfig, once: bool) -> Result<(), String> {
     check_public_key_environment(&keypair)?;
     let (policy, policy_digest) = load_policy(&config.policy_path)?;
     let connection = open_read_only_database(&config.database_path)?;
+    let output = VerifierOutput {
+        receipt_dir: &config.receipt_dir,
+        verifier_id: &config.verifier_id,
+        key_id: &config.key_id,
+        keypair: &keypair,
+        receipt_uid: config.receipt_uid,
+        receipt_gid: config.receipt_gid,
+    };
     eprintln!(
         "DREAD independent verifier ready: id={} policy={} database={} poll={}s",
         config.verifier_id,
@@ -1041,17 +1059,7 @@ fn run_daemon(config: VerifierConfig, once: bool) -> Result<(), String> {
         config.poll_interval.as_secs()
     );
     loop {
-        match run_cycle(
-            &connection,
-            &config.receipt_dir,
-            &config.verifier_id,
-            &config.key_id,
-            &keypair,
-            &policy,
-            &policy_digest,
-            config.receipt_uid,
-            config.receipt_gid,
-        ) {
+        match run_cycle(&connection, &output, &policy, &policy_digest) {
             Ok((pending, receipts)) => {
                 eprintln!(
                     "verifier cycle complete: pending={} receipts_created_or_refreshed={}",
