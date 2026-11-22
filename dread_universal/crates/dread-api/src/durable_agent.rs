@@ -1212,7 +1212,9 @@ pub(super) fn spawn_independent_verification_reconciler(state: AppState) {
                 let mut connection = match state.db.lock() {
                     Ok(connection) => connection,
                     Err(_) => {
-                        warn!("Database lock unavailable while rechecking startup dispatch barrier");
+                        warn!(
+                            "Database lock unavailable while rechecking startup dispatch barrier"
+                        );
                         continue;
                     }
                 };
