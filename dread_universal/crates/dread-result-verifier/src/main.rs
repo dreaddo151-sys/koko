@@ -861,9 +861,6 @@ fn existing_receipt_is_current(
     expected_uid: u32,
     expected_gid: u32,
 ) -> bool {
-    if validate_shared_output_file(path, expected_uid, expected_gid).is_err() {
-        return false;
-    }
     let Ok(bytes) = read_shared_output_file(path, expected_uid, expected_gid) else {
         return false;
     };
@@ -1125,12 +1122,21 @@ fn generate_key(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn current_effective_uid() -> Result<u32, String> {
+    #[cfg(unix)]
+    {
+        // SAFETY: geteuid has no pointer arguments or side effects and returns
+        // the effective UID of the current process.
+        Ok(unsafe { libc::geteuid() })
+    }
+    #[cfg(not(unix))]
+    {
+        Err("verifier private-key ownership is supported only on Unix hosts".into())
+    }
+}
+
 fn print_public_key(path: &Path) -> Result<(), String> {
-    let current_uid = std::env::var("UID")
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok())
-        .ok_or_else(|| "cannot determine the current verifier UID".to_string())?;
-    let keypair = load_private_key(path, current_uid)?;
+    let keypair = load_private_key(path, current_effective_uid()?)?;
     println!("{}", hex_encode(keypair.public_key().as_ref()));
     Ok(())
 }
@@ -1443,6 +1449,51 @@ mod tests {
         let owner_uid = fs::metadata(&directory).unwrap().uid();
         assert!(load_private_key(&path, owner_uid).is_ok());
         assert!(generate_key(&path).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn private_key_reader_rejects_symlink_and_checks_opened_owner() {
+        use std::os::unix::fs::symlink;
+
+        let directory = temp_dir();
+        let owner_uid = fs::metadata(&directory).unwrap().uid();
+        let target = directory.join("private-key.pk8");
+        let link = directory.join("private-key-link.pk8");
+        write_sync_file(&target, b"not-a-real-pkcs8-key").unwrap();
+        assert!(
+            read_owner_private_file(&target, owner_uid, 4096, "test private key").is_ok()
+        );
+        symlink(&target, &link).unwrap();
+        assert!(
+            read_owner_private_file(&link, owner_uid, 4096, "test private key").is_err()
+        );
+        assert!(
+            read_owner_private_file(&target, owner_uid.saturating_add(1), 4096, "test private key")
+                .is_err()
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn existing_receipt_reader_rejects_symlink_and_checks_opened_metadata() {
+        use std::os::unix::fs::symlink;
+
+        let directory = temp_dir();
+        let directory_metadata = fs::metadata(&directory).unwrap();
+        let expected_uid = directory_metadata.uid();
+        let expected_gid = directory_metadata.gid();
+        let target = directory.join("receipt-target.json");
+        let link = directory.join("receipt-link.json");
+        write_sync_shared_file(&target, b"not-a-signed-receipt").unwrap();
+        assert!(
+            read_shared_output_file(&target, expected_uid, expected_gid).is_ok()
+        );
+        symlink(&target, &link).unwrap();
+        assert!(read_shared_output_file(&link, expected_uid, expected_gid).is_err());
+        assert!(
+            read_shared_output_file(&target, expected_uid.saturating_add(1), expected_gid).is_err()
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
