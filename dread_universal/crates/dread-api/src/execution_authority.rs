@@ -1582,4 +1582,154 @@ mod tests {
         let unsafe_signed = serde_json::to_vec(&envelope).unwrap();
         assert!(VerifiedExecutionTrustManifest::verify(&unsafe_signed, &key, now).is_err());
     }
+    fn signed_adapter_receipt_fixture(
+        now: i64,
+    ) -> (
+        ProviderTrustRecord,
+        AdmissionRecord,
+        AttemptRecord,
+        SignedProviderReceipt,
+    ) {
+        let (encoded, _) = signed_manifest(now);
+        let mut manifest: SignedExecutionTrustEnvelope =
+            serde_json::from_slice(&encoded).unwrap();
+        let seed = [41_u8; 32];
+        let keypair = Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
+        let registration = &mut manifest.payload.providers[0];
+        registration.receipt_key_id = Some("hermes-adapter-key-1".into());
+        registration.receipt_public_key_hex = Some(hex_encode(keypair.public_key().as_ref()));
+        let registration = registration.clone();
+
+        let admission = AdmissionRecord {
+            admission_id: "admission-1".into(),
+            request_id: "request-1".into(),
+            task_id: "task-1".into(),
+            mission_id: None,
+            attempt_number: 1,
+            requester_id: "test-operator".into(),
+            provider_id: "hermes".into(),
+            capability_id: "hermes.run".into(),
+            operation: AGENT_OPERATION.into(),
+            permission_scope: "agent:execute".into(),
+            idempotency_key: "project-dread:task-1".into(),
+            evidence_id: "isolation-evidence-1".into(),
+            policy_decision_id: "policy-decision-1".into(),
+            adapter_id: "hermes".into(),
+            adapter_version: "1.0.0".into(),
+            provider_registration_revision: 1,
+            capability_revision: 1,
+            expires_at: now + 300,
+            consumed_at: None,
+        };
+        let attempt = AttemptRecord {
+            attempt_id: "attempt-1".into(),
+            task_id: "task-1".into(),
+            mission_id: None,
+            attempt_number: 1,
+            request_id: "request-1".into(),
+            provider_id: "hermes".into(),
+            capability_id: "hermes.run".into(),
+            operation: AGENT_OPERATION.into(),
+            idempotency_key: "project-dread:task-1".into(),
+            worker_id: "worker-1".into(),
+            provider_execution_id: None,
+            provider_result_json: None,
+            provider_error: None,
+            outcome_json: None,
+            dispatch_state: "prepared".into(),
+            cancellation_state: "none".into(),
+            dispatched_at: now - 1,
+            acknowledged_at: None,
+            terminal_at: None,
+            recovery_attached_at: None,
+        };
+
+        let response_sha256 =
+            hex_encode(digest::digest(&digest::SHA256, b"{\"accepted\":true}").as_ref());
+        let payload = AgentOperationEvidencePayload {
+            evidence_id: "request-1:attempt-1:acknowledged:1800000000".into(),
+            evidence_kind: AgentOperationEvidenceKind::Acknowledged,
+            identity: dread_agents::AgentExecutionIdentity {
+                request_id: "request-1".into(),
+                attempt_id: "attempt-1".into(),
+                task_id: "task-1".into(),
+                worker_id: "worker-1".into(),
+                provider_id: "hermes".into(),
+                capability_id: "hermes.run".into(),
+                adapter_id: "hermes".into(),
+                adapter_version: "1.0.0".into(),
+                provider_registration_revision: 1,
+                idempotency_key: "project-dread:task-1".into(),
+            },
+            provider_execution_id: Some("hermes-run-1".into()),
+            external_event_id: None,
+            event_type: None,
+            response_sha256: response_sha256.clone(),
+            verifier_id: "dread-adapter-receipt:hermes".into(),
+            source_reference: "http://127.0.0.1:8642".into(),
+            observed_at: now as u64,
+            expires_at: Some(now.saturating_add(300) as u64),
+        };
+        let payload_json = serde_json::to_string(&payload).unwrap();
+        let signature_hex = hex_encode(keypair.sign(payload_json.as_bytes()).as_ref());
+        let receipt = SignedProviderReceipt {
+            key_id: "hermes-adapter-key-1".into(),
+            payload_json,
+            signature_hex,
+            response_sha256,
+        };
+        (registration, admission, attempt, receipt)
+    }
+
+    #[test]
+    fn verifies_adapter_receipt_with_manifest_pinned_public_key_and_attempt_identity() {
+        let now = 1_800_000_000;
+        let (registration, admission, attempt, receipt) =
+            signed_adapter_receipt_fixture(now);
+        let payload = verify_signed_adapter_receipt(
+            &receipt,
+            &registration,
+            &admission,
+            &attempt,
+            now,
+        )
+        .unwrap();
+        assert_eq!(payload.evidence_kind, AgentOperationEvidenceKind::Acknowledged);
+        assert_eq!(payload.identity.attempt_id, "attempt-1");
+    }
+
+    #[test]
+    fn rejects_tampered_or_wrong_identity_adapter_receipts() {
+        let now = 1_800_000_000;
+        let (registration, admission, attempt, receipt) =
+            signed_adapter_receipt_fixture(now);
+
+        let mut tampered = receipt.clone();
+        tampered.payload_json.push(' ');
+        assert!(
+            verify_signed_adapter_receipt(&tampered, &registration, &admission, &attempt, now)
+                .is_err()
+        );
+
+        let mut wrong_key = receipt.clone();
+        wrong_key.key_id = "unregistered-key".into();
+        assert!(
+            verify_signed_adapter_receipt(&wrong_key, &registration, &admission, &attempt, now)
+                .is_err()
+        );
+
+        let mut wrong_attempt = attempt.clone();
+        wrong_attempt.worker_id = "different-worker".into();
+        assert!(
+            verify_signed_adapter_receipt(
+                &receipt,
+                &registration,
+                &admission,
+                &wrong_attempt,
+                now
+            )
+            .is_err()
+        );
+    }
+
 }
