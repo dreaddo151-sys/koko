@@ -548,6 +548,11 @@ fn load_policy(path: &Path, expected_uid: u32) -> Result<(VerificationPolicy, St
     )?;
     let policy: VerificationPolicy = serde_json::from_slice(&encoded)
         .map_err(|error| format!("independent verifier policy JSON is invalid: {error}"))?;
+    validate_policy(&policy)?;
+    Ok((policy, sha256_hex(&encoded)))
+}
+
+fn validate_policy(policy: &VerificationPolicy) -> Result<(), String> {
     if policy.schema_version != 1 {
         return Err("unsupported independent verifier policy schema version".into());
     }
@@ -555,9 +560,11 @@ fn load_policy(path: &Path, expected_uid: u32) -> Result<(VerificationPolicy, St
     if policy.rules.is_empty() {
         return Err("independent verifier policy must contain at least one capability rule".into());
     }
-    let mut seen = BTreeMap::new();
+
+    let mut seen_capabilities = BTreeMap::new();
+    let mut seen_rule_ids = BTreeMap::new();
     for rule in &policy.rules {
-        validate_text("capability_id", &rule.capability_id, 128)?;
+        validate_safe_label("capability_id", &rule.capability_id, 128)?;
         validate_safe_label("rule_id", &rule.rule_id, 128)?;
         if rule.max_result_bytes == 0 || rule.max_result_bytes > MAX_RESULT_BYTES {
             return Err("capability rule max_result_bytes must be between 1 byte and 4 MiB".into());
@@ -565,23 +572,49 @@ fn load_policy(path: &Path, expected_uid: u32) -> Result<(VerificationPolicy, St
         if rule.required_json_pointers.is_empty() {
             return Err("every capability rule must require at least one JSON Pointer".into());
         }
-        for pointer in rule
+
+        let mut seen_pointers = BTreeMap::new();
+        for (pointer, required) in rule
             .required_json_pointers
             .iter()
-            .chain(rule.forbidden_json_pointers.iter())
+            .map(|pointer| (pointer, true))
+            .chain(
+                rule.forbidden_json_pointers
+                    .iter()
+                    .map(|pointer| (pointer, false)),
+            )
         {
             if !valid_json_pointer(pointer) {
                 return Err(format!("invalid JSON Pointer in rule {}", rule.rule_id));
             }
+            if pointer.contains("__REPLACE_WITH_") {
+                return Err(format!(
+                    "rule {} still contains a placeholder JSON Pointer",
+                    rule.rule_id
+                ));
+            }
+            if seen_pointers.insert(pointer.as_str(), required).is_some() {
+                return Err(format!(
+                    "rule {} repeats or both requires and forbids JSON Pointer {}",
+                    rule.rule_id, pointer
+                ));
+            }
         }
-        if seen.insert(rule.capability_id.as_str(), ()).is_some() {
+
+        if seen_capabilities
+            .insert(rule.capability_id.as_str(), ())
+            .is_some()
+        {
             return Err(format!(
                 "policy contains duplicate capability rule for {}",
                 rule.capability_id
             ));
         }
+        if seen_rule_ids.insert(rule.rule_id.as_str(), ()).is_some() {
+            return Err(format!("policy contains duplicate rule ID {}", rule.rule_id));
+        }
     }
-    Ok((policy, sha256_hex(&encoded)))
+    Ok(())
 }
 
 fn valid_json_pointer(pointer: &str) -> bool {
@@ -1257,6 +1290,44 @@ mod tests {
         assert!(!has_exact_unix_permission_mode(0o4640, 0o640));
         assert!(!has_exact_unix_permission_mode(0o2640, 0o640));
         assert!(!has_exact_unix_permission_mode(0o1640, 0o640));
+    }
+
+    #[test]
+    fn policy_rejects_unconfigured_placeholder_pointers() {
+        let mut configured = policy();
+        configured.rules[0].required_json_pointers =
+            vec!["/__REPLACE_WITH_REQUIRED_VERIFIED_RESULT_FIELD__".into()];
+        assert!(validate_policy(&configured).is_err());
+    }
+
+    #[test]
+    fn policy_rejects_duplicate_or_conflicting_json_pointers() {
+        let mut configured = policy();
+        configured.rules[0]
+            .forbidden_json_pointers
+            .push("/result".into());
+        assert!(validate_policy(&configured).is_err());
+
+        configured.rules[0].forbidden_json_pointers.clear();
+        configured.rules[0]
+            .required_json_pointers
+            .push("/result".into());
+        assert!(validate_policy(&configured).is_err());
+    }
+
+    #[test]
+    fn policy_rejects_duplicate_rule_ids_and_invalid_capability_labels() {
+        let mut configured = policy();
+        let mut second = configured.rules[0].clone();
+        second.capability_id = "deerflow.run".into();
+        configured.rules.push(second);
+        assert!(validate_policy(&configured).is_err());
+
+        configured.rules[1].rule_id = "deerflow-run-v1".into();
+        assert!(validate_policy(&configured).is_ok());
+
+        configured.rules[1].capability_id = "deerflow/run".into();
+        assert!(validate_policy(&configured).is_err());
     }
 
     #[test]
