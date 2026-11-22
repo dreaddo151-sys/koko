@@ -1265,8 +1265,8 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let signer = AgentReceiptSigner::from_seed_hex("openhands-test-key", &"1a".repeat(32))
-            .unwrap();
+        let signer =
+            AgentReceiptSigner::from_seed_hex("openhands-test-key", &"1a".repeat(32)).unwrap();
         let trusted_public_key = signer.public_key_hex().unwrap();
         let adapter = OpenHandsAgentServerAdapter::new(
             &format!("http://{address}"),
