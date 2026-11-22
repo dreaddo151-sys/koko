@@ -6,7 +6,7 @@
 //! The API must cross-check the returned summary against the signed manifest;
 //! an environment boolean or an unsigned local assertion is never accepted.
 
-use ring::signature::{self, UnparsedPublicKey, ED25519};
+use ring::signature::{self, ED25519, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
