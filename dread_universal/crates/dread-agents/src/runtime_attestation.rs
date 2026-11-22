@@ -188,8 +188,7 @@ impl VerifiedRuntimeIsolationAttestation {
             || payload.observed_at > now
             || payload.expires_at <= now
             || payload.expires_at <= payload.observed_at
-            || payload.expires_at
-                > payload.observed_at.saturating_add(MAX_LIFETIME_SECONDS)
+            || payload.expires_at > payload.observed_at.saturating_add(MAX_LIFETIME_SECONDS)
         {
             return Err("runtime isolation attestation is future-dated, expired or exceeds its lifetime bound".into());
         }
