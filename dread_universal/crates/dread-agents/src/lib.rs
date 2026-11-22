@@ -208,6 +208,76 @@ pub fn response_sha256<T: Serialize>(response: &T) -> AdapterResult<String> {
     ))
 }
 
+/// Signs a receipt after a provider adapter has completed its authenticated
+/// transport operation. This attests what the local adapter observed; it is
+/// not a provider-origin signature or an independent result verification.
+pub fn signed_agent_operation_receipt<T: Serialize>(
+    signer: &AgentReceiptSigner,
+    descriptor: &AgentDescriptor,
+    expected_provider_id: &str,
+    identity: &AgentExecutionIdentity,
+    evidence_kind: AgentOperationEvidenceKind,
+    response: T,
+    provider_execution_id: Option<String>,
+    external_event_id: Option<String>,
+    event_type: Option<String>,
+) -> AdapterResult<AgentOperationReceipt<T>> {
+    validate_execution_identity(identity)?;
+    if !descriptor.enabled
+        || descriptor.adapter != identity.adapter_id
+        || expected_provider_id != identity.provider_id
+    {
+        return Err(durable_evidence_error(
+            "durable receipt identity does not match the enabled provider adapter",
+        ));
+    }
+    let source_reference = descriptor
+        .endpoint
+        .as_deref()
+        .ok_or_else(|| durable_evidence_error("adapter endpoint is unavailable for receipt"))?;
+    let observed_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let expires_at = observed_at.saturating_add(300);
+    let response_sha256 = response_sha256(&response)?;
+    let event_suffix = external_event_id
+        .as_deref()
+        .unwrap_or(evidence_kind_name(evidence_kind));
+    let evidence_id = format!(
+        "{}:{}:{}:{}",
+        identity.request_id, identity.attempt_id, event_suffix, observed_at
+    );
+    let payload = AgentOperationEvidencePayload {
+        evidence_id,
+        evidence_kind,
+        identity: identity.clone(),
+        provider_execution_id,
+        external_event_id,
+        event_type,
+        response_sha256,
+        verifier_id: format!("dread-adapter-receipt:{}", identity.adapter_id),
+        source_reference: source_reference.to_owned(),
+        observed_at,
+        expires_at: Some(expires_at),
+    };
+    let evidence = signer.sign(payload)?;
+    Ok(AgentOperationReceipt { response, evidence })
+}
+
+fn evidence_kind_name(kind: AgentOperationEvidenceKind) -> &'static str {
+    match kind {
+        AgentOperationEvidenceKind::Acknowledged => "acknowledged",
+        AgentOperationEvidenceKind::Active => "active",
+        AgentOperationEvidenceKind::Event => "event",
+        AgentOperationEvidenceKind::Succeeded => "succeeded",
+        AgentOperationEvidenceKind::Failed => "failed",
+        AgentOperationEvidenceKind::Cancelled => "cancelled",
+        AgentOperationEvidenceKind::CancellationAccepted => "cancellation_accepted",
+        AgentOperationEvidenceKind::CancellationUnknown => "cancellation_unknown",
+    }
+}
+
 fn validate_operation_evidence_payload(
     payload: &AgentOperationEvidencePayload,
 ) -> AdapterResult<()> {
