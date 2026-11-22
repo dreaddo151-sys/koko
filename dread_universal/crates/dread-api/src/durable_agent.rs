@@ -39,6 +39,29 @@ fn now_epoch_i64() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
+fn record_pre_start_reconciliation(
+    connection: &mut rusqlite::Connection,
+    request_id: &str,
+    reason: &str,
+    now: i64,
+) {
+    let reason_json = json!({
+        "reason": reason,
+        "source": "durable-pre-start-validation",
+        "request_id": request_id
+    })
+    .to_string();
+    if let Err(error) =
+        persistence::mark_reconciliation_required(connection, request_id, &reason_json, now)
+    {
+        warn!(
+            request_id,
+            error = %error,
+            "Could not persist pre-start reconciliation state"
+        );
+    }
+}
+
 fn mark_reconciliation_required(state: &AppState, request_id: &str, reason: &str) {
     let now = now_epoch_i64();
     let reason_json = json!({
@@ -129,16 +152,39 @@ fn prepare_new_attempt(
             return Ok(None);
         }
     };
-    let identity = agent_execution_identity(&admission, &attempt)?;
+    let identity = match agent_execution_identity(&admission, &attempt) {
+        Ok(identity) => identity,
+        Err(error) => {
+            record_pre_start_reconciliation(
+                &mut connection,
+                &request.request_id,
+                &error,
+                now,
+            );
+            return Err(error);
+        }
+    };
     if identity.provider_id != execution.provider
         || identity.capability_id != execution.capability_id
     {
-        return Err(
-            "selected API adapter does not match the canonical durable provider identity".into(),
-        );
+        let error =
+            "selected API adapter does not match the canonical durable provider identity";
+        record_pre_start_reconciliation(&mut connection, &request.request_id, error, now);
+        return Err(error.into());
     }
     let start_request =
-        durable_agent_start_request(&admission, &attempt, execution.payload.clone())?;
+        match durable_agent_start_request(&admission, &attempt, execution.payload.clone()) {
+            Ok(request) => request,
+            Err(error) => {
+                record_pre_start_reconciliation(
+                    &mut connection,
+                    &request.request_id,
+                    &error,
+                    now,
+                );
+                return Err(error);
+            }
+        };
     Ok(Some(PreparedDurableDispatch {
         request_id: request.request_id,
         identity,
