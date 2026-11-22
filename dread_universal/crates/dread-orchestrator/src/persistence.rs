@@ -2458,8 +2458,9 @@ pub fn record_cancellation_progress(
     };
     let expected_evidence = match next_state {
         "request_sent" => "cancel_request_sent",
-        "accepted" => "cancel_accepted",
+        "accepted" => "cancellation_accepted",
         "cancelling" => "cancellation_in_progress",
+        "unknown" => "cancellation_unknown",
         "confirmed_cancelled" => "cancelled",
         _ => {
             return Err(PersistenceError::Invalid(
@@ -3889,6 +3890,94 @@ mod tests {
         assert_eq!(mission_status, "completed");
         assert_eq!(elapsed_ms, 8_000);
         assert!(pending_verification_results(&db).unwrap().is_empty());
+    }
+
+    #[test]
+    fn cancellation_acceptance_and_unknown_states_match_signed_adapter_receipts() {
+        let mut db = canonical_db();
+        let authority = TestAuthority;
+        install(&mut db, 100).unwrap();
+        assert!(release_startup_dispatch_barrier(&mut db, 100).unwrap());
+
+        let request = dispatch_request("request-cancel-evidence", 1);
+        authorize_and_persist(&mut db, &request, &authority, 100).unwrap();
+        prepare_dispatch(&mut db, &request, &authority, 101).unwrap();
+
+        let ack = provider_evidence(
+            "cancel-ack-1",
+            "acknowledged",
+            Some("remote-cancel-1"),
+            "provider-attestor",
+            102,
+        );
+        record_provider_ack(
+            &mut db,
+            "request-cancel-evidence",
+            "remote-cancel-1",
+            &ack,
+            &authority,
+            102,
+        )
+        .unwrap();
+
+        request_cancellation(&mut db, "request-cancel-evidence", 103).unwrap();
+        let accepted = provider_evidence(
+            "cancel-accepted-1",
+            "cancellation_accepted",
+            Some("remote-cancel-1"),
+            "provider-attestor",
+            104,
+        );
+        record_cancellation_progress(
+            &mut db,
+            "request-cancel-evidence",
+            "accepted",
+            &accepted,
+            &authority,
+            104,
+        )
+        .unwrap();
+        let state: String = db
+            .query_row(
+                "SELECT cancellation_state FROM dread_task_attempts WHERE request_id = ?1",
+                ["request-cancel-evidence"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "accepted");
+
+        let unknown = provider_evidence(
+            "cancel-unknown-1",
+            "cancellation_unknown",
+            Some("remote-cancel-1"),
+            "provider-attestor",
+            105,
+        );
+        record_cancellation_progress(
+            &mut db,
+            "request-cancel-evidence",
+            "unknown",
+            &unknown,
+            &authority,
+            105,
+        )
+        .unwrap();
+        let state: String = db
+            .query_row(
+                "SELECT cancellation_state FROM dread_task_attempts WHERE request_id = ?1",
+                ["request-cancel-evidence"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "unknown");
+        let task_status: String = db
+            .query_row(
+                "SELECT status FROM tasks WHERE id = ?1",
+                ["task-1"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(task_status, "cancelling");
     }
 
     #[test]
