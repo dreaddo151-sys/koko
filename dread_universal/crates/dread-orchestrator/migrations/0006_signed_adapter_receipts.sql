@@ -13,3 +13,8 @@ ALTER TABLE dread_provider_event_keys
     ADD COLUMN receipt_payload_json TEXT;
 ALTER TABLE dread_provider_event_keys
     ADD COLUMN receipt_signature_hex TEXT;
+ALTER TABLE dread_execution_evidence
+    ADD COLUMN receipt_response_sha256 TEXT;
+
+ALTER TABLE dread_provider_event_keys
+    ADD COLUMN receipt_response_sha256 TEXT;
