@@ -25,6 +25,8 @@ pub struct IndependentResultVerifier {
     verifier_id: String,
     key_id: String,
     public_key: Vec<u8>,
+    receipt_uid: u32,
+    receipt_gid: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,25 +72,37 @@ impl IndependentResultVerifier {
         let verifier_id = env::var("DREAD_INDEPENDENT_RESULT_VERIFIER_ID").ok();
         let key_id = env::var("DREAD_INDEPENDENT_RESULT_VERIFIER_KEY_ID").ok();
         let public_key_hex = env::var("DREAD_INDEPENDENT_RESULT_VERIFIER_PUBLIC_KEY_HEX").ok();
+        let receipt_uid = env::var("DREAD_INDEPENDENT_RESULT_VERIFIER_RECEIPT_UID").ok();
+        let receipt_gid = env::var("DREAD_INDEPENDENT_RESULT_VERIFIER_RECEIPT_GID").ok();
 
         let configured = [
             receipt_dir.is_some(),
             verifier_id.is_some(),
             key_id.is_some(),
             public_key_hex.is_some(),
+            receipt_uid.is_some(),
+            receipt_gid.is_some(),
         ];
         if configured.iter().all(|present| !present) {
             return Ok(None);
         }
         if configured.iter().any(|present| !present) {
             return Err(
-                "independent result verifier receipt directory, verifier ID, key ID and public key must be configured together"
+                "independent verifier receipt directory, identity, key, public key, owner UID and shared GID must be configured together"
                     .into(),
             );
         }
 
         let receipt_dir = PathBuf::from(receipt_dir.expect("presence checked"));
-        validate_secure_directory(&receipt_dir)?;
+        let receipt_uid = receipt_uid
+            .expect("presence checked")
+            .parse::<u32>()
+            .map_err(|_| "independent verifier receipt UID must be a numeric Unix UID".to_string())?;
+        let receipt_gid = receipt_gid
+            .expect("presence checked")
+            .parse::<u32>()
+            .map_err(|_| "independent verifier receipt GID must be a numeric Unix GID".to_string())?;
+        validate_secure_directory(&receipt_dir, receipt_uid, receipt_gid)?;
         let verifier_id = verifier_id.expect("presence checked");
         let key_id = key_id.expect("presence checked");
         validate_text("independent verifier ID", &verifier_id, 160)?;
@@ -104,6 +118,8 @@ impl IndependentResultVerifier {
             verifier_id,
             key_id,
             public_key,
+            receipt_uid,
+            receipt_gid,
         }))
     }
 
@@ -259,7 +275,7 @@ impl IndependentResultVerifier {
         &self,
         path: &Path,
     ) -> Result<T, String> {
-        validate_secure_receipt_file(path)?;
+        validate_secure_receipt_file(path, self.receipt_uid, self.receipt_gid)?;
         let encoded = fs::read(path)
             .map_err(|error| format!("cannot read independent verifier receipt: {error}"))?;
         let envelope: SignedEnvelope<T> = serde_json::from_slice(&encoded)
@@ -284,29 +300,44 @@ impl IndependentResultVerifier {
     }
 }
 
-fn validate_secure_directory(path: &Path) -> Result<(), String> {
+fn validate_secure_directory(
+    path: &Path,
+    expected_uid: u32,
+    expected_gid: u32,
+) -> Result<(), String> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         format!("cannot inspect independent verifier receipt directory: {error}")
     })?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(
-            "independent verifier receipt path must be a regular non-symlink directory".into(),
-        );
+        return Err("independent verifier receipt path must be a regular non-symlink directory".into());
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let mode = metadata.permissions().mode();
+        if metadata.uid() != expected_uid
+            || metadata.gid() != expected_gid
+            || mode & 0o7777 != 0o2750
+        {
             return Err(
-                "independent verifier receipt directory must be owner-only (0700 or stricter)"
+                "receipt directory must be verifier-owned, use the configured shared GID, and have mode 2750 (setgid, owner rwx, group r-x, no other access)"
                     .into(),
             );
         }
     }
+    #[cfg(not(unix))]
+    {
+        let _ = (expected_uid, expected_gid);
+        return Err("separate verifier receipt ownership is supported only on Unix hosts".into());
+    }
     Ok(())
 }
 
-fn validate_secure_receipt_file(path: &Path) -> Result<(), String> {
+fn validate_secure_receipt_file(
+    path: &Path,
+    expected_uid: u32,
+    expected_gid: u32,
+) -> Result<(), String> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("cannot inspect independent verifier receipt: {error}"))?;
     if metadata.file_type().is_symlink()
@@ -321,12 +352,22 @@ fn validate_secure_receipt_file(path: &Path) -> Result<(), String> {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let mode = metadata.permissions().mode();
+        if metadata.uid() != expected_uid
+            || metadata.gid() != expected_gid
+            || mode & 0o777 != 0o640
+        {
             return Err(
-                "independent verifier receipts must be owner-only (0600 or stricter)".into(),
+                "receipt files must be verifier-owned, use the configured shared GID, and have mode 0640 (verifier read/write, API group read-only, no other access)"
+                    .into(),
             );
         }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (expected_uid, expected_gid);
+        return Err("separate verifier receipt ownership is supported only on Unix hosts".into());
     }
     Ok(())
 }
@@ -421,13 +462,13 @@ mod tests {
         );
         let path = env::temp_dir().join(id);
         fs::create_dir(&path).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o2750)).unwrap();
         path
     }
 
     fn write_secure(path: &Path, content: &str) {
         fs::write(path, content).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o640)).unwrap();
     }
 
     #[test]
@@ -440,6 +481,8 @@ mod tests {
             verifier_id: "dread-independent-result-verifier".into(),
             key_id: "result-verifier-key-1".into(),
             public_key: key.public_key().as_ref().to_vec(),
+            receipt_uid: fs::metadata(&dir).unwrap().uid(),
+            receipt_gid: fs::metadata(&dir).unwrap().gid(),
         };
         let absent = verifier.status(1_800_000_000);
         assert_eq!(absent["status"], "configured_unavailable");
@@ -472,6 +515,8 @@ mod tests {
             verifier_id: "dread-independent-result-verifier".into(),
             key_id: "result-verifier-key-1".into(),
             public_key: key.public_key().as_ref().to_vec(),
+            receipt_uid: fs::metadata(&dir).unwrap().uid(),
+            receipt_gid: fs::metadata(&dir).unwrap().gid(),
         };
         let now = 1_800_000_000_i64;
         let heartbeat = VerifierHeartbeat {
