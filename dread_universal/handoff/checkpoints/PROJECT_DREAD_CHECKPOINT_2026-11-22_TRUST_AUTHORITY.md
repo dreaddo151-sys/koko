@@ -367,3 +367,46 @@ The workspace test output included 37 agent tests, 89 API tests, 14 discovery te
 Passing CI proves source/build/package correctness only. It does not prove that a trusted runtime observer has deployed live evidence for mount, egress, tool permission, secret handling, cancellation or restart controls. The target workstation still needs a separately operated trusted attestor, matching live observations and pinned keys. The independent verifier also remains an undeployed manual separate-UID service with unconfigured real capability policies, receipt directory/ACL and canonical database/WAL/SHM access. Two-UID receipt access, live heartbeat, real provider operation, crash/race recovery, physical Ubuntu install/reboot, actual GPU/ComfyUI contention and legacy Hub parity are still not accepted.
 
 Provider dispatch remains fail-closed. PR #16 remains draft and unmerged. No workstation service or user data was changed by these repository operations.
+
+## 13. Durable pre-start failure outcome — 2026-11-22
+
+**Verified code head:** `7eaa03f914b4a685da9c9d902f39a13e7731bccc`  
+**CI run:** [#1865 — all jobs passed](https://github.com/dreaddo151-sys/koko/actions/runs/45042978730)
+
+### Change
+
+The durable worker previously logged and returned when admission/attempt preparation failed before an attempt had been persisted. The API had already acknowledged the task as queued, so that left a queued task with no running worker and no terminal task result.
+
+The worker now distinguishes a local pre-start failure from a request whose provider side effect may already exist:
+
+- It looks up the task's durable attempts in canonical SQLite and treats dispatching, acknowledged, running, provider_succeeded, reconciliation_required, and unresolved cancellation states as possible remote-side-effect blockers.
+- If an unresolved attempt exists, it preserves the nonterminal state and records/retains reconciliation_required. It never writes a local terminal failure over an ambiguous provider outcome.
+- If no unresolved attempt exists, the provider start endpoint has not been reached by this worker. The worker records a canonical failed task result and task_failed event with the durable preparation reason instead of silently stranding the task in queued.
+- If the database cannot be inspected, task state is left unchanged. The worker does not assume that an unknown remote outcome is safe to finalize.
+
+The startup barrier and provider start contract are unchanged: a new provider start still occurs only after current-boot reconciliation, signed policy/registration checks and atomic attempt preparation; ambiguous starts are never blindly replayed.
+
+### Regression coverage
+
+Added worker tests for:
+- Terminal failed attempts do not block classification as a pre-start local failure.
+- Dispatching and cancellation-unknown attempts are treated as unresolved blockers.
+- A queued task with no durable attempt transitions to failed, receives a task_results error and publishes task_failed.
+- The existing API barrier assertion now checks the current-boot reconciliation and signed activation reason instead of stale wording that claimed the durable worker integration was not yet present.
+
+### Exact-head verification
+
+Run #1865 completed successfully on the exact code head above. All three CI jobs passed:
+
+1. **Rust / Ubuntu 24.04:** rustfmt, strict workspace Clippy, full workspace tests, optimized release build, installer and signed-release verification checks, portable install migration/rollback, Python bridge/importer tests, and the single-owner GPU boundary.
+2. **Web console / Ubuntu 24.04:** locked dependencies and production build.
+3. **Ubuntu packages / smoke test:** portable and Debian package assembly, checksums/content validation, packaged API install and production-console smoke test.
+
+Workspace test output included 37 agent tests, 91 API tests, 14 discovery tests, 15 GPU tests, 6 media tests, 36 orchestrator tests, 31 platform tests, 11 standalone verifier tests, and 7 remaining workspace tests; all had zero failures. Both new durable-worker tests and the startup barrier test passed.
+
+**Run:** https://github.com/dreaddo151-sys/koko/actions/runs/45042978730  
+**Commit:** https://github.com/dreaddo151-sys/koko/commit/7eaa03f914b4a685da9c9d902f39a13e7731bccc
+
+### Acceptance boundary
+
+This is a source and CI milestone, not a live provider deployment. Independent result verification, live runtime-isolation attestation issuance, separate verifier UID/GID service deployment, capability-specific semantic/result evidence policies, real provider behavior, crash/race acceptance, physical workstation deployment and GPU/ComfyUI contention tests remain outstanding. Keep provider dispatch fail-closed until those gates are met. PR #16 remains draft and unmerged.
