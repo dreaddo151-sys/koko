@@ -209,7 +209,10 @@ impl VerifiedRuntimeIsolationAttestation {
             validate_sha256("runtime control evidence digest", &check.evidence_sha256)?;
         }
         if actual != expected || payload.checks.len() != RuntimeIsolationControl::ALL.len() {
-            return Err("runtime isolation attestation must contain exactly the eight required controls".into());
+            return Err(
+                "runtime isolation attestation must contain exactly the eight required controls"
+                    .into(),
+            );
         }
 
         Ok(Self {
@@ -280,18 +283,19 @@ impl VerifiedRuntimeIsolationAttestation {
 }
 
 fn validate_text(name: &str, value: &str, max: usize) -> Result<(), String> {
-    if value.trim().is_empty()
-        || value.len() > max
-        || value.chars().any(char::is_control)
-    {
-        return Err(format!("{name} is empty, too long or contains control characters"));
+    if value.trim().is_empty() || value.len() > max || value.chars().any(char::is_control) {
+        return Err(format!(
+            "{name} is empty, too long or contains control characters"
+        ));
     }
     Ok(())
 }
 
 fn validate_sha256(name: &str, value: &str) -> Result<(), String> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(format!("{name} must contain exactly 64 hexadecimal characters"));
+        return Err(format!(
+            "{name} must contain exactly 64 hexadecimal characters"
+        ));
     }
     Ok(())
 }
