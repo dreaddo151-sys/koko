@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    env, fs,
+    env,
     path::{Path, PathBuf},
     sync::Arc,
 };
