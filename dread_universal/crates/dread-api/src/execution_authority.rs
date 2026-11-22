@@ -9,8 +9,9 @@
 
 use crate::execution_policy::{ExecutionPolicyAuthority, ExecutionPolicyInput};
 use dread_agents::{
-    AgentAdapter, AgentEvent, AgentOperationEvidenceKind, AgentOperationEvidencePayload,
-    AgentOperationReceipt, CapabilityKind, CapabilityRecord, CapabilityStatus,
+    AgentAdapter, AgentEvent, AgentExecutionIdentity, AgentOperationEvidenceKind,
+    AgentOperationEvidencePayload, AgentOperationReceipt, CapabilityKind, CapabilityRecord,
+    CapabilityStatus, DurableAgentStartRequest, StartTaskRequest, response_sha256,
 };
 use dread_orchestrator::persistence::{
     AdmissionRecord, AttemptRecord, AuthorizationFacts, CurrentRetryContractFacts, DispatchRequest,
@@ -617,9 +618,63 @@ pub fn load_from_env(
 /// persistence representation. This function only transports the receipt;
 /// signature, registration, request and attempt verification remains the
 /// responsibility of `Phase6ExecutionAuthority`.
-// Staged API boundary: the durable worker integration will consume this mapper.
-#[allow(dead_code)]
-pub fn provider_evidence_from_adapter_receipt<T>(
+/// Build the immutable adapter identity from the persisted admission and
+/// attempt. Mismatched rows are rejected before any provider lifecycle call.
+pub fn agent_execution_identity(
+    admission: &AdmissionRecord,
+    attempt: &AttemptRecord,
+) -> Result<AgentExecutionIdentity, String> {
+    if admission.request_id != attempt.request_id
+        || admission.task_id != attempt.task_id
+        || admission.attempt_number != attempt.attempt_number
+        || admission.provider_id != attempt.provider_id
+        || admission.capability_id != attempt.capability_id
+        || admission.operation != attempt.operation
+        || admission.idempotency_key != attempt.idempotency_key
+        || admission.adapter_id.is_empty()
+        || admission.adapter_version.is_empty()
+        || attempt.worker_id.is_empty()
+    {
+        return Err("durable admission and attempt do not describe the same provider execution".into());
+    }
+    Ok(AgentExecutionIdentity {
+        request_id: attempt.request_id.clone(),
+        attempt_id: attempt.attempt_id.clone(),
+        task_id: attempt.task_id.clone(),
+        worker_id: attempt.worker_id.clone(),
+        provider_id: attempt.provider_id.clone(),
+        capability_id: attempt.capability_id.clone(),
+        adapter_id: admission.adapter_id.clone(),
+        adapter_version: admission.adapter_version.clone(),
+        provider_registration_revision: admission.provider_registration_revision,
+        idempotency_key: attempt.idempotency_key.clone(),
+    })
+}
+
+/// Construct the adapter request only after the durable attempt exists.
+/// The idempotency key and local task identity are taken from persisted state.
+pub fn durable_agent_start_request(
+    admission: &AdmissionRecord,
+    attempt: &AttemptRecord,
+    input: Value,
+) -> Result<DurableAgentStartRequest, String> {
+    let identity = agent_execution_identity(admission, attempt)?;
+    let request = StartTaskRequest {
+        task_id: attempt.task_id.clone(),
+        capability_id: attempt.capability_id.clone(),
+        input,
+        idempotency_key: attempt.idempotency_key.clone(),
+    };
+    let durable = DurableAgentStartRequest { identity, request };
+    durable.validate().map_err(|error| error.to_string())?;
+    Ok(durable)
+}
+
+/// Convert a signed, adapter-observed lifecycle response to the persistence
+/// type. Recompute the digest from the exact response object before retaining
+/// the signature, so the returned object cannot be swapped independently of
+/// its signed receipt.
+pub fn provider_evidence_from_adapter_receipt<T: serde::Serialize>(
     provider_id: &str,
     adapter_id: &str,
     adapter_version: &str,
@@ -635,6 +690,11 @@ pub fn provider_evidence_from_adapter_receipt<T>(
         || identity.provider_registration_revision != registration_revision
     {
         return Err("adapter receipt identity does not match the selected provider registration".into());
+    }
+    let recomputed_digest = response_sha256(&receipt.response)
+        .map_err(|error| error.to_string())?;
+    if recomputed_digest != payload.response_sha256 {
+        return Err("adapter receipt response digest does not match the returned response".into());
     }
     let evidence_kind = match payload.evidence_kind {
         AgentOperationEvidenceKind::Acknowledged => "acknowledged",
@@ -674,8 +734,92 @@ pub fn provider_evidence_from_adapter_receipt<T>(
             key_id: signed.key_id.clone(),
             payload_json,
             signature_hex: signed.signature_hex.clone(),
-            response_sha256: payload.response_sha256.clone(),
+            response_sha256: recomputed_digest,
         }),
+    })
+}
+
+/// Owned event data ready for the canonical durable event transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableProviderEventEvidence {
+    pub request_id: String,
+    pub external_event_id: String,
+    pub event_type: String,
+    pub payload_json: String,
+    pub receipt: SignedProviderReceipt,
+}
+
+impl DurableProviderEventEvidence {
+    pub fn persistence_context(&self, now: i64) -> ProviderEventReceiptContext<'_> {
+        ProviderEventReceiptContext {
+            request_id: &self.request_id,
+            external_event_id: &self.external_event_id,
+            event_type: &self.event_type,
+            payload_json: &self.payload_json,
+            receipt: Some(&self.receipt),
+            now,
+        }
+    }
+}
+
+/// Convert a typed adapter event receipt without accepting caller-supplied
+/// event IDs, event types, payloads or digests.
+pub fn provider_event_from_adapter_receipt(
+    receipt: &AgentOperationReceipt<AgentEvent>,
+) -> Result<DurableProviderEventEvidence, String> {
+    let signed = &receipt.evidence;
+    let payload = &signed.payload;
+    let identity = &payload.identity;
+    if payload.evidence_kind != AgentOperationEvidenceKind::Event
+        || receipt.response.task_id != identity.task_id
+        || receipt.response.sequence == 0
+    {
+        return Err("adapter event receipt has an invalid event kind or execution identity".into());
+    }
+    let provider_execution_id = payload
+        .provider_execution_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "adapter event receipt has no provider execution ID".to_string())?;
+    let external_event_id = payload
+        .external_event_id
+        .as_deref()
+        .ok_or_else(|| "adapter event receipt has no external event ID".to_string())?;
+    let event_type = payload
+        .event_type
+        .as_deref()
+        .ok_or_else(|| "adapter event receipt has no event type".to_string())?;
+    let expected_event_id = format!("{provider_execution_id}:{}", receipt.response.sequence);
+    if external_event_id != expected_event_id || event_type != receipt.response.event_type {
+        return Err("adapter event identity does not match its signed event response".into());
+    }
+    let recomputed_digest =
+        response_sha256(&receipt.response).map_err(|error| error.to_string())?;
+    if recomputed_digest != payload.response_sha256 {
+        return Err("adapter event digest does not match the returned event".into());
+    }
+    let observed_at = i64::try_from(payload.observed_at)
+        .map_err(|_| "adapter event timestamp is out of range".to_string())?;
+    let expires_at = payload
+        .expires_at
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| "adapter event expiry is out of range".to_string())?;
+    let payload_json = serde_json::to_string(payload)
+        .map_err(|error| format!("cannot serialize signed event receipt: {error}"))?;
+    let _ = (observed_at, expires_at);
+    Ok(DurableProviderEventEvidence {
+        request_id: identity.request_id.clone(),
+        external_event_id: external_event_id.to_owned(),
+        event_type: event_type.to_owned(),
+        payload_json: serde_json::to_string(&receipt.response)
+            .map_err(|error| format!("cannot serialize provider event: {error}"))?,
+        receipt: SignedProviderReceipt {
+            key_id: signed.key_id.clone(),
+            payload_json,
+            signature_hex: signed.signature_hex.clone(),
+            response_sha256: recomputed_digest,
+        },
     })
 }
 
@@ -1468,6 +1612,161 @@ mod tests {
             serde_json::to_vec(&envelope).unwrap(),
             hex_encode(key.public_key().as_ref()),
         )
+    }
+
+    fn test_identity() -> AgentExecutionIdentity {
+        AgentExecutionIdentity {
+            request_id: "request-1".into(),
+            attempt_id: "attempt-1".into(),
+            task_id: "task-1".into(),
+            worker_id: "worker-1".into(),
+            provider_id: "hermes".into(),
+            capability_id: "hermes.run".into(),
+            adapter_id: "hermes".into(),
+            adapter_version: "1.0.0".into(),
+            provider_registration_revision: 7,
+            idempotency_key: "project-dread:task-1".into(),
+        }
+    }
+
+    #[test]
+    fn durable_identity_and_start_request_are_derived_from_persisted_rows() {
+        let admission = AdmissionRecord {
+            admission_id: "admission-1".into(),
+            request_id: "request-1".into(),
+            task_id: "task-1".into(),
+            mission_id: None,
+            attempt_number: 1,
+            requester_id: "operator-1".into(),
+            provider_id: "hermes".into(),
+            capability_id: "hermes.run".into(),
+            operation: "agent.execute".into(),
+            permission_scope: "agent:execute".into(),
+            idempotency_key: "project-dread:task-1".into(),
+            evidence_id: "isolation-1".into(),
+            policy_decision_id: "policy-1".into(),
+            adapter_id: "hermes".into(),
+            adapter_version: "1.0.0".into(),
+            provider_registration_revision: 7,
+            capability_revision: 3,
+            expires_at: 1_800_000_300,
+            consumed_at: None,
+        };
+        let attempt = AttemptRecord {
+            attempt_id: "attempt-1".into(),
+            task_id: "task-1".into(),
+            mission_id: None,
+            attempt_number: 1,
+            request_id: "request-1".into(),
+            provider_id: "hermes".into(),
+            capability_id: "hermes.run".into(),
+            operation: "agent.execute".into(),
+            idempotency_key: "project-dread:task-1".into(),
+            worker_id: "worker-1".into(),
+            provider_execution_id: None,
+            provider_result_json: None,
+            provider_error: None,
+            outcome_json: None,
+            dispatch_state: "dispatching".into(),
+            cancellation_state: "none".into(),
+            dispatched_at: 1_800_000_000,
+            acknowledged_at: None,
+            terminal_at: None,
+            recovery_attached_at: None,
+        };
+        let identity = agent_execution_identity(&admission, &attempt).unwrap();
+        assert_eq!(identity, test_identity());
+        let request =
+            durable_agent_start_request(&admission, &attempt, json!({"input":"hello"})).unwrap();
+        assert_eq!(request.identity, identity);
+        assert_eq!(request.request.idempotency_key, "project-dread:task-1");
+
+        let mut mismatched = attempt;
+        mismatched.worker_id = "other-worker".into();
+        assert!(agent_execution_identity(&admission, &mismatched).is_err());
+    }
+
+    #[test]
+    fn provider_receipt_conversion_recomputes_response_digest() {
+        let response = json!({"provider_task_id":"remote-1","state":"running"});
+        let identity = test_identity();
+        let digest = response_sha256(&response).unwrap();
+        let payload = AgentOperationEvidencePayload {
+            evidence_id: "evidence-1".into(),
+            evidence_kind: AgentOperationEvidenceKind::Acknowledged,
+            identity,
+            provider_execution_id: Some("remote-1".into()),
+            external_event_id: None,
+            event_type: None,
+            response_sha256: digest,
+            verifier_id: "dread-adapter-receipt:hermes".into(),
+            source_reference: "http://127.0.0.1:8642".into(),
+            observed_at: 1_800_000_000,
+            expires_at: Some(1_800_000_300),
+        };
+        let receipt = AgentOperationReceipt {
+            response: response.clone(),
+            evidence: dread_agents::SignedAgentOperationEvidence {
+                key_id: "hermes-receipt-key".into(),
+                payload,
+                signature_hex: "cd".repeat(64),
+            },
+        };
+        assert!(
+            provider_evidence_from_adapter_receipt("hermes", "hermes", "1.0.0", 7, &receipt)
+                .is_ok()
+        );
+        let mut altered = receipt;
+        altered.response = json!({"provider_task_id":"remote-2","state":"running"});
+        assert!(
+            provider_evidence_from_adapter_receipt("hermes", "hermes", "1.0.0", 7, &altered)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn event_receipt_conversion_binds_event_id_type_and_response_digest() {
+        let identity = test_identity();
+        let response = AgentEvent {
+            task_id: identity.task_id.clone(),
+            sequence: 9,
+            event_type: "progress".into(),
+            payload: json!({"progress":75}),
+            occurred_at: 1_800_000_001,
+        };
+        let digest = response_sha256(&response).unwrap();
+        let payload = AgentOperationEvidencePayload {
+            evidence_id: "event-evidence-1".into(),
+            evidence_kind: AgentOperationEvidenceKind::Event,
+            identity,
+            provider_execution_id: Some("remote-1".into()),
+            external_event_id: Some("remote-1:9".into()),
+            event_type: Some("progress".into()),
+            response_sha256: digest,
+            verifier_id: "dread-adapter-receipt:hermes".into(),
+            source_reference: "http://127.0.0.1:8642".into(),
+            observed_at: 1_800_000_001,
+            expires_at: Some(1_800_000_301),
+        };
+        let receipt = AgentOperationReceipt {
+            response,
+            evidence: dread_agents::SignedAgentOperationEvidence {
+                key_id: "hermes-receipt-key".into(),
+                payload,
+                signature_hex: "ef".repeat(64),
+            },
+        };
+        let owned = provider_event_from_adapter_receipt(&receipt).unwrap();
+        assert_eq!(owned.request_id, "request-1");
+        assert_eq!(owned.external_event_id, "remote-1:9");
+        assert_eq!(owned.event_type, "progress");
+        let context = owned.persistence_context(1_800_000_002);
+        assert_eq!(context.request_id, "request-1");
+        assert!(context.receipt.is_some());
+
+        let mut altered = receipt;
+        altered.response.payload = json!({"progress":1});
+        assert!(provider_event_from_adapter_receipt(&altered).is_err());
     }
 
     #[test]
