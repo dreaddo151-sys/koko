@@ -1424,7 +1424,10 @@ mod durable_activation_tests {
             unresolved_request_for_task(&connection, "task-missing").unwrap(),
             None
         );
-        assert_eq!(unresolved_request_for_task(&connection, "task-1").unwrap(), None);
+        assert_eq!(
+            unresolved_request_for_task(&connection, "task-1").unwrap(),
+            None
+        );
         assert_eq!(
             unresolved_request_for_task(&connection, "task-2")
                 .unwrap()
