@@ -380,8 +380,7 @@ fn validate_distinct_verifier_uid(verifier_uid: u32) -> Result<(), String> {
     let api_uid = unsafe { libc::geteuid() };
     if verifier_uid == api_uid {
         return Err(
-            "independent verifier receipt owner UID must differ from the API effective UID"
-                .into(),
+            "independent verifier receipt owner UID must differ from the API effective UID".into(),
         );
     }
     Ok(())
