@@ -155,6 +155,24 @@ impl IsolationEvidenceRecord {
     }
 }
 
+fn validate_provider_receipt_key(record: &ProviderTrustRecord) -> Result<(), String> {
+    let key_id = record
+        .receipt_key_id
+        .as_deref()
+        .ok_or_else(|| "provider dispatch requires a manifest-pinned receipt key ID".to_string())?;
+    validate_text("receipt_key_id", key_id, 128)?;
+    let public_key_hex = record
+        .receipt_public_key_hex
+        .as_deref()
+        .ok_or_else(|| "provider dispatch requires a manifest-pinned receipt public key".to_string())?;
+    let public_key = decode_hex(public_key_hex)?;
+    if public_key.len() != 32 {
+        return Err("provider receipt Ed25519 public key must be 32 bytes".into());
+    }
+    Ok(())
+}
+
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetryContractTrust {
@@ -259,6 +277,8 @@ impl VerifiedExecutionTrustManifest {
                     "revoked": provider.revoked,
                     "expires_at": provider.expires_at,
                     "isolation_verified": provider.isolation.all_verified(),
+                    "receipt_key_pinned": provider.receipt_key_id.is_some()
+                        && provider.receipt_public_key_hex.is_some(),
                     "isolation_evidence_id": provider.isolation.evidence_id,
                     "runtime_identity": provider.isolation.runtime_identity,
                     "retry_contract_id": provider.retry_contract.contract_id,
@@ -465,6 +485,7 @@ impl Phase6ExecutionAuthority {
         now: i64,
     ) -> Result<(), String> {
         let (_, record, _) = self.registration(&admission.provider_id, now)?;
+        validate_provider_receipt_key(&record)?;
         if record.capability_id != admission.capability_id
             || record.operation != admission.operation
             || record.adapter_id != admission.adapter_id
@@ -525,6 +546,7 @@ impl Phase6ExecutionAuthority {
         now: i64,
     ) -> Result<(), String> {
         let (_, registration, _) = self.registration(provider_id, now)?;
+        validate_provider_receipt_key(&registration)?;
         let revision = Self::capability_revision(connection, capability_id, provider_id)?;
         if registration.capability_id != capability_id
             || registration.capability_revision != revision
@@ -863,6 +885,7 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
             .as_deref()
             .ok_or_else(|| "agent capability has no provider adapter".to_string())?;
         let (manifest, registration, adapter_version) = self.registration(provider_id, now)?;
+        validate_provider_receipt_key(&registration)?;
         let actual_revision = Self::capability_revision(connection, &capability_id, provider_id)?;
         if registration.capability_id != capability_id
             || registration.capability_revision != actual_revision
