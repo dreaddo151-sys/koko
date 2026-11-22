@@ -601,3 +601,17 @@ All three jobs passed:
 ### Acceptance boundary
 
 This is repository/build/package verification only. The example policy still requires real capability JSON Pointers and domain-specific evidence rules before any capability can be accepted as semantically verified. No verifier account, private key, policy, receipt directory, database ACL, service unit, heartbeat or provider dispatch was deployed or activated on the workstation. Runtime isolation evidence still lacks an independently operated issuer bound to live observations. Provider dispatch remains fail-closed. PR #16 remains draft and unmerged.
+
+
+## 19. Canonical schema and execution-policy file hardening — 2026-11-22
+
+- Exact PR #16 source head: `1d3c515133bf9b027e260657688f0b6e74dd9f6b`.
+- GitHub Actions run [#1968](https://github.com/dreaddo151-sys/koko/actions/runs/45058882187) completed successfully on the matching PR merge ref. All three jobs passed:
+  - Rust / Ubuntu 24.04: formatting, strict Clippy, full workspace tests, optimized release build, installer/release checks, signed-release verifier failure tests, portable migration/rollback, Python bridge/importer regressions and single-owner GPU boundary.
+  - Web console / Ubuntu 24.04: production build.
+  - Ubuntu packages / smoke test: Debian and portable assembly, checksum/content validation, packaged API install and production-console smoke test.
+- Execution-policy manifest refresh now uses the shared bounded descriptor reader with `O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`, validates the opened descriptor, rejects group/world-writable modes, and fails closed on symlinks. Tests cover symlink rejection and mode policy.
+- Canonical Phase 6 schema validation now checks required columns, expected primary-key shapes, foreign-key enforcement, task/event/result/mission relationship constraints, and unique event-sequence / mission-task indexes before installing additive execution migrations. Tests cover the canonical schema and rejection of missing keys, foreign keys, unique indexes, and disabled foreign-key enforcement.
+- This advances Kimi correction-cycle requirements for complete canonical-schema validation while preserving the existing Phase 6 task/mission tables, additive migration history, atomic admission/attempt transaction, durable evidence repository and shared ExecutionGate.
+- Evidence boundary: CI proves source compilation, tests, packaging and packaged smoke tests on Ubuntu 24.04. It does not prove live independent runtime-isolation issuance, capability-specific domain semantics, separate Unix identity deployment, live provider behavior, or physical workstation/GPU acceptance.
+- Startup dispatch barrier remains closed until startup reconciliation and worker attachment criteria are satisfied. PR #16 remains draft/open/unmerged.
