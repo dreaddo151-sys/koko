@@ -1299,7 +1299,10 @@ mod tests {
         let mut envelope: SignedExecutionTrustEnvelope = serde_json::from_slice(&encoded).unwrap();
         envelope.payload.providers[0]
             .isolation
-            .network_egress_restricted = false;
+            .checks
+            .get_mut(&IsolationControl::EgressPolicy)
+            .expect("signed test fixture includes egress evidence")
+            .verified = false;
         let keypair = Ed25519KeyPair::from_seed_unchecked(&[19_u8; 32]).unwrap();
         let payload_bytes = serde_json::to_vec(&envelope.payload).unwrap();
         envelope.signature_hex = hex_encode(keypair.sign(&payload_bytes).as_ref());
