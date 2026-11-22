@@ -341,6 +341,8 @@ fn validate_secure_directory(
     expected_uid: u32,
     expected_gid: u32,
 ) -> Result<(), String> {
+    #[cfg(unix)]
+    validate_distinct_verifier_uid(expected_uid)?;
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         format!("cannot inspect independent verifier receipt directory: {error}")
     })?;
@@ -367,6 +369,20 @@ fn validate_secure_directory(
     {
         let _ = (expected_uid, expected_gid);
         return Err("separate verifier receipt ownership is supported only on Unix hosts".into());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_distinct_verifier_uid(verifier_uid: u32) -> Result<(), String> {
+    // The API must never share the verifier's effective Unix identity: doing
+    // so would let the API process replace receipts or access verifier secrets.
+    let api_uid = unsafe { libc::geteuid() };
+    if verifier_uid == api_uid {
+        return Err(
+            "independent verifier receipt owner UID must differ from the API effective UID"
+                .into(),
+        );
     }
     Ok(())
 }
@@ -495,6 +511,13 @@ mod tests {
     fn signed_time_window_rejects_non_positive_observation() {
         assert!(validate_signed_time_window("receipt", 0, 100, 50, 300).is_err());
         assert!(validate_signed_time_window("receipt", -1, 100, 50, 300).is_err());
+    }
+
+    #[test]
+    fn verifier_receipt_owner_must_differ_from_api_effective_uid() {
+        let api_uid = unsafe { libc::geteuid() };
+        assert!(validate_distinct_verifier_uid(api_uid).is_err());
+        assert!(validate_distinct_verifier_uid(api_uid.saturating_add(1)).is_ok());
     }
 
     #[test]
