@@ -9475,7 +9475,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         assert!(
             !dread_orchestrator::persistence::startup_dispatch_barrier_is_open(&connection)
                 .unwrap(),
@@ -9542,8 +9542,8 @@ mod tests {
                 .unwrap();
 
             assert_eq!(task_count, 1, "reopening must preserve canonical task rows");
-            assert_eq!(migration_count, 5, "reopening must not replay migrations");
-            assert_eq!(migration_version, 5);
+            assert_eq!(migration_count, 6, "reopening must not replay migrations");
+            assert_eq!(migration_version, 6);
             assert!(
                 !dread_orchestrator::persistence::startup_dispatch_barrier_is_open(&connection)
                     .unwrap(),
