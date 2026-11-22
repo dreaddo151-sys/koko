@@ -1310,9 +1310,9 @@ mod tests {
         assert_eq!(receipt.evidence.payload.identity, identity);
         assert_eq!(
             receipt.evidence.payload.response_sha256,
-            response_sha256(&receipt.response).unwrap()
+            crate::response_sha256(&receipt.response).unwrap()
         );
-        assert_eq!(decode_receipt_hex(&trusted_public_key).unwrap().len(), 32);
+        assert_eq!(trusted_public_key.len(), 64);
         server.abort();
     }
 
