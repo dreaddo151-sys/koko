@@ -54,3 +54,8 @@ The remaining non-CI acceptance gates remain open: independent live runtime-isol
 - Mission dispatch now checks for sibling attempts in `reconciliation_required` before dispatching another task in that mission.
 - The check is inside the same SQLite dispatch transaction and therefore cannot race with the mission status update that follows it.
 - Exact-head regression and full CI passed in run #1980 on `e783e2e6b3758bc90c622a1062f12a73adce2952`. The test proves that an unresolved sibling prevents the mission from returning to `running`.
+
+
+### Execution-policy filesystem regression
+
+The policy loader now has a filesystem-level regression test that creates a valid signed policy, changes its actual file mode to group-writable (0660), and verifies that authorization fails closed. Exact-head CI run #1986 passed on code head `3fdeb621f7a2886f3e55db6fd7dfa23849a9b12d`.
