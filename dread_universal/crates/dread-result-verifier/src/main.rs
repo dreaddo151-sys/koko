@@ -563,7 +563,7 @@ fn validate_database_path(path: &Path) -> Result<PathBuf, String> {
 
 fn open_read_only_database(path: &Path) -> Result<Connection, String> {
     let canonical_path = validate_database_path(path)?;
-    let mut connection = Connection::open_with_flags(
+    let connection = Connection::open_with_flags(
         canonical_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
