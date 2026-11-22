@@ -422,7 +422,9 @@ impl Phase6ExecutionAuthority {
             || registration.capability_revision != revision
             || registration.operation != AGENT_OPERATION
         {
-            return Err("signed provider trust does not match the current enabled capability".into());
+            return Err(
+                "signed provider trust does not match the current enabled capability".into(),
+            );
         }
         Ok(())
     }
