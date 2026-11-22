@@ -1,6 +1,7 @@
 mod durable_agent;
 mod execution_authority;
 mod execution_policy;
+mod independent_verifier;
 
 use axum::{
     Json, Router,
