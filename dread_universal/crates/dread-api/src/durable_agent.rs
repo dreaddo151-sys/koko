@@ -1138,6 +1138,112 @@ pub(super) fn resume_queued_durable_agents(state: &AppState) -> Result<usize, St
     Ok(resumed)
 }
 
+/// Poll the durable provider-success queue for receipts produced after
+/// provider completion. Verification remains a separate trust domain; this
+/// worker only validates and persists signed receipts already written by it.
+pub(super) fn spawn_independent_verification_reconciler(state: AppState) {
+    if state.execution_authority.is_none() {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let pending = {
+                let connection = match state.db.lock() {
+                    Ok(connection) => connection,
+                    Err(_) => {
+                        warn!("Database lock unavailable during independent verification scan");
+                        continue;
+                    }
+                };
+                match persistence::pending_verification_results(&connection) {
+                    Ok(pending) => pending,
+                    Err(error) => {
+                        warn!(error = %error, "Could not enumerate pending independent verification results");
+                        continue;
+                    }
+                }
+            };
+
+            let Some(authority) = state.execution_authority.as_ref().cloned() else {
+                return;
+            };
+            for (request_id, result_json, provider_error) in pending {
+                let now = now_epoch_i64();
+                let result = {
+                    let mut connection = match state.db.lock() {
+                        Ok(connection) => connection,
+                        Err(_) => {
+                            warn!(
+                                request_id = %request_id,
+                                "Database lock unavailable while persisting independent verification"
+                            );
+                            continue;
+                        }
+                    };
+                    persistence::record_independent_verification(
+                        &mut connection,
+                        &request_id,
+                        result_json.as_deref(),
+                        provider_error.as_deref(),
+                        authority.as_ref(),
+                        now,
+                    )
+                };
+                match result {
+                    Ok(()) => info!(
+                        request_id = %request_id,
+                        "Independent result receipt accepted; canonical task outcome finalized"
+                    ),
+                    Err(error) => warn!(
+                        request_id = %request_id,
+                        error = %error,
+                        "Independent result remains pending; verifier may publish or refresh its signed receipt"
+                    ),
+                }
+            }
+
+            if !durable_dispatch_activation_ready(&state, now_epoch_i64()) {
+                continue;
+            }
+            let opened = {
+                let mut connection = match state.db.lock() {
+                    Ok(connection) => connection,
+                    Err(_) => {
+                        warn!("Database lock unavailable while rechecking startup dispatch barrier");
+                        continue;
+                    }
+                };
+                match persistence::release_startup_dispatch_barrier(
+                    &mut connection,
+                    now_epoch_i64(),
+                ) {
+                    Ok(opened) => opened,
+                    Err(error) => {
+                        warn!(error = %error, "Could not re-evaluate startup dispatch barrier");
+                        false
+                    }
+                }
+            };
+            if opened {
+                match resume_queued_durable_agents(&state) {
+                    Ok(resumed) if resumed > 0 => info!(
+                        resumed,
+                        "Queued provider agents resumed after independent-verifier release"
+                    ),
+                    Ok(_) => {}
+                    Err(error) => warn!(
+                        error = %error,
+                        "Could not resume queued provider agents after verifier release"
+                    ),
+                }
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod durable_activation_tests {
     use super::*;
