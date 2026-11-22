@@ -1591,8 +1591,7 @@ mod tests {
         SignedProviderReceipt,
     ) {
         let (encoded, _) = signed_manifest(now);
-        let mut manifest: SignedExecutionTrustEnvelope =
-            serde_json::from_slice(&encoded).unwrap();
+        let mut manifest: SignedExecutionTrustEnvelope = serde_json::from_slice(&encoded).unwrap();
         let seed = [41_u8; 32];
         let keypair = Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
         let registration = &mut manifest.payload.providers[0];
@@ -1684,25 +1683,21 @@ mod tests {
     #[test]
     fn verifies_adapter_receipt_with_manifest_pinned_public_key_and_attempt_identity() {
         let now = 1_800_000_000;
-        let (registration, admission, attempt, receipt) =
-            signed_adapter_receipt_fixture(now);
-        let payload = verify_signed_adapter_receipt(
-            &receipt,
-            &registration,
-            &admission,
-            &attempt,
-            now,
-        )
-        .unwrap();
-        assert_eq!(payload.evidence_kind, AgentOperationEvidenceKind::Acknowledged);
+        let (registration, admission, attempt, receipt) = signed_adapter_receipt_fixture(now);
+        let payload =
+            verify_signed_adapter_receipt(&receipt, &registration, &admission, &attempt, now)
+                .unwrap();
+        assert_eq!(
+            payload.evidence_kind,
+            AgentOperationEvidenceKind::Acknowledged
+        );
         assert_eq!(payload.identity.attempt_id, "attempt-1");
     }
 
     #[test]
     fn rejects_tampered_or_wrong_identity_adapter_receipts() {
         let now = 1_800_000_000;
-        let (registration, admission, attempt, receipt) =
-            signed_adapter_receipt_fixture(now);
+        let (registration, admission, attempt, receipt) = signed_adapter_receipt_fixture(now);
 
         let mut tampered = receipt.clone();
         tampered.payload_json.push(' ');
@@ -1721,14 +1716,8 @@ mod tests {
         let mut wrong_attempt = attempt.clone();
         wrong_attempt.worker_id = "different-worker".into();
         assert!(
-            verify_signed_adapter_receipt(
-                &receipt,
-                &registration,
-                &admission,
-                &wrong_attempt,
-                now
-            )
-            .is_err()
+            verify_signed_adapter_receipt(&receipt, &registration, &admission, &wrong_attempt, now)
+                .is_err()
         );
     }
 
