@@ -14,9 +14,9 @@ pub mod runtime_attestation;
 use futures::future::BoxFuture;
 use ring::signature::KeyPair;
 use ring::{digest, signature};
+use runtime_attestation::RuntimeIsolationAttestationSummary;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use runtime_attestation::RuntimeIsolationAttestationSummary;
 use std::{
     fmt,
     time::{SystemTime, UNIX_EPOCH},
