@@ -1,7 +1,3 @@
-use crate::runtime_attestation::{
-    RuntimeIsolationAttestationSummary, RuntimeIsolationControl,
-    VerifiedRuntimeIsolationAttestation,
-};
 //! DeerFlow Gateway API adapter.
 //!
 //! This adapter uses the documented thread-scoped API, PAT bearer auth,
@@ -11,6 +7,10 @@ use crate::runtime_attestation::{
 //! DREAD task receives an isolated container-backed thread workspace before
 //! calling `attest_container_sandbox`. LocalSandboxProvider is rejected.
 
+use crate::runtime_attestation::{
+    RuntimeIsolationAttestationSummary, RuntimeIsolationControl,
+    VerifiedRuntimeIsolationAttestation,
+};
 use crate::{
     AdapterFuture, AgentAdapter, AgentAdapterError, AgentCapability, AgentDescriptor, AgentEvent,
     AgentExecutionIdentity, AgentHealth, AgentHealthState, AgentOperationEvidenceKind,
