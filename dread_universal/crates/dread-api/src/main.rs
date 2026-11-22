@@ -2143,7 +2143,7 @@ fn ensure_durable_agent_dispatch_ready(connection: &Connection) -> Result<(), Ap
         .map_err(|error| ApiError::internal(error.to_string()))?;
     if !ready {
         return Err(ApiError::conflict(
-            "Agent dispatch is blocked until durable admission, attempt preparation, startup reconciliation, and worker reattachment are active",
+            "Agent dispatch remains blocked until current-boot reconciliation, worker reattachment, and signed provider activation requirements are satisfied",
         ));
     }
     Ok(())
@@ -3474,9 +3474,10 @@ fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), 
                 i64::try_from(now_epoch()).unwrap_or(i64::MAX),
             )
             .map_err(ApiError::conflict)?;
-        // The startup barrier remains closed until durable admission/attempt
-        // preparation, recovery attachment and provider lifecycle persistence
-        // are integrated into this handler.
+        // Durable admission and attempt preparation run inside the provider
+        // worker after it acquires the shared ExecutionGate. This transaction-
+        // level guard rejects queueing until current-boot recovery, worker
+        // attachment and signed provider activation requirements are satisfied.
         ensure_durable_agent_dispatch_ready(&tx)?;
     }
 
@@ -5967,7 +5968,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approved_agent_mission_node_remains_blocked_until_durable_dispatch_is_integrated() {
+    async fn approved_agent_mission_node_remains_blocked_until_startup_activation_is_verified() {
         let db = Arc::new(Mutex::new(open_database(":memory:").unwrap()));
         let now = now_epoch();
         let capability = CapabilityRecord {
@@ -9745,7 +9746,7 @@ mod tests {
         assert!(
             !dread_orchestrator::persistence::startup_dispatch_barrier_is_open(&connection)
                 .unwrap(),
-            "dispatch must remain blocked until provider reconciliation is integrated"
+            "dispatch must remain blocked until current-boot provider reconciliation and signed trust activation complete"
         );
         for table in [
             "tasks",
