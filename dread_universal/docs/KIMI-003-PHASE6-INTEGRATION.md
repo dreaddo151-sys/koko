@@ -47,3 +47,10 @@ The original candidate boundary above describes PR #15 at the time it was author
 Latest exact-head CI evidence is recorded in checkpoint section 19: PR #16 head `1d3c515133bf9b027e260657688f0b6e74dd9f6b`, run #1968, all Rust, web and package jobs successful. Subsequent checkpoint-only documentation commits do not change the verified code.
 
 The remaining non-CI acceptance gates remain open: independent live runtime-isolation observations, real per-capability domain semantics, separate service-account deployment/ACL tests, provider crash/race/replay tests, and physical workstation/ComfyUI/GPU acceptance. This follow-up does not authorize dispatch activation or merging.
+
+
+### Mission reconciliation hold follow-up
+
+- Mission dispatch now checks for sibling attempts in `reconciliation_required` before dispatching another task in that mission.
+- The check is inside the same SQLite dispatch transaction and therefore cannot race with the mission status update that follows it.
+- Exact-head regression and full CI passed in run #1980 on `e783e2e6b3758bc90c622a1062f12a73adce2952`. The test proves that an unresolved sibling prevents the mission from returning to `running`.
