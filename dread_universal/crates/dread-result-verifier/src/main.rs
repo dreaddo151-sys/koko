@@ -8,7 +8,7 @@
 use ring::{
     digest,
     rand::SystemRandom,
-    signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519},
+    signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey},
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -139,7 +139,9 @@ fn now_epoch_seconds() -> Result<i64, String> {
 
 fn validate_text(name: &str, value: &str, max_len: usize) -> Result<(), String> {
     if value.trim().is_empty() || value.len() > max_len || value.chars().any(char::is_control) {
-        return Err(format!("{name} is empty, too long or contains control characters"));
+        return Err(format!(
+            "{name} is empty, too long or contains control characters"
+        ));
     }
     Ok(())
 }
@@ -159,11 +161,13 @@ fn validate_safe_component(name: &str, value: &str, max_len: usize) -> Result<()
 fn validate_safe_label(name: &str, value: &str, max_len: usize) -> Result<(), String> {
     if value.is_empty()
         || value.len() > max_len
-        || !value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
-        })
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     {
-        return Err(format!("{name} must contain only ASCII letters, digits, dot, dash or underscore"));
+        return Err(format!(
+            "{name} must contain only ASCII letters, digits, dot, dash or underscore"
+        ));
     }
     Ok(())
 }
@@ -222,11 +226,7 @@ fn sign_payload<T: Serialize>(
         .map_err(|error| format!("cannot serialize signed verifier envelope: {error}"))
 }
 
-fn verify_envelope<T>(
-    encoded: &[u8],
-    key_id: &str,
-    public_key: &[u8],
-) -> Result<T, String>
+fn verify_envelope<T>(encoded: &[u8], key_id: &str, public_key: &[u8]) -> Result<T, String>
 where
     T: Serialize + DeserializeOwned,
 {
@@ -248,8 +248,8 @@ where
 }
 
 fn secure_file_metadata(path: &Path, max_bytes: u64, name: &str) -> Result<fs::Metadata, String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("cannot inspect {name}: {error}"))?;
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| format!("cannot inspect {name}: {error}"))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(format!("{name} must be a regular non-symlink file"));
     }
@@ -267,10 +267,12 @@ fn secure_file_metadata(path: &Path, max_bytes: u64, name: &str) -> Result<fs::M
 }
 
 fn secure_directory(path: &Path, name: &str) -> Result<(), String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("cannot inspect {name}: {error}"))?;
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| format!("cannot inspect {name}: {error}"))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(format!("{name} must be an existing regular non-symlink directory"));
+        return Err(format!(
+            "{name} must be an existing regular non-symlink directory"
+        ));
     }
     #[cfg(unix)]
     {
@@ -319,9 +321,9 @@ fn validate_safe_filename(filename: &str) -> Result<(), String> {
         || filename.len() > 200
         || filename == "."
         || filename == ".."
-        || !filename.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')
-        })
+        || !filename
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
     {
         return Err("verifier output filename contains invalid characters".into());
     }
@@ -386,11 +388,16 @@ fn acquire_process_lock(receipt_dir: &Path) -> Result<ProcessLock, String> {
 }
 
 fn load_private_key(path: &Path) -> Result<Ed25519KeyPair, String> {
-    secure_file_metadata(path, MAX_PRIVATE_KEY_BYTES, "independent verifier private key")?;
+    secure_file_metadata(
+        path,
+        MAX_PRIVATE_KEY_BYTES,
+        "independent verifier private key",
+    )?;
     let encoded = fs::read(path)
         .map_err(|error| format!("cannot read independent verifier private key: {error}"))?;
-    Ed25519KeyPair::from_pkcs8(&encoded)
-        .map_err(|_| "independent verifier private key is not a valid Ed25519 PKCS#8 document".into())
+    Ed25519KeyPair::from_pkcs8(&encoded).map_err(|_| {
+        "independent verifier private key is not a valid Ed25519 PKCS#8 document".into()
+    })
 }
 
 fn load_policy(path: &Path) -> Result<(VerificationPolicy, String), String> {
@@ -454,10 +461,7 @@ fn valid_json_pointer(pointer: &str) -> bool {
     true
 }
 
-fn evaluate_result(
-    attempt: &PendingAttempt,
-    policy: &VerificationPolicy,
-) -> ResultDecision {
+fn evaluate_result(attempt: &PendingAttempt, policy: &VerificationPolicy) -> ResultDecision {
     let Some(rule) = policy
         .rules
         .iter()
@@ -580,7 +584,9 @@ fn open_read_only_database(path: &Path) -> Result<Connection, String> {
         .map_err(|error| format!("cannot inspect DREAD execution schema version: {error}"))?
         .flatten();
     if migration_version.is_none_or(|version| version < 7) {
-        return Err("canonical DREAD database must have durable execution schema version 7 or newer".into());
+        return Err(
+            "canonical DREAD database must have durable execution schema version 7 or newer".into(),
+        );
     }
     // Prepare-only schema validation ensures the verifier is reading the
     // canonical Phase 6 columns and not a similarly named unrelated database.
@@ -595,8 +601,10 @@ fn open_read_only_database(path: &Path) -> Result<Connection, String> {
         .prepare("SELECT request_id, requester_id FROM dread_dispatch_admissions LIMIT 0")
         .map_err(|error| format!("canonical admission schema is unavailable: {error}"))?;
     connection
-        .prepare("SELECT attempt_id, evidence_id, evidence_kind, verifier_id, observed_at
-                  FROM dread_execution_evidence LIMIT 0")
+        .prepare(
+            "SELECT attempt_id, evidence_id, evidence_kind, verifier_id, observed_at
+                  FROM dread_execution_evidence LIMIT 0",
+        )
         .map_err(|error| format!("canonical provider evidence schema is unavailable: {error}"))?;
     Ok(connection)
 }
@@ -677,8 +685,7 @@ fn build_result_receipt(
     };
     let source_reference = format!(
         "verifier://{verifier_id}/policy/{policy_digest}/capability/{}/rule/{policy_rule}/decision/{}",
-        attempt.capability_id,
-        decision.reason_code
+        attempt.capability_id, decision.reason_code
     );
     validate_text("verification source reference", &source_reference, 2048)?;
     Ok(IndependentResultReceipt {
@@ -716,7 +723,8 @@ fn existing_receipt_is_current(
     let Ok(bytes) = fs::read(path) else {
         return false;
     };
-    let Ok(receipt) = verify_envelope::<IndependentResultReceipt>(&bytes, key_id, public_key) else {
+    let Ok(receipt) = verify_envelope::<IndependentResultReceipt>(&bytes, key_id, public_key)
+    else {
         return false;
     };
     receipt.schema_version == 1
@@ -801,7 +809,9 @@ fn run_cycle(
 fn parse_config() -> Result<VerifierConfig, String> {
     let database_path = env::var_os("DREAD_VERIFIER_DB_PATH")
         .map(PathBuf::from)
-        .ok_or_else(|| "DREAD_VERIFIER_DB_PATH is required (use the canonical DREAD_DB_PATH)".to_string())?;
+        .ok_or_else(|| {
+            "DREAD_VERIFIER_DB_PATH is required (use the canonical DREAD_DB_PATH)".to_string()
+        })?;
     let receipt_dir = env::var_os("DREAD_INDEPENDENT_RESULT_VERIFIER_RECEIPT_DIR")
         .map(PathBuf::from)
         .ok_or_else(|| "DREAD_INDEPENDENT_RESULT_VERIFIER_RECEIPT_DIR is required".to_string())?;
@@ -811,7 +821,9 @@ fn parse_config() -> Result<VerifierConfig, String> {
         .map_err(|_| "DREAD_INDEPENDENT_RESULT_VERIFIER_KEY_ID is required".to_string())?;
     let private_key_path = env::var_os("DREAD_INDEPENDENT_RESULT_VERIFIER_PRIVATE_KEY_FILE")
         .map(PathBuf::from)
-        .ok_or_else(|| "DREAD_INDEPENDENT_RESULT_VERIFIER_PRIVATE_KEY_FILE is required".to_string())?;
+        .ok_or_else(|| {
+            "DREAD_INDEPENDENT_RESULT_VERIFIER_PRIVATE_KEY_FILE is required".to_string()
+        })?;
     let policy_path = env::var_os("DREAD_INDEPENDENT_RESULT_VERIFIER_POLICY_FILE")
         .map(PathBuf::from)
         .ok_or_else(|| "DREAD_INDEPENDENT_RESULT_VERIFIER_POLICY_FILE is required".to_string())?;
@@ -848,7 +860,6 @@ fn check_public_key_environment(keypair: &Ed25519KeyPair) -> Result<(), String> 
     }
     Ok(())
 }
-
 
 fn run_daemon(config: VerifierConfig, once: bool) -> Result<(), String> {
     let _lock = acquire_process_lock(&config.receipt_dir)?;
@@ -892,19 +903,32 @@ fn run_daemon(config: VerifierConfig, once: bool) -> Result<(), String> {
 
 fn generate_key(path: &Path) -> Result<(), String> {
     if path.exists() {
-        return Err(format!("refusing to overwrite existing key file {}", path.display()));
+        return Err(format!(
+            "refusing to overwrite existing key file {}",
+            path.display()
+        ));
     }
-    let document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
-        .map_err(|_| "operating-system random source could not generate an Ed25519 key".to_string())?;
+    let document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).map_err(|_| {
+        "operating-system random source could not generate an Ed25519 key".to_string()
+    })?;
     let keypair = Ed25519KeyPair::from_pkcs8(document.as_ref())
         .map_err(|_| "generated Ed25519 PKCS#8 key could not be loaded".to_string())?;
-    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     if !parent.is_dir() {
-        return Err(format!("key parent directory does not exist: {}", parent.display()));
+        return Err(format!(
+            "key parent directory does not exist: {}",
+            parent.display()
+        ));
     }
     write_sync_file(path, document.as_ref())?;
     sync_directory(parent)?;
-    println!("DREAD_INDEPENDENT_RESULT_VERIFIER_PUBLIC_KEY_HEX={}", hex_encode(keypair.public_key().as_ref()));
+    println!(
+        "DREAD_INDEPENDENT_RESULT_VERIFIER_PUBLIC_KEY_HEX={}",
+        hex_encode(keypair.public_key().as_ref())
+    );
     Ok(())
 }
 
@@ -1025,7 +1049,9 @@ mod tests {
     #[test]
     fn capability_policy_requires_declared_non_null_result_paths() {
         let policy = policy();
-        assert!(evaluate_result(&pending(Some(r#"{"result":{"answer":42}}"#), None), &policy).passed);
+        assert!(
+            evaluate_result(&pending(Some(r#"{"result":{"answer":42}}"#), None), &policy).passed
+        );
         assert_eq!(
             evaluate_result(&pending(Some(r#"{"other":42}"#), None), &policy).reason_code,
             "required_result_field_missing"
@@ -1041,14 +1067,32 @@ mod tests {
         let mut unknown = pending(Some(r#"{"result":"ok"}"#), None);
         unknown.capability_id = "unregistered.capability".into();
         assert!(!evaluate_result(&unknown, &policy()).passed);
-        assert!(!evaluate_result(&pending(Some(r#"{"result":"ok"}"#), Some("oops")), &policy()).passed);
+        assert!(
+            !evaluate_result(
+                &pending(Some(r#"{"result":"ok"}"#), Some("oops")),
+                &policy()
+            )
+            .passed
+        );
     }
 
     #[test]
     fn generic_failure_shapes_cannot_pass_even_when_required_fields_exist() {
         let policy = policy();
-        assert!(!evaluate_result(&pending(Some(r#"{"result":"ok","success":false}"#), None), &policy).passed);
-        assert!(!evaluate_result(&pending(Some(r#"{"result":"ok","error":"failed"}"#), None), &policy).passed);
+        assert!(
+            !evaluate_result(
+                &pending(Some(r#"{"result":"ok","success":false}"#), None),
+                &policy
+            )
+            .passed
+        );
+        assert!(
+            !evaluate_result(
+                &pending(Some(r#"{"result":"ok","error":"failed"}"#), None),
+                &policy
+            )
+            .passed
+        );
     }
 
     #[test]
@@ -1062,12 +1106,8 @@ mod tests {
             expires_at: now + HEARTBEAT_TTL_SECONDS,
         };
         let bytes = sign_payload(&key, "verifier-key-1", payload.clone()).unwrap();
-        let verified: VerifierHeartbeat = verify_envelope(
-            &bytes,
-            "verifier-key-1",
-            key.public_key().as_ref(),
-        )
-        .unwrap();
+        let verified: VerifierHeartbeat =
+            verify_envelope(&bytes, "verifier-key-1", key.public_key().as_ref()).unwrap();
         assert_eq!(verified, payload);
     }
 
@@ -1089,12 +1129,8 @@ mod tests {
             Some(sha256_hex(attempt.result_json.as_deref().unwrap().as_bytes()).as_str())
         );
         let encoded = sign_payload(&key, "verifier-key-1", receipt.clone()).unwrap();
-        let decoded: IndependentResultReceipt = verify_envelope(
-            &encoded,
-            "verifier-key-1",
-            key.public_key().as_ref(),
-        )
-        .unwrap();
+        let decoded: IndependentResultReceipt =
+            verify_envelope(&encoded, "verifier-key-1", key.public_key().as_ref()).unwrap();
         assert_eq!(decoded, receipt);
     }
 
@@ -1122,7 +1158,10 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].request_id, "request-1");
         assert_eq!(pending[0].requester_id, "operator-1");
-        assert_eq!(pending[0].provider_verifier_id, "dread-adapter-receipt:hermes");
+        assert_eq!(
+            pending[0].provider_verifier_id,
+            "dread-adapter-receipt:hermes"
+        );
     }
 
     #[test]
