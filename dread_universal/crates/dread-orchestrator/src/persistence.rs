@@ -1516,10 +1516,8 @@ pub fn append_provider_event_with_receipt(
         let receipt_matches = match receipt {
             Some(receipt) => {
                 prior.receipt_key_id.as_deref() == Some(receipt.key_id.as_str())
-                    && prior.receipt_payload_json.as_deref()
-                        == Some(receipt.payload_json.as_str())
-                    && prior.receipt_signature_hex.as_deref()
-                        == Some(receipt.signature_hex.as_str())
+                    && prior.receipt_payload_json.as_deref() == Some(receipt.payload_json.as_str())
+                    && prior.receipt_signature_hex.as_deref() == Some(receipt.signature_hex.as_str())
                     && prior.receipt_response_sha256.as_deref()
                         == Some(receipt.response_sha256.as_str())
             }
@@ -1530,7 +1528,8 @@ pub fn append_provider_event_with_receipt(
                     && prior.receipt_response_sha256.is_none()
             }
         };
-        if prior.event_type != event_type || prior.payload_json != payload_json || !receipt_matches {
+        if prior.event_type != event_type || prior.payload_json != payload_json || !receipt_matches
+        {
             return Err(PersistenceError::Conflict(
                 "provider reused an event identity with different type, payload, or receipt".into(),
             ));
