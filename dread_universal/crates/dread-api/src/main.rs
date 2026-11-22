@@ -6774,6 +6774,35 @@ mod tests {
         assert_eq!(builtin_resource_request("media_render"), None);
     }
 
+    #[test]
+    fn runtime_attestation_endpoint_normalizers_match_provider_descriptors() {
+        assert_eq!(
+            normalize_hermes_runtime_endpoint("http://127.0.0.1:8642/").unwrap(),
+            "http://127.0.0.1:8642"
+        );
+        assert_eq!(
+            normalize_hermes_runtime_endpoint("http://127.0.0.1:8642/api/").unwrap(),
+            "http://127.0.0.1:8642/api"
+        );
+
+        let deerflow_origin =
+            normalize_origin_runtime_endpoint("http://127.0.0.1:2026/").unwrap();
+        assert_eq!(
+            format!("{deerflow_origin}/api"),
+            "http://127.0.0.1:2026/api"
+        );
+        assert_eq!(
+            format!("{deerflow_origin}/api/langgraph"),
+            "http://127.0.0.1:2026/api/langgraph"
+        );
+
+        assert_eq!(
+            normalize_origin_runtime_endpoint("http://127.0.0.1:8000").unwrap(),
+            "http://127.0.0.1:8000"
+        );
+        assert!(normalize_origin_runtime_endpoint("http://127.0.0.1:2026/nested").is_err());
+    }
+
     fn test_runtime_attestation(
         provider_id: &str,
         adapter_id: &str,
