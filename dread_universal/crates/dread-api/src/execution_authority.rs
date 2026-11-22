@@ -863,8 +863,16 @@ fn validate_manifest_payload(manifest: &ExecutionTrustManifest, now: i64) -> Res
             ("operation", provider.operation.as_str(), 128),
             ("evidence_id", provider.evidence_id.as_str(), 160),
             ("source_reference", provider.source_reference.as_str(), 2048),
-            ("isolation_evidence_id", provider.isolation.evidence_id.as_str(), 160),
-            ("runtime_identity", provider.isolation.runtime_identity.as_str(), 512),
+            (
+                "isolation_evidence_id",
+                provider.isolation.evidence_id.as_str(),
+                160,
+            ),
+            (
+                "runtime_identity",
+                provider.isolation.runtime_identity.as_str(),
+                512,
+            ),
             (
                 "isolation_source_observation_id",
                 provider.isolation.provenance.source_observation_id.as_str(),
@@ -872,12 +880,20 @@ fn validate_manifest_payload(manifest: &ExecutionTrustManifest, now: i64) -> Res
             ),
             (
                 "isolation_adapter_id",
-                provider.isolation.provenance.recorded_by_adapter_id.as_str(),
+                provider
+                    .isolation
+                    .provenance
+                    .recorded_by_adapter_id
+                    .as_str(),
                 128,
             ),
             (
                 "isolation_adapter_version",
-                provider.isolation.provenance.recorded_by_adapter_version.as_str(),
+                provider
+                    .isolation
+                    .provenance
+                    .recorded_by_adapter_version
+                    .as_str(),
                 128,
             ),
             (
