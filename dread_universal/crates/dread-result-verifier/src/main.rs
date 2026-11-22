@@ -1170,7 +1170,7 @@ fn run_cli() -> Result<(), String> {
 mod tests {
     use super::*;
     use ring::signature::KeyPair;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     fn keypair() -> Ed25519KeyPair {
         let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
