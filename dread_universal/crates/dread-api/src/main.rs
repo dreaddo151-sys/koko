@@ -631,6 +631,7 @@ fn open_database(path: &str) -> anyhow::Result<Connection> {
              metadata TEXT NOT NULL DEFAULT '{}',
              created_at INTEGER NOT NULL
          );
+         CREATE INDEX IF NOT EXISTS registry_kind_idx ON registry(kind);
          CREATE TABLE IF NOT EXISTS tasks (
              id TEXT PRIMARY KEY NOT NULL,
              title TEXT NOT NULL,
@@ -5686,6 +5687,11 @@ async fn models_autoconfigure(State(state): State<AppState>) -> Result<Json<Valu
             .unwrap_or_default(),
         None => Vec::new(),
     };
+    let engine_roots = tokio::task::spawn_blocking(|| {
+        dread_gpu::dspine::detect_engine_roots(&dspine_engine_roots())
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("D-Spine scan worker failed: {error}")))?;
     let conn = db_lock(&state)?;
     let summary = autoconfigure_inventory(
         &conn,
@@ -5694,7 +5700,107 @@ async fn models_autoconfigure(State(state): State<AppState>) -> Result<Json<Valu
         i64::try_from(now_epoch()).unwrap_or(i64::MAX),
     )
     .map_err(ApiError::internal)?;
+    let dspine_engines = upsert_dspine_engines(
+        &conn,
+        &engine_roots,
+        i64::try_from(now_epoch()).unwrap_or(i64::MAX),
+    )
+    .map_err(ApiError::internal)?;
+    let mut summary = summary;
+    summary["dspine_engines_registered"] = json!(dspine_engines);
     Ok(Json(summary))
+}
+
+/// B8: read-only D-Spine awareness. v1 detects SGLang integration roots and
+/// local draft weights, then pairs them with registry targets as advice only.
+/// It never installs, downloads, launches, allocates VRAM, or claims llama.cpp
+/// compatibility (D-Spine draft trees require SGLang).
+const DEFAULT_DSPINE_ROOT: &str = "/mnt/sabrent/dread_workspace/engines/dspine_tencent/DSpine";
+const MAX_REGISTRY_ROWS_FOR_PAIRING: i64 = 10_000;
+
+fn dspine_engine_roots() -> Vec<std::path::PathBuf> {
+    let mut roots: Vec<std::path::PathBuf> = std::env::var_os("DREAD_DSPINE_ROOTS")
+        .map(|value| {
+            std::env::split_paths(&value)
+                .filter(|path| !path.as_os_str().is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    roots.push(std::path::PathBuf::from(DEFAULT_DSPINE_ROOT));
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn dspine_snapshot() -> (Vec<dread_gpu::dspine::EngineRoot>, Vec<dread_gpu::dspine::Draft>) {
+    let model_roots = dread_gpu::models::configured_model_roots();
+    (
+        dread_gpu::dspine::detect_engine_roots(&dspine_engine_roots()),
+        dread_gpu::dspine::catalog_drafts(&model_roots),
+    )
+}
+
+async fn dspine_status(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let (engine_roots, drafts) = tokio::task::spawn_blocking(dspine_snapshot)
+        .await
+        .map_err(|error| ApiError::internal(format!("D-Spine scan worker failed: {error}")))?;
+    Ok(Json(json!({
+        "engine_roots": engine_roots,
+        "drafts": drafts,
+        "supervisor_configured": state.supervisor.is_some(),
+    })))
+}
+
+async fn dspine_proposals(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let (_, drafts) = tokio::task::spawn_blocking(dspine_snapshot)
+        .await
+        .map_err(|error| ApiError::internal(format!("D-Spine scan worker failed: {error}")))?;
+    let rows = {
+        let conn = db_lock(&state)?;
+        let mut stmt = conn
+            .prepare("SELECT id, kind, name FROM registry ORDER BY id LIMIT ?1")
+            .map_err(|error| ApiError::internal(format!("could not read registry: {error}")))?;
+        stmt
+            .query_map(rusqlite::params![MAX_REGISTRY_ROWS_FOR_PAIRING], |row| {
+                Ok(dread_gpu::dspine::RegistryRow {
+                    id: row.get(0)?,
+                    kind: row.get(1)?,
+                    name: row.get(2)?,
+                })
+            })
+            .map_err(|error| ApiError::internal(format!("could not read registry: {error}")))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| ApiError::internal(format!("could not read registry: {error}")))?
+    };
+    let proposals = dread_gpu::dspine::build_proposals(&drafts, &rows);
+    serde_json::to_value(proposals)
+        .map(Json)
+        .map_err(|error| ApiError::internal(format!("could not serialize proposals: {error}")))
+}
+
+/// Additive engine registration used by model autoconfigure only, never by
+/// GET routes. Kind-guarded: an id collision with a foreign-kind row is
+/// skipped, never overwritten. There is no DELETE: discovery never prunes.
+fn upsert_dspine_engines(
+    conn: &rusqlite::Connection,
+    roots: &[dread_gpu::dspine::EngineRoot],
+    now: i64,
+) -> Result<usize, String> {
+    let mut registered = 0usize;
+    for root in roots.iter().filter(|root| root.present) {
+        let id = format!("engine-{}", sha256_hex_prefix(root.path.as_bytes(), 12));
+        let metadata = json!({"marker_evidence": root.marker_evidence}).to_string();
+        conn.execute(
+            "INSERT INTO registry (id, name, kind, endpoint, metadata, created_at)
+             VALUES (?1, ?2, 'engine.dspine', NULL, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name, metadata = excluded.metadata
+             WHERE registry.kind = 'engine.dspine'",
+            params![id, root.path, metadata, now],
+        )
+        .map_err(|error| format!("could not register D-Spine engine root: {error}"))?;
+        registered += 1;
+    }
+    Ok(registered)
 }
 
 /// Token Booster: concrete llama.cpp launch advice for one registry model.
@@ -6086,6 +6192,8 @@ fn app(state: AppState) -> Router {
         .route("/api/skills/sync", axum::routing::post(skills_sync))
         .route("/api/models/{id}/token-advice", get(model_token_advice))
         .route("/api/repair/plan", get(repair_plan))
+        .route("/api/dspine/status", get(dspine_status))
+        .route("/api/dspine/proposals", get(dspine_proposals))
         .route(
             "/api/repair/runs",
             axum::routing::get(repair_runs_list).post(repair_run_create),

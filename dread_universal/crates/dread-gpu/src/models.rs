@@ -394,7 +394,10 @@ pub fn discover_local_models() -> LocalModelInventory {
     )
 }
 
-fn configured_model_roots() -> Vec<PathBuf> {
+/// Model roots used by autodiscovery. Exported so read-only subsystems
+/// (D-Spine draft cataloging) scan exactly the same directories without
+/// inventing a second configuration channel.
+pub fn configured_model_roots() -> Vec<PathBuf> {
     if let Some(value) = env::var_os("DREAD_MODEL_ROOTS") {
         return env::split_paths(&value)
             .filter(|path| !path.as_os_str().is_empty())
