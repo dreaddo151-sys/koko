@@ -20,6 +20,7 @@ dread-gpu = { path = "../dread-gpu" }
 dread-orchestrator = { path = "../dread-orchestrator" }
 dread-media = { path = "../dread-media" }
 futures.workspace = true
+libc.workspace = true
 reqwest.workspace = true
 ring.workspace = true
 rusqlite.workspace = true
