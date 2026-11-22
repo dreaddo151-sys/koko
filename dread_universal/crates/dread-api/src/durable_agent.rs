@@ -983,6 +983,7 @@ pub(super) async fn recover_startup_durable_attempts(state: &AppState) -> Result
         "Durable startup provider reconciliation completed"
     );
     Ok(workers_scheduled)
+}
 
 /// Resume queued provider tasks only after the startup barrier has actually
 /// opened. The task worker still performs a new signed admission and atomic
@@ -1076,6 +1077,4 @@ pub(super) fn resume_queued_durable_agents(state: &AppState) -> Result<usize, St
         resumed = resumed.saturating_add(1);
     }
     Ok(resumed)
-}
-
 }
