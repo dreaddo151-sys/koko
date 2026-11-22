@@ -178,8 +178,7 @@ fn build_agent_adapters(
             "DeerFlow",
         )
         .map_err(|error| error.to_string())?;
-        if let Some(signer) =
-            load_agent_receipt_signer("DREAD_DEERFLOW_RECEIPT_SIGNING_KEY_FILE")?
+        if let Some(signer) = load_agent_receipt_signer("DREAD_DEERFLOW_RECEIPT_SIGNING_KEY_FILE")?
         {
             adapter = adapter.with_receipt_signer(signer);
         }
@@ -213,8 +212,7 @@ fn build_agent_adapters(
             "OpenHands",
         )
         .map_err(|error| error.to_string())?;
-        if let Some(signer) =
-            load_agent_receipt_signer("DREAD_OPENHANDS_RECEIPT_SIGNING_KEY_FILE")?
+        if let Some(signer) = load_agent_receipt_signer("DREAD_OPENHANDS_RECEIPT_SIGNING_KEY_FILE")?
         {
             adapter = adapter.with_receipt_signer(signer);
         }
