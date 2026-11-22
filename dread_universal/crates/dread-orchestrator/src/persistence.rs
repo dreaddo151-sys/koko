@@ -3438,6 +3438,22 @@ mod tests {
     }
 
     #[test]
+    fn startup_recovery_generation_invalidates_previous_boot_attachment() {
+        let mut db = canonical_db();
+        install(&mut db, 10).unwrap();
+        assert!(release_startup_dispatch_barrier(&mut db, 11).unwrap());
+        assert!(startup_dispatch_barrier_is_open(&db).unwrap());
+
+        let first_generation = begin_startup_recovery(&mut db, 12).unwrap();
+        assert_eq!(first_generation, 2);
+        assert!(!startup_dispatch_barrier_is_open(&db).unwrap());
+
+        let second_generation = begin_startup_recovery(&mut db, 13).unwrap();
+        assert_eq!(second_generation, 3);
+        assert!(!startup_dispatch_barrier_is_open(&db).unwrap());
+    }
+
+    #[test]
     fn refuses_a_future_private_migration_version() {
         let mut db = canonical_db();
         install(&mut db, 10).unwrap();
