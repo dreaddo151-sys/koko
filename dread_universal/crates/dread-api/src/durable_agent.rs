@@ -498,6 +498,7 @@ fn durable_dispatch_activation_ready(state: &AppState, now: i64) -> bool {
         && providers.iter().all(|provider| {
             provider["enabled"] == true
                 && provider["isolation_verified"] == true
+                && provider["receipt_key_pinned"] == true
                 && provider["revoked"] != true
         })
 }
@@ -982,4 +983,99 @@ pub(super) async fn recover_startup_durable_attempts(state: &AppState) -> Result
         "Durable startup provider reconciliation completed"
     );
     Ok(workers_scheduled)
+
+/// Resume queued provider tasks only after the startup barrier has actually
+/// opened. The task worker still performs a new signed admission and atomic
+/// attempt preparation before any provider side effect.
+pub(super) fn resume_queued_durable_agents(state: &AppState) -> Result<usize, String> {
+    {
+        let connection = state
+            .db
+            .lock()
+            .map_err(|_| "database lock is unavailable while reading queued provider tasks".to_string())?;
+        if !persistence::startup_dispatch_barrier_is_open(&connection)
+            .map_err(|error| format!("cannot inspect startup dispatch barrier: {error}"))?
+        {
+            return Ok(0);
+        }
+    }
+
+    let queued = {
+        let connection = state
+            .db
+            .lock()
+            .map_err(|_| "database lock is unavailable while enumerating queued provider tasks".to_string())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, capability_id, payload_json, agent_provider, provider_event_cursor
+                 FROM tasks
+                 WHERE status = 'queued' AND task_type = 'agent_task'
+                   AND agent_provider IS NOT NULL
+                 ORDER BY created_at, id",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, u64>(4)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+    };
+
+    let mut resumed = 0usize;
+    for (task_id, capability_id, payload_json, provider, initial_event_cursor) in queued {
+        let Some(capability_id) = capability_id.filter(|value| !value.trim().is_empty()) else {
+            warn!(task_id = %task_id, "Queued provider task has no canonical capability; it remains queued");
+            continue;
+        };
+        let payload: Value = match serde_json::from_str(&payload_json) {
+            Ok(payload) => payload,
+            Err(error) => {
+                warn!(task_id = %task_id, error = %error, "Queued provider task payload is invalid; it remains queued");
+                continue;
+            }
+        };
+        let Some(adapter) = state.agent_adapters.get(&provider).cloned() else {
+            warn!(task_id = %task_id, provider = %provider, "Queued provider adapter is unavailable; task remains queued");
+            continue;
+        };
+        if !adapter.descriptor().enabled || adapter.descriptor().adapter != provider {
+            warn!(task_id = %task_id, provider = %provider, "Queued provider adapter is disabled or mismatched; task remains queued");
+            continue;
+        }
+        let (cancel_sender, cancel_receiver) = watch::channel(false);
+        {
+            let mut cancellations = state
+                .cancellations
+                .lock()
+                .map_err(|_| "task cancellation registry is unavailable".to_string())?;
+            if cancellations.contains_key(&task_id) {
+                continue;
+            }
+            cancellations.insert(task_id.clone(), cancel_sender);
+        }
+        tokio::spawn(super::execute_agent_task(
+            state.clone(),
+            adapter,
+            AgentTaskExecution {
+                task_id,
+                provider,
+                capability_id,
+                payload,
+                initial_event_cursor,
+            },
+            cancel_receiver,
+        ));
+        resumed = resumed.saturating_add(1);
+    }
+    Ok(resumed)
+}
+
 }
