@@ -107,6 +107,13 @@ impl IndependentResultVerifier {
         }))
     }
 
+    /// Require a currently signed verifier heartbeat for a fresh provider
+    /// admission. Existing provider lifecycle evidence may still be reconciled
+    /// while the verifier is temporarily unavailable.
+    pub fn ensure_ready(&self, now: i64) -> Result<(), String> {
+        self.read_heartbeat(now).map(|_| ())
+    }
+
     pub fn status(&self, now: i64) -> serde_json::Value {
         match self.read_heartbeat(now) {
             Ok(heartbeat) => serde_json::json!({
