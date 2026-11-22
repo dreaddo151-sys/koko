@@ -8,8 +8,9 @@
 use crate::{
     AdapterFuture, AgentAdapter, AgentAdapterError, AgentCapability, AgentDescriptor, AgentEvent,
     AgentExecutionIdentity, AgentHealth, AgentHealthState, AgentOperationEvidenceKind,
-    AgentOperationReceiptDetails, AgentOperationReceipt, AgentReceiptSigner, AgentTask, AgentTaskState, DurableAgentStartRequest,
-    StartTaskRequest, durable_evidence_error, signed_agent_operation_receipt,
+    AgentOperationReceipt, AgentOperationReceiptDetails, AgentReceiptSigner, AgentTask,
+    AgentTaskState, DurableAgentStartRequest, StartTaskRequest, durable_evidence_error,
+    signed_agent_operation_receipt,
 };
 use reqwest::{Client, Method, StatusCode, Url};
 use serde_json::{Value, json};
