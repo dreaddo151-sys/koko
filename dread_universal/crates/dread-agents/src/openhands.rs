@@ -6,8 +6,10 @@
 //! retained. These server claims still require live host/container validation.
 
 use crate::{
-    AdapterFuture, AgentAdapter, AgentAdapterError, AgentCapability, AgentDescriptor, AgentEvent,
-    AgentHealth, AgentHealthState, AgentTask, AgentTaskState, StartTaskRequest,
+    signed_agent_operation_receipt, durable_evidence_error, AdapterFuture, AgentAdapter,
+    AgentAdapterError, AgentCapability, AgentDescriptor, AgentEvent, AgentExecutionIdentity,
+    AgentHealth, AgentHealthState, AgentOperationEvidenceKind, AgentOperationReceipt,
+    AgentReceiptSigner, AgentTask, AgentTaskState, DurableAgentStartRequest, StartTaskRequest,
 };
 use reqwest::{Client, Method, StatusCode, Url};
 use serde_json::{Value, json};
@@ -34,6 +36,7 @@ pub struct OpenHandsAgentServerAdapter {
     llm_base_url: String,
     sandbox_attested: bool,
     secret_store_attested: bool,
+    receipt_signer: Option<AgentReceiptSigner>,
 }
 
 impl OpenHandsAgentServerAdapter {
@@ -139,7 +142,16 @@ impl OpenHandsAgentServerAdapter {
             llm_base_url,
             sandbox_attested: false,
             secret_store_attested: false,
+            receipt_signer: None,
         })
+    }
+
+    /// Attach the trusted local receipt signer. Durable lifecycle operations
+    /// remain unavailable until a key anchored by the signed provider registry
+    /// is configured by the caller.
+    pub fn with_receipt_signer(mut self, signer: AgentReceiptSigner) -> Self {
+        self.receipt_signer = Some(signer);
+        self
     }
 
     /// Enable only after Docker execution and stable OH_SECRET_KEY storage have
@@ -799,6 +811,148 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
             let final_message = messages.last().cloned().unwrap_or_default();
             task.result = Some(json!({"messages": messages, "final_message": final_message}));
             Ok(task)
+        })
+    }
+
+
+    fn start_task_with_evidence<'a>(
+        &'a self,
+        request: DurableAgentStartRequest,
+    ) -> AdapterFuture<'a, AgentOperationReceipt<AgentTask>> {
+        Box::pin(async move {
+            request.validate()?;
+            let identity = request.identity;
+            let response = self.start_task(request.request).await?;
+            signed_agent_operation_receipt(
+                self.receipt_signer
+                    .as_ref()
+                    .ok_or_else(|| durable_evidence_error("OpenHands receipt signer is not configured"))?,
+                &self.descriptor,
+                "openhands",
+                &identity,
+                AgentOperationEvidenceKind::Acknowledged,
+                response.clone(),
+                response.provider_task_id.clone(),
+                None,
+                None,
+            )
+        })
+    }
+
+    fn task_status_with_evidence<'a>(
+        &'a self,
+        identity: &'a AgentExecutionIdentity,
+        provider_execution_id: &'a str,
+    ) -> AdapterFuture<'a, AgentOperationReceipt<AgentTask>> {
+        Box::pin(async move {
+            let response = self.task_status(&identity.task_id, provider_execution_id).await?;
+            let kind = match response.state {
+                AgentTaskState::Succeeded => AgentOperationEvidenceKind::Succeeded,
+                AgentTaskState::Failed => AgentOperationEvidenceKind::Failed,
+                AgentTaskState::Cancelled => AgentOperationEvidenceKind::Cancelled,
+                _ => AgentOperationEvidenceKind::Active,
+            };
+            signed_agent_operation_receipt(
+                self.receipt_signer
+                    .as_ref()
+                    .ok_or_else(|| durable_evidence_error("OpenHands receipt signer is not configured"))?,
+                &self.descriptor,
+                "openhands",
+                identity,
+                kind,
+                response,
+                Some(provider_execution_id.to_owned()),
+                None,
+                None,
+            )
+        })
+    }
+
+    fn events_with_evidence<'a>(
+        &'a self,
+        identity: &'a AgentExecutionIdentity,
+        provider_execution_id: &'a str,
+        after_sequence: u64,
+    ) -> AdapterFuture<'a, Vec<AgentOperationReceipt<AgentEvent>>> {
+        Box::pin(async move {
+            let events = self.events(&identity.task_id, provider_execution_id, after_sequence).await?;
+            let signer = self.receipt_signer
+                .as_ref()
+                .ok_or_else(|| durable_evidence_error("OpenHands receipt signer is not configured"))?;
+            let mut receipts = Vec::with_capacity(events.len());
+            for event in events {
+                let external_event_id = format!("{provider_execution_id}:{}", event.sequence);
+                let event_type = event.event_type.clone();
+                receipts.push(signed_agent_operation_receipt(
+                    signer,
+                    &self.descriptor,
+                    "openhands",
+                    identity,
+                    AgentOperationEvidenceKind::Event,
+                    event,
+                    Some(provider_execution_id.to_owned()),
+                    Some(external_event_id),
+                    Some(event_type),
+                )?);
+            }
+            Ok(receipts)
+        })
+    }
+
+    fn cancel_task_with_evidence<'a>(
+        &'a self,
+        identity: &'a AgentExecutionIdentity,
+        provider_execution_id: &'a str,
+    ) -> AdapterFuture<'a, AgentOperationReceipt<AgentTask>> {
+        Box::pin(async move {
+            let response = self.cancel_task(&identity.task_id, provider_execution_id).await?;
+            let kind = match response.state {
+                AgentTaskState::Cancelled => AgentOperationEvidenceKind::Cancelled,
+                AgentTaskState::Queued | AgentTaskState::Running | AgentTaskState::WaitingForConfirmation => AgentOperationEvidenceKind::CancellationAccepted,
+                _ => AgentOperationEvidenceKind::CancellationUnknown,
+            };
+            signed_agent_operation_receipt(
+                self.receipt_signer
+                    .as_ref()
+                    .ok_or_else(|| durable_evidence_error("OpenHands receipt signer is not configured"))?,
+                &self.descriptor,
+                "openhands",
+                identity,
+                kind,
+                response,
+                Some(provider_execution_id.to_owned()),
+                None,
+                None,
+            )
+        })
+    }
+
+    fn task_result_with_evidence<'a>(
+        &'a self,
+        identity: &'a AgentExecutionIdentity,
+        provider_execution_id: &'a str,
+    ) -> AdapterFuture<'a, AgentOperationReceipt<AgentTask>> {
+        Box::pin(async move {
+            let response = self.task_result(&identity.task_id, provider_execution_id).await?;
+            let kind = match response.state {
+                AgentTaskState::Succeeded => AgentOperationEvidenceKind::Succeeded,
+                AgentTaskState::Failed => AgentOperationEvidenceKind::Failed,
+                AgentTaskState::Cancelled => AgentOperationEvidenceKind::Cancelled,
+                _ => AgentOperationEvidenceKind::Active,
+            };
+            signed_agent_operation_receipt(
+                self.receipt_signer
+                    .as_ref()
+                    .ok_or_else(|| durable_evidence_error("OpenHands receipt signer is not configured"))?,
+                &self.descriptor,
+                "openhands",
+                identity,
+                kind,
+                response,
+                Some(provider_execution_id.to_owned()),
+                None,
+                None,
+            )
         })
     }
 }
