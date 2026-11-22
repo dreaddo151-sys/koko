@@ -1,8 +1,8 @@
 mod durable_agent;
-mod secure_file;
 mod execution_authority;
 mod execution_policy;
 mod independent_verifier;
+mod secure_file;
 
 use axum::{
     Json, Router,
@@ -136,11 +136,7 @@ fn load_runtime_isolation_attestation(
         .ok_or_else(|| {
             format!("{environment_path_key} is required when configuring {provider_id}")
         })?;
-    let opened = secure_file::read_regular_file_no_follow(
-        &path,
-        64 * 1024,
-        environment_path_key,
-    )?;
+    let opened = secure_file::read_regular_file_no_follow(&path, 64 * 1024, environment_path_key)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -200,8 +196,7 @@ fn load_agent_receipt_signer(environment_key: &str) -> Result<Option<AgentReceip
         return Ok(None);
     };
     let path = PathBuf::from(path);
-    let opened =
-        secure_file::read_regular_file_no_follow(&path, 4096, environment_key)?;
+    let opened = secure_file::read_regular_file_no_follow(&path, 4096, environment_key)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
