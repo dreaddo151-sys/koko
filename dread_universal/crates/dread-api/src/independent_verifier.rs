@@ -10,6 +10,8 @@ use dread_orchestrator::persistence::{AttemptRecord, VerificationFacts};
 use ring::{digest, signature};
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::{
     env, fs,
     path::{Path, PathBuf},
