@@ -404,7 +404,7 @@ pub trait ExecutionAuthority: Send + Sync {
 
 /// Validate that we are attached to the Phase 6 schema. The adapter does not
 /// create or rename any canonical task/mission tables.
-pub fn require_primary_key(
+fn require_primary_key(
     connection: &Connection,
     table: &str,
     expected: &[&str],
