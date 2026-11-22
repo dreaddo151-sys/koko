@@ -211,31 +211,17 @@ fn build_agent_adapters(
 ) -> Result<HashMap<String, Arc<dyn AgentAdapter>>, String> {
     let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
     if let Some(hermes) = config.hermes {
-        if !hermes.sandbox_policy_verified {
-            return Err("Hermes requires explicit sandbox policy verification for per-task isolation, network egress, mounts and forwarded secrets".into());
-        }
-        if !hermes.isolated_workspace_per_task {
-            return Err("Hermes requires explicit per-task workspace isolation attestation".into());
-        }
         let mut adapter = HermesApiAdapter::new(&hermes.endpoint, hermes.api_key, "Hermes")
             .map_err(|error| error.to_string())?;
         if let Some(signer) = load_agent_receipt_signer("DREAD_HERMES_RECEIPT_SIGNING_KEY_FILE")? {
             adapter = adapter.with_receipt_signer(signer);
         }
         let adapter = adapter
-            .attest_sandbox(&hermes.terminal_backend, true)
+            .attest_runtime(hermes.runtime_attestation)
             .map_err(|error| error.to_string())?;
         adapters.insert("hermes".into(), Arc::new(adapter));
     }
     if let Some(deerflow) = config.deerflow {
-        if !deerflow.sandbox_policy_verified {
-            return Err("DeerFlow requires explicit sandbox policy verification for per-task isolation, network mode and mounts".into());
-        }
-        if !deerflow.isolated_workspace_per_task {
-            return Err(
-                "DeerFlow requires explicit per-task workspace isolation attestation".into(),
-            );
-        }
         let mut adapter = DeerFlowApiAdapter::new(
             &deerflow.endpoint,
             &deerflow.api_prefix,
@@ -248,21 +234,11 @@ fn build_agent_adapters(
             adapter = adapter.with_receipt_signer(signer);
         }
         let adapter = adapter
-            .attest_container_sandbox(
-                &deerflow.provider_class,
-                true,
-                deerflow.provisioner_url.as_deref(),
-            )
+            .attest_runtime(deerflow.runtime_attestation)
             .map_err(|error| error.to_string())?;
         adapters.insert("deerflow".into(), Arc::new(adapter));
     }
     if let Some(openhands) = config.openhands {
-        if !openhands.docker_runtime_enabled || !openhands.secret_store_configured {
-            return Err("OpenHands requires Docker execution runtime selection and stable OH_SECRET_KEY storage".into());
-        }
-        if !openhands.sandbox_policy_verified {
-            return Err("OpenHands requires explicit sandbox policy verification for per-conversation workspace, mounts, network egress and tool permissions".into());
-        }
         if openhands.llm_base_url != "http://host.docker.internal:11500/v1" {
             return Err(
                 "OpenHands LLM traffic must use DREAD's Docker-reachable local GPU gateway".into(),
@@ -282,13 +258,12 @@ fn build_agent_adapters(
             adapter = adapter.with_receipt_signer(signer);
         }
         let adapter = adapter
-            .attest_docker_runtime(true, true)
+            .attest_runtime(openhands.runtime_attestation)
             .map_err(|error| error.to_string())?;
         adapters.insert("openhands".into(), Arc::new(adapter));
     }
     Ok(adapters)
 }
-
 fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn AgentAdapter>>> {
     let mut config = AgentAdapterConfig::default();
     let hermes_keys = [
