@@ -3899,7 +3899,11 @@ mod tests {
         assert_eq!(unresolved.len(), 1);
         assert_eq!(unresolved[0].request_id, "request-lost-ack");
         assert!(unresolved[0].provider_execution_id.is_none());
-        assert!(recovery_worker_attachment_candidates(&db).unwrap().is_empty());
+        assert!(
+            recovery_worker_attachment_candidates(&db)
+                .unwrap()
+                .is_empty()
+        );
 
         // An unacknowledged dispatch is not attachable yet, and must keep the
         // global dispatch barrier closed until provider reconciliation proves
