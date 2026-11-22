@@ -15,7 +15,10 @@ use ring::signature::KeyPair;
 use ring::{digest, signature};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{fmt, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    fmt,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
