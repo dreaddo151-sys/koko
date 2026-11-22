@@ -13,7 +13,7 @@ use dread_agents::{
     AgentAdapter, AgentEvent, AgentExecutionIdentity, AgentOperationEvidenceKind,
     AgentOperationEvidencePayload, AgentOperationReceipt, CapabilityKind, CapabilityRecord,
     CapabilityStatus, DurableAgentStartRequest, StartTaskRequest, response_sha256,
-};
+, RuntimeIsolationAttestationSummary};
 use dread_orchestrator::persistence::{
     AdmissionRecord, AttemptRecord, AuthorizationFacts, CurrentRetryContractFacts, DispatchRequest,
     ExecutionAuthority, ProviderEventReceiptContext, ProviderEvidence, SignedProviderReceipt,
@@ -154,6 +154,80 @@ impl IsolationEvidenceRecord {
                 evidence.verified && !evidence.durable_observation_id.trim().is_empty()
             })
     }
+}
+
+fn isolation_control_name(control: IsolationControl) -> &'static str {
+    match control {
+        IsolationControl::RuntimeIdentity => "runtime_identity",
+        IsolationControl::TaskWorkspaceBoundary => "task_workspace_boundary",
+        IsolationControl::MountPolicy => "mount_policy",
+        IsolationControl::EgressPolicy => "egress_policy",
+        IsolationControl::ToolPermissions => "tool_permissions",
+        IsolationControl::StableSecretHandling => "stable_secret_handling",
+        IsolationControl::CancellationPropagation => "cancellation_propagation",
+        IsolationControl::RestartReconciliation => "restart_reconciliation",
+    }
+}
+
+/// Cross-bind the separate runtime observer signature to the already signed
+/// provider trust manifest. No operator boolean or partial control report can
+/// satisfy this comparison.
+fn verify_runtime_isolation_binding(
+    provider_id: &str,
+    registration: &ProviderTrustRecord,
+    runtime: &RuntimeIsolationAttestationSummary,
+    now: i64,
+) -> Result<(), String> {
+    let isolation = &registration.isolation;
+    if !isolation.provenance.authenticated || !isolation.all_verified() {
+        return Err("provider trust manifest does not contain authenticated eight-control isolation evidence".into());
+    }
+    if runtime.attestor_id == provider_id
+        || runtime.attestor_id == registration.adapter_id
+        || runtime.attestor_id == isolation.provenance.recorded_by_adapter_id
+    {
+        return Err("runtime isolation attestor identity is not independent from the provider/adapter".into());
+    }
+    if runtime.attestation_id != isolation.evidence_id
+        || runtime.provider_id != provider_id
+        || runtime.provider_registration_revision != registration.registration_revision
+        || runtime.provider_registration_revision != isolation.provider_registration_revision
+        || runtime.adapter_id != registration.adapter_id
+        || runtime.adapter_version != registration.adapter_version
+        || runtime.endpoint != registration.endpoint
+        || runtime.runtime_identity != isolation.runtime_identity
+        || runtime.source_observation_id != isolation.provenance.source_observation_id
+        || runtime.evidence_bundle_sha256 != isolation.provenance.evidence_sha256
+        || runtime.observed_at != isolation.checked_at
+        || runtime.expires_at != isolation.expires_at
+        || runtime.expires_at <= now
+        || runtime.observed_at > now
+    {
+        return Err(
+            "independent runtime attestation does not exactly match the signed provider isolation record"
+                .into(),
+        );
+    }
+    if runtime.checks.len() != IsolationControl::ALL.len() {
+        return Err("independent runtime attestation does not contain exactly eight control observations".into());
+    }
+    for control in IsolationControl::ALL {
+        let expected = isolation
+            .checks
+            .get(&control)
+            .ok_or_else(|| "signed provider isolation record is missing a required control".to_string())?;
+        let actual = runtime
+            .checks
+            .get(isolation_control_name(control))
+            .ok_or_else(|| "independent runtime attestation is missing a required control observation".to_string())?;
+        if !expected.verified || expected.durable_observation_id != *actual {
+            return Err(format!(
+                "runtime attestation observation for '{}' does not match the signed provider registration",
+                isolation_control_name(control)
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_provider_receipt_key(record: &ProviderTrustRecord) -> Result<(), String> {
@@ -373,6 +447,12 @@ impl Phase6ExecutionAuthority {
                 "live adapter '{provider_id}' does not match its signed registration"
             ));
         }
+        let runtime_attestation = adapter.runtime_isolation_attestation().ok_or_else(|| {
+            format!(
+                "provider '{provider_id}' has no independently signed runtime isolation attestation"
+            )
+        })?;
+        verify_runtime_isolation_binding(provider_id, &record, &runtime_attestation, now)?;
         Ok((manifest, record, version.to_owned()))
     }
 
