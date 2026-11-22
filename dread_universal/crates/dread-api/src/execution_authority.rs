@@ -1046,8 +1046,13 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
             .optional()
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "task not found".to_string())?;
-        let (mission_id, _approval_sequence) =
-            Self::approved_task(connection, &request.task_id, &request.requester_id, false, now)?;
+        let (mission_id, _approval_sequence) = Self::approved_task(
+            connection,
+            &request.task_id,
+            &request.requester_id,
+            false,
+            now,
+        )?;
 
         let capability_json: String = connection
             .query_row(
@@ -1064,7 +1069,8 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
             .ok_or_else(|| "agent capability has no provider adapter".to_string())?;
         let (manifest, registration, adapter_version) = self.registration(provider_id, now)?;
         validate_provider_receipt_key(&registration)?;
-        let actual_revision = Self::capability_revision(connection, &capability_id, provider_id, now)?;
+        let actual_revision =
+            Self::capability_revision(connection, &capability_id, provider_id, now)?;
         if registration.capability_id != capability_id
             || registration.capability_revision != actual_revision
             || registration.operation != AGENT_OPERATION
@@ -2283,8 +2289,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            Phase6ExecutionAuthority::approved_task(&connection, "task-1", "test-operator", false, 200)
-                .unwrap(),
+            Phase6ExecutionAuthority::approved_task(
+                &connection,
+                "task-1",
+                "test-operator",
+                false,
+                200
+            )
+            .unwrap(),
             (None, 7)
         );
         assert!(
@@ -2304,12 +2316,24 @@ mod tests {
             )
             .unwrap();
         assert!(
-            Phase6ExecutionAuthority::approved_task(&connection, "task-1", "test-operator", false, 200)
-                .is_err()
+            Phase6ExecutionAuthority::approved_task(
+                &connection,
+                "task-1",
+                "test-operator",
+                false,
+                200
+            )
+            .is_err()
         );
         assert!(
-            Phase6ExecutionAuthority::approved_task(&connection, "task-1", "test-operator", true, 200)
-                .is_ok()
+            Phase6ExecutionAuthority::approved_task(
+                &connection,
+                "task-1",
+                "test-operator",
+                true,
+                200
+            )
+            .is_ok()
         );
         assert!(
             Phase6ExecutionAuthority::approved_task(&connection, "task-1", "test-operator", true, 99)
@@ -2324,8 +2348,14 @@ mod tests {
             )
             .unwrap();
         assert!(
-            Phase6ExecutionAuthority::approved_task(&connection, "task-1", "test-operator", true, 200)
-                .is_err(),
+            Phase6ExecutionAuthority::approved_task(
+                &connection,
+                "task-1",
+                "test-operator",
+                true,
+                200
+            )
+            .is_err(),
             "current task approval reason must match the durable approval event"
         );
     }
