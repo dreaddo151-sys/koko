@@ -48,11 +48,18 @@ async function refreshAll() {
   catch (e) { document.getElementById("gpu-list").innerHTML = `<div class="item">${esc(e.message.split(" ")[0])} — telemetry unavailable</div>`; }
 
   try {
-    const [tasks, registry, services, usage, providers] = await Promise.all([
+    const [tasks, registry, services, usage, providers, skills] = await Promise.all([
       api("/api/tasks"), api("/api/registry"), api("/api/services"),
       api("/api/usage/tokens").catch(() => null),
       api("/api/providers").catch(() => null),
+      api("/api/skills").catch(() => null),
     ]);
+    document.getElementById("skill-list").innerHTML = skills
+      ? `Skills (${esc(skills.count ?? items(skills.skills).length)}): ` +
+        items(skills.skills).slice(0, 16).map((s) =>
+          `<span class="item-inline" title="${esc(s.description ?? "")}">${esc(s.name)}</span>`).join(" ") +
+        (items(skills.skills).length > 16 ? ` <span class="muted">+${skills.skills.length - 16} more</span>` : "")
+      : "";
     document.getElementById("provider-list").innerHTML = providers
       ? `Providers (${esc(providers.count ?? items(providers.providers).length)}): ` +
         items(providers.providers).map((p) =>
@@ -106,6 +113,8 @@ document.getElementById("btn-providers-sync").addEventListener("click",
   (ev) => hubAction(ev.target, () => api("/api/providers/sync", { method: "POST" })));
 document.getElementById("btn-models-autoconfig").addEventListener("click",
   (ev) => hubAction(ev.target, () => api("/api/models/autoconfigure", { method: "POST" })));
+document.getElementById("btn-skills-sync").addEventListener("click",
+  (ev) => hubAction(ev.target, () => api("/api/skills/sync", { method: "POST" })));
 
 document.getElementById("task-form").addEventListener("submit", async (e) => {
   e.preventDefault();

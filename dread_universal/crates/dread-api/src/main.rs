@@ -5545,12 +5545,25 @@ async fn skills_list(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
 
 async fn skills_sync(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let roots = skill_roots();
-    let (scanned, warnings) = skills::scan_skill_roots(&roots);
+    const MAX_ROOTS: usize = 64;
+    let (roots, mut warnings) = if roots.len() > MAX_ROOTS {
+        (
+            roots[..MAX_ROOTS].to_vec(),
+            vec![format!(
+                "too many roots configured ({}), using first {MAX_ROOTS}",
+                roots.len()
+            )],
+        )
+    } else {
+        (roots, Vec::new())
+    };
+    let (scanned, scan_warnings, ok_roots) = skills::scan_skill_roots(&roots);
+    warnings.extend(scan_warnings);
     let conn = db_lock(&state)?;
     let mut report = skills::register_skills(
         &conn,
         &scanned,
-        &roots,
+        &ok_roots,
         i64::try_from(now_epoch()).unwrap_or(i64::MAX),
     )
     .map_err(ApiError::internal)?;
