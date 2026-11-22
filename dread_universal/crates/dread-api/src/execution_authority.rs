@@ -958,8 +958,7 @@ mod tests {
         let (encoded, key) = signed_manifest(now);
         assert!(VerifiedExecutionTrustManifest::verify(&encoded, &key, now + 7200).is_err());
 
-        let mut envelope: SignedExecutionTrustEnvelope =
-            serde_json::from_slice(&encoded).unwrap();
+        let mut envelope: SignedExecutionTrustEnvelope = serde_json::from_slice(&encoded).unwrap();
         envelope.payload.providers[0]
             .isolation
             .network_egress_restricted = false;
