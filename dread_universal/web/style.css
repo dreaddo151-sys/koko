@@ -93,3 +93,12 @@ button:hover { border-color: var(--accent); }
 }
 .msg-user { color: var(--accent); margin-bottom: 0.5rem; }
 .msg-assistant { color: var(--text); margin-bottom: 0.85rem; }
+
+.item-inline {
+  display: inline-block;
+  padding: 2px 8px;
+  margin: 2px 4px 2px 0;
+  border: 1px solid var(--border, #333);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+}

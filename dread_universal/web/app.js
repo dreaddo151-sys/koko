@@ -48,10 +48,16 @@ async function refreshAll() {
   catch (e) { document.getElementById("gpu-list").innerHTML = `<div class="item">${esc(e.message.split(" ")[0])} — telemetry unavailable</div>`; }
 
   try {
-    const [tasks, registry, services, usage] = await Promise.all([
+    const [tasks, registry, services, usage, providers] = await Promise.all([
       api("/api/tasks"), api("/api/registry"), api("/api/services"),
       api("/api/usage/tokens").catch(() => null),
+      api("/api/providers").catch(() => null),
     ]);
+    document.getElementById("provider-list").innerHTML = providers
+      ? `Providers (${esc(providers.count ?? items(providers.providers).length)}): ` +
+        items(providers.providers).map((p) =>
+          `<span class="item-inline">${esc(p.name)} [${esc(String(p.kind || "").replace("provider.", ""))}]${p.metadata?.dropin_enabled === false ? " (disabled)" : ""}</span>`).join(" ") || "none registered"
+      : "";
     document.getElementById("token-usage").textContent = usage
       ? `Tokens — prompt: ${esc(usage.prompt_tokens ?? usage.total?.prompt ?? "--")} | completion: ${esc(usage.completion_tokens ?? usage.total?.completion ?? "--")} | total: ${esc(usage.total_tokens ?? usage.total?.total ?? "--")}`
       : "Token usage: no data";
@@ -86,6 +92,20 @@ document.getElementById("btn-discover").addEventListener("click", async () => {
   ]);
   refreshAll();
 });
+
+async function hubAction(btn, fn) {
+  const status = document.getElementById("sync-status");
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = "Working…"; status.textContent = "";
+  try { await fn(); status.textContent = "done " + new Date().toLocaleTimeString(); }
+  catch (e) { status.textContent = e.message.slice(0, 120); }
+  btn.disabled = false; btn.textContent = old;
+  refreshAll();
+}
+document.getElementById("btn-providers-sync").addEventListener("click",
+  (ev) => hubAction(ev.target, () => api("/api/providers/sync", { method: "POST" })));
+document.getElementById("btn-models-autoconfig").addEventListener("click",
+  (ev) => hubAction(ev.target, () => api("/api/models/autoconfigure", { method: "POST" })));
 
 document.getElementById("task-form").addEventListener("submit", async (e) => {
   e.preventDefault();
