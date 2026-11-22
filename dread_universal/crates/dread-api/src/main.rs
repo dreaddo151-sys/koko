@@ -6785,8 +6785,7 @@ mod tests {
             "http://127.0.0.1:8642/api"
         );
 
-        let deerflow_origin =
-            normalize_origin_runtime_endpoint("http://127.0.0.1:2026/").unwrap();
+        let deerflow_origin = normalize_origin_runtime_endpoint("http://127.0.0.1:2026/").unwrap();
         assert_eq!(
             format!("{deerflow_origin}/api"),
             "http://127.0.0.1:2026/api"
