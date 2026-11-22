@@ -3177,7 +3177,8 @@ fn persist_evidence(
         .query_row(
             "SELECT attempt_id, request_id, provider_id, adapter_id, adapter_version,
                 provider_registration_revision, provider_execution_id, evidence_kind,
-                verifier_id, source_reference, observed_at, expires_at
+                verifier_id, source_reference, observed_at, expires_at, receipt_key_id,
+                receipt_payload_json, receipt_signature_hex
          FROM dread_execution_evidence WHERE evidence_id = ?1",
             [&evidence.evidence_id],
             |row| {
@@ -3194,6 +3195,9 @@ fn persist_evidence(
                     row.get(9)?,
                     row.get(10)?,
                     row.get(11)?,
+                    row.get(12)?,
+                    row.get(13)?,
+                    row.get(14)?,
                 ))
             },
         )
@@ -3212,6 +3216,9 @@ fn persist_evidence(
             evidence.source_reference.clone(),
             evidence.observed_at,
             evidence.expires_at,
+            evidence.receipt.as_ref().map(|receipt| receipt.key_id.clone()),
+            evidence.receipt.as_ref().map(|receipt| receipt.payload_json.clone()),
+            evidence.receipt.as_ref().map(|receipt| receipt.signature_hex.clone()),
         );
         if existing == expected {
             return Ok(());
@@ -3224,8 +3231,9 @@ fn persist_evidence(
         "INSERT INTO dread_execution_evidence(
             evidence_id, attempt_id, request_id, provider_id, adapter_id, adapter_version,
             provider_registration_revision, provider_execution_id, evidence_kind,
-            verifier_id, source_reference, observed_at, expires_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            verifier_id, source_reference, observed_at, expires_at, receipt_key_id,
+            receipt_payload_json, receipt_signature_hex
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             evidence.evidence_id,
             attempt.attempt_id,
@@ -3239,7 +3247,10 @@ fn persist_evidence(
             evidence.verifier_id,
             evidence.source_reference,
             evidence.observed_at,
-            evidence.expires_at
+            evidence.expires_at,
+            evidence.receipt.as_ref().map(|receipt| receipt.key_id.as_str()),
+            evidence.receipt.as_ref().map(|receipt| receipt.payload_json.as_str()),
+            evidence.receipt.as_ref().map(|receipt| receipt.signature_hex.as_str())
         ],
     )?;
     Ok(())
@@ -3491,6 +3502,7 @@ mod tests {
             source_reference: format!("provider://receipts/{evidence_id}"),
             observed_at,
             expires_at: None,
+            receipt: None,
         }
     }
 
