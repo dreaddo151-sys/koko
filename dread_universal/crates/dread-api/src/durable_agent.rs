@@ -5,11 +5,12 @@
 //! transport outcome remains nonterminal and is left for reconciliation.
 
 use crate::{
-    AgentTaskExecution, AppState, TaskEvent, finish_agent_task,
+    AgentTaskExecution, AppState, TaskEvent,
     execution_authority::{
         agent_execution_identity, durable_agent_start_request, provider_event_from_adapter_receipt,
         provider_evidence_from_adapter_receipt,
     },
+    finish_agent_task,
 };
 use dread_agents::{AgentAdapter, AgentTaskState};
 use dread_orchestrator::persistence::{
@@ -1419,14 +1420,21 @@ mod durable_activation_tests {
             )
             .unwrap();
 
-        assert_eq!(unresolved_request_for_task(&connection, "task-missing").unwrap(), None);
+        assert_eq!(
+            unresolved_request_for_task(&connection, "task-missing").unwrap(),
+            None
+        );
         assert_eq!(unresolved_request_for_task(&connection, "task-1").unwrap(), None);
         assert_eq!(
-            unresolved_request_for_task(&connection, "task-2").unwrap().as_deref(),
+            unresolved_request_for_task(&connection, "task-2")
+                .unwrap()
+                .as_deref(),
             Some("request-dispatching")
         );
         assert_eq!(
-            unresolved_request_for_task(&connection, "task-3").unwrap().as_deref(),
+            unresolved_request_for_task(&connection, "task-3")
+                .unwrap()
+                .as_deref(),
             Some("request-cancel-unknown")
         );
     }
