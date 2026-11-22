@@ -244,6 +244,7 @@ dependencies = [
  "dread-skills",
  "futures",
  "reqwest",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",
