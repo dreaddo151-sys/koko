@@ -293,6 +293,7 @@ dependencies = [
 name = "dread-orchestrator"
 version = "0.4.0"
 dependencies = [
+ "rusqlite",
  "serde",
  "serde_json",
  "tokio",
