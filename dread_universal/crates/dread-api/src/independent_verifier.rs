@@ -148,7 +148,9 @@ impl IndependentResultVerifier {
             )
             .optional()
             .map_err(|error| error.to_string())?
-            .ok_or_else(|| "durable admission requester is unavailable for verification".to_string())?;
+            .ok_or_else(|| {
+                "durable admission requester is unavailable for verification".to_string()
+            })?;
         let provider_verifier_id: String = connection
             .query_row(
                 "SELECT verifier_id FROM dread_execution_evidence
@@ -189,8 +191,16 @@ impl IndependentResultVerifier {
                     .into(),
             );
         }
-        validate_text("independent verification evidence ID", &receipt.evidence_id, 1024)?;
-        validate_text("independent verifier source", &receipt.source_reference, 2048)?;
+        validate_text(
+            "independent verification evidence ID",
+            &receipt.evidence_id,
+            1024,
+        )?;
+        validate_text(
+            "independent verifier source",
+            &receipt.source_reference,
+            2048,
+        )?;
         if receipt.observed_at <= 0
             || receipt.observed_at > now
             || receipt.expires_at <= now
@@ -231,7 +241,9 @@ impl IndependentResultVerifier {
                     .observed_at
                     .saturating_add(MAX_HEARTBEAT_LIFETIME_SECONDS)
         {
-            return Err("independent verifier heartbeat is expired, future-dated or invalid".into());
+            return Err(
+                "independent verifier heartbeat is expired, future-dated or invalid".into(),
+            );
         }
         Ok(heartbeat)
     }
@@ -246,14 +258,20 @@ impl IndependentResultVerifier {
         let envelope: SignedEnvelope<T> = serde_json::from_slice(&encoded)
             .map_err(|error| format!("independent verifier receipt JSON is invalid: {error}"))?;
         if envelope.key_id != self.key_id {
-            return Err("independent verifier receipt key ID does not match the configured trust anchor".into());
+            return Err(
+                "independent verifier receipt key ID does not match the configured trust anchor"
+                    .into(),
+            );
         }
         let signature_bytes = decode_hex(&envelope.signature_hex)?;
         if signature_bytes.len() != 64 {
-            return Err("independent verifier Ed25519 signature must be exactly 64 bytes".into());
+            return Err(
+                "independent verifier Ed25519 signature must be exactly 64 bytes".into(),
+            );
         }
-        let payload_bytes = serde_json::to_vec(&envelope.payload)
-            .map_err(|error| format!("cannot canonicalize independent verifier payload: {error}"))?;
+        let payload_bytes = serde_json::to_vec(&envelope.payload).map_err(|error| {
+            format!("cannot canonicalize independent verifier payload: {error}")
+        })?;
         signature::UnparsedPublicKey::new(&signature::ED25519, &self.public_key)
             .verify(&payload_bytes, &signature_bytes)
             .map_err(|_| "independent verifier receipt signature is invalid".to_string())?;
@@ -262,16 +280,22 @@ impl IndependentResultVerifier {
 }
 
 fn validate_secure_directory(path: &Path) -> Result<(), String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("cannot inspect independent verifier receipt directory: {error}"))?;
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        format!("cannot inspect independent verifier receipt directory: {error}")
+    })?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err("independent verifier receipt path must be a regular non-symlink directory".into());
+        return Err(
+            "independent verifier receipt path must be a regular non-symlink directory".into(),
+        );
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         if metadata.permissions().mode() & 0o077 != 0 {
-            return Err("independent verifier receipt directory must be owner-only (0700 or stricter)".into());
+            return Err(
+                "independent verifier receipt directory must be owner-only (0700 or stricter)"
+                    .into(),
+            );
         }
     }
     Ok(())
@@ -285,13 +309,18 @@ fn validate_secure_receipt_file(path: &Path) -> Result<(), String> {
         || metadata.len() == 0
         || metadata.len() > MAX_RECEIPT_BYTES
     {
-        return Err("independent verifier receipt must be a regular non-symlink file no larger than 64 KiB".into());
+        return Err(
+            "independent verifier receipt must be a regular non-symlink file no larger than 64 KiB"
+                .into(),
+        );
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         if metadata.permissions().mode() & 0o077 != 0 {
-            return Err("independent verifier receipts must be owner-only (0600 or stricter)".into());
+            return Err(
+                "independent verifier receipts must be owner-only (0600 or stricter)".into(),
+            );
         }
     }
     Ok(())
@@ -311,7 +340,9 @@ fn validate_safe_id(name: &str, value: &str) -> Result<(), String> {
 
 fn validate_text(name: &str, value: &str, max: usize) -> Result<(), String> {
     if value.trim().is_empty() || value.len() > max || value.chars().any(char::is_control) {
-        return Err(format!("{name} is empty, too long or contains control characters"));
+        return Err(format!(
+            "{name} is empty, too long or contains control characters"
+        ));
     }
     Ok(())
 }
@@ -335,8 +366,10 @@ fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
                 b'A'..=b'F' => Some(byte - b'A' + 10),
                 _ => None,
             };
-            let high = digit(pair[0]).ok_or_else(|| "hex value contains a non-hex digit".to_string())?;
-            let low = digit(pair[1]).ok_or_else(|| "hex value contains a non-hex digit".to_string())?;
+            let high =
+                digit(pair[0]).ok_or_else(|| "hex value contains a non-hex digit".to_string())?;
+            let low =
+                digit(pair[1]).ok_or_else(|| "hex value contains a non-hex digit".to_string())?;
             Ok((high << 4) | low)
         })
         .collect()
@@ -356,7 +389,10 @@ fn hex_encode(value: &[u8]) -> String {
 mod tests {
     use super::*;
     use ring::signature::{Ed25519KeyPair, KeyPair};
-    use std::{os::unix::fs::PermissionsExt, time::{SystemTime, UNIX_EPOCH}};
+    use std::{
+        os::unix::fs::PermissionsExt,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     fn signed<T: Serialize>(key: &Ed25519KeyPair, key_id: &str, payload: &T) -> String {
         let bytes = serde_json::to_vec(payload).unwrap();
@@ -373,7 +409,10 @@ mod tests {
         let id = format!(
             "dread-verifier-test-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         );
         let path = env::temp_dir().join(id);
         fs::create_dir(&path).unwrap();
@@ -411,7 +450,10 @@ mod tests {
             &signed(&key, &verifier.key_id, &heartbeat),
         );
         assert_eq!(verifier.status(1_800_000_020)["status"], "verified");
-        assert_eq!(verifier.status(1_800_000_061)["status"], "configured_unavailable");
+        assert_eq!(
+            verifier.status(1_800_000_061)["status"],
+            "configured_unavailable"
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -498,7 +540,13 @@ mod tests {
         assert_eq!(facts.result_json.as_deref(), Some(result));
         assert!(
             verifier
-                .verify_result(&connection, &attempt, Some(r#"{"ok":false}"#), None, now + 1)
+                .verify_result(
+                    &connection,
+                    &attempt,
+                    Some(r#"{"ok":false}"#),
+                    None,
+                    now + 1
+                )
                 .is_err()
         );
         fs::remove_dir_all(dir).unwrap();
