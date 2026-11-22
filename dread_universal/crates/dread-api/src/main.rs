@@ -5660,10 +5660,9 @@ async fn main() -> anyhow::Result<()> {
         .await
         .map_err(|error| anyhow::anyhow!("Durable provider startup recovery failed: {error}"))?;
     let startup_dispatch_barrier_open = {
-        let connection = state
-            .db
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Database lock is unavailable during dispatch gate evaluation"))?;
+        let connection = state.db.lock().map_err(|_| {
+            anyhow::anyhow!("Database lock is unavailable during dispatch gate evaluation")
+        })?;
         dread_orchestrator::persistence::startup_dispatch_barrier_is_open(&connection)?
     };
     if !startup_dispatch_barrier_open {
@@ -5674,8 +5673,9 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     let resumed_durable_tasks = if startup_dispatch_barrier_open {
-        durable_agent::resume_queued_durable_agents(&state)
-            .map_err(|error| anyhow::anyhow!("Could not resume queued durable provider tasks: {error}"))?
+        durable_agent::resume_queued_durable_agents(&state).map_err(|error| {
+            anyhow::anyhow!("Could not resume queued durable provider tasks: {error}")
+        })?
     } else {
         0
     };
