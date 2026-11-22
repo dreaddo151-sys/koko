@@ -4,7 +4,10 @@
 //! Type, size and caller-specific ownership/mode policy are then checked on
 //! the opened descriptor, not on a path that can be swapped between checks.
 
-use std::{fs, io::Read, path::Path};
+use std::{fs, path::Path};
+
+#[cfg(unix)]
+use std::io::Read;
 
 pub(crate) struct OpenedRegularFile {
     pub(crate) bytes: Vec<u8>,
@@ -54,10 +57,15 @@ pub(crate) fn read_regular_file_no_follow(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::{fs, os::unix::fs::symlink, path::PathBuf, time::UNIX_EPOCH};
+    use std::{
+        fs,
+        os::unix::fs::symlink,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     fn temp_dir() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
