@@ -196,7 +196,8 @@ impl OpenHandsAgentServerAdapter {
     ) -> Result<Self, AgentAdapterError> {
         if attestation.provider_id() != "openhands"
             || attestation.adapter_id() != self.descriptor.adapter
-            || attestation.adapter_version() != self.descriptor.version.as_deref().unwrap_or_default()
+            || attestation.adapter_version()
+                != self.descriptor.version.as_deref().unwrap_or_default()
             || attestation.endpoint() != self.descriptor.endpoint.as_deref().unwrap_or_default()
             || attestation.sandbox_backend() != "docker"
         {
