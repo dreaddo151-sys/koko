@@ -1,3 +1,7 @@
+use crate::runtime_attestation::{
+    RuntimeIsolationAttestationSummary, RuntimeIsolationControl,
+    VerifiedRuntimeIsolationAttestation,
+};
 //! DeerFlow Gateway API adapter.
 //!
 //! This adapter uses the documented thread-scoped API, PAT bearer auth,
@@ -36,6 +40,7 @@ pub struct DeerFlowApiAdapter {
     pat: String,
     sandbox_attested: bool,
     receipt_signer: Option<AgentReceiptSigner>,
+    runtime_attestation: Option<RuntimeIsolationAttestationSummary>,
 }
 
 impl DeerFlowApiAdapter {
@@ -124,6 +129,7 @@ impl DeerFlowApiAdapter {
             pat,
             sandbox_attested: false,
             receipt_signer: None,
+            runtime_attestation: None,
         })
     }
 
@@ -139,7 +145,7 @@ impl DeerFlowApiAdapter {
     /// DeerFlow config uses a container-backed provider and one isolated
     /// thread workspace per DREAD task. This is an explicit attestation, not
     /// an automatic remote config probe.
-    pub fn attest_container_sandbox(
+    pub(crate) fn attest_container_sandbox(
         mut self,
         provider_class: &str,
         isolated_workspace_per_task: bool,
@@ -279,6 +285,10 @@ impl DeerFlowApiAdapter {
 impl AgentAdapter for DeerFlowApiAdapter {
     fn descriptor(&self) -> &AgentDescriptor {
         &self.descriptor
+    }
+
+    fn runtime_isolation_attestation(&self) -> Option<RuntimeIsolationAttestationSummary> {
+        self.runtime_attestation.clone()
     }
 
     fn health<'a>(&'a self) -> AdapterFuture<'a, AgentHealth> {
