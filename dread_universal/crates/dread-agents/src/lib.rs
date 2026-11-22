@@ -406,7 +406,7 @@ fn encode_receipt_hex(value: &[u8]) -> String {
     encoded
 }
 
-fn durable_evidence_error(message: &str) -> AgentAdapterError {
+pub fn durable_evidence_error(message: &str) -> AgentAdapterError {
     AgentAdapterError {
         code: "durable_evidence_invalid".into(),
         message: message.into(),
