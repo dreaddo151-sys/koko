@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Activity, AlertCircle, Bot, Check, ChevronRight, Cpu, FolderSearch, Gauge, KeyRound, Layers3, LockKeyhole, LogOut, MessageSquare, Play, Plus, Radio, RefreshCw, Search, Server, ShieldCheck, TerminalSquare, X, Zap, Workflow } from "lucide-react";
+import { Activity, AlertCircle, Bot, Check, ChevronRight, Cpu, FolderSearch, Gauge, KeyRound, Layers3, LockKeyhole, LogOut, MessageSquare, Play, Plus, Radio, RefreshCw, Search, Server, ShieldAlert, ShieldCheck, TerminalSquare, X, Zap, Workflow } from "lucide-react";
+import RepairPanel from "./RepairPanel";
 
 type Model = { id: string };
 type Task = { id: string; title: string; task_type: string; status: string; created_at: number };
@@ -30,7 +31,7 @@ type AgentManifest = { id: string; name: string; adapter: string; health_url: st
 type RepairFinding = { component_id: string; severity: string; condition: string; observed_state: string; evidence: string; recommended_action: string; requires_operator_approval: boolean; auto_apply_eligible: boolean; status: string };
 type RepairPlan = { status: string; checked_components: number; findings: RepairFinding[]; summary: string; safety_boundary: string };
 type ComfyUiMonitor = { status: string; endpoint: string; queue: {status:string;data?:{running_count:number;pending_count:number;running:{prompt_id:string}[];pending:{prompt_id:string}[]}|null;error?:string|null}; history: {status:string;data?:{prompt_id:string;status:string;completed:boolean;outputs:{filename:string;media_type:string}[];errors:{event_type:string;message?:string|null}[]}[]|null;error?:string|null}; system: {status:string;error?:string|null} };
-type Page = "overview" | "missions" | "tasks" | "agents" | "capabilities" | "models" | "gpu" | "inventory";
+type Page = "overview" | "missions" | "tasks" | "agents" | "capabilities" | "models" | "gpu" | "inventory" | "repair";
 
 async function api<T>(path: string, token: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
@@ -331,7 +332,7 @@ function App() {
     finally{setBusy(false);}
   };
   const nav:[Page,string,ReactNode,string][]=[
-    ["overview","Command deck",<Activity/>,"01"],["gpu","GPU telemetry",<Gauge/>,"02"],["models","Model arsenal",<Layers3/>,"03"],["agents","Agent network",<Bot/>,"04"],["missions","Mission DAG",<Workflow/>,"05"],["tasks","Task queue",<Workflow/>,"06"],["capabilities","Pstack registry",<ShieldCheck/>,"07"],["inventory","Local inventory",<FolderSearch/>,"08"]
+    ["overview","Command deck",<Activity/>,"01"],["gpu","GPU telemetry",<Gauge/>,"02"],["models","Model arsenal",<Layers3/>,"03"],["agents","Agent network",<Bot/>,"04"],["missions","Mission DAG",<Workflow/>,"05"],["tasks","Task queue",<Workflow/>,"06"],["capabilities","Pstack registry",<ShieldCheck/>,"07"],["inventory","Local inventory",<FolderSearch/>,"08"],["repair","Self-repair",<ShieldAlert/>,"09"]
   ];
   return <div className="shell">
     <aside className="sidebar">
@@ -386,6 +387,7 @@ function App() {
         </>}
         {page==="models"&&<section className="panel"><PanelTitle icon={<Layers3/>} title="LOCAL MODEL ARSENAL" meta={`${models.length} DISCOVERED`}/>{models.length?models.map(x=><div className="row" key={x.id}><div><b>{x.id}</b><small>Discovered from local GPU gateway</small></div><Pill value="AVAILABLE"/></div>):<Empty text="No models returned by the local GPU gateway. Confirm gateway and upstream model service status."/>}</section>}
 
+        {page==="repair"&&<RepairPanel token={token}/>}
         {page==="inventory"&&<div className="command-grid">
           <section className="panel">
             <div className="panel-toolbar"><PanelTitle icon={<FolderSearch/>} title="LOCAL MODEL FILES" meta={String(localModels.length)+" CANDIDATES"}/><button className="secondary" disabled={!token||inventoryBusy} onClick={()=>void refreshInventory()}><RefreshCw size={14}/>REFRESH INVENTORY</button></div>
