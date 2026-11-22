@@ -1,3 +1,5 @@
+mod execution_authority;
+
 use axum::{
     Json, Router,
     body::Body,
@@ -55,6 +57,7 @@ struct AppState {
     events: broadcast::Sender<TaskEvent>,
     execution: ExecutionGate,
     agent_adapters: Arc<HashMap<String, Arc<dyn AgentAdapter>>>,
+    execution_authority: Option<Arc<execution_authority::Phase6ExecutionAuthority>>,
     cancellations: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     api_token: Option<String>,
     operator_id: String,
@@ -5303,6 +5306,7 @@ fn app(state: AppState) -> Router {
             get(discover_agent_manifest_inventory),
         )
         .route("/api/agent-adapters", get(agent_adapter_registry))
+        .route("/api/execution/trust", get(execution_trust_status))
         .route(
             "/api/capabilities",
             get(list_capabilities).post(create_capability),
@@ -5350,6 +5354,22 @@ fn app(state: AppState) -> Router {
         .merge(protected)
         .fallback(static_asset)
         .with_state(state)
+}
+
+async fn execution_trust_status(State(state): State<AppState>) -> Json<Value> {
+    let now = i64::try_from(now_epoch()).unwrap_or(i64::MAX);
+    match state.execution_authority.as_ref() {
+        Some(authority) => Json(authority.status(now)),
+        None => Json(json!({
+            "status": "not_configured",
+            "dispatch": "blocked",
+            "required_environment": [
+                "DREAD_EXECUTION_TRUST_MANIFEST",
+                "DREAD_EXECUTION_TRUST_PUBLIC_KEY_HEX"
+            ],
+            "independent_result_verification": "not_configured_fail_closed"
+        })),
+    }
 }
 
 fn validate_bind_address(addr: SocketAddr) -> anyhow::Result<()> {
@@ -5487,6 +5507,14 @@ async fn main() -> anyhow::Result<()> {
     }
     let db = open_database(&db_path)?;
     let agent_adapters = Arc::new(load_agent_adapters_from_env()?);
+    let execution_authority = execution_authority::load_from_env(
+        agent_adapters.clone(),
+        i64::try_from(now_epoch()).unwrap_or(i64::MAX),
+    )
+    .map_err(|error| anyhow::anyhow!("Invalid DREAD execution trust configuration: {error}"))?;
+    if execution_authority.is_none() {
+        warn!("Signed provider trust manifest is not configured; durable provider dispatch remains unavailable");
+    }
     let (events, _) = broadcast::channel(256);
     let (execution_config, resource_limits) = execution_settings_from_env()?;
     let state = AppState {
@@ -5497,6 +5525,7 @@ async fn main() -> anyhow::Result<()> {
         execution: ExecutionGate::new_with_resource_limits(execution_config, resource_limits)
             .map_err(|error| anyhow::anyhow!("Invalid execution configuration: {error:?}"))?,
         agent_adapters,
+        execution_authority,
         cancellations: Arc::new(Mutex::new(HashMap::new())),
         api_token,
         operator_id,
@@ -5751,7 +5780,9 @@ mod tests {
             supervisor: None,
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
-            agent_adapters: Arc::new(adapters),
+            agent_adapters: __MATCH__,
+
+            execution_authority: None,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             api_token: Some("test-token".into()),
             operator_id: "test-operator".into(),
@@ -5940,7 +5971,9 @@ mod tests {
             supervisor: None,
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
-            agent_adapters: Arc::new(adapters),
+            agent_adapters: __MATCH__,
+
+            execution_authority: None,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             api_token: Some("test-token".into()),
             operator_id: "test-operator".into(),
@@ -6032,7 +6065,9 @@ mod tests {
             supervisor: None,
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
-            agent_adapters: Arc::new(adapters),
+            agent_adapters: __MATCH__,
+
+            execution_authority: None,
             cancellations,
             api_token: Some("test-token".into()),
             operator_id: "test-operator".into(),
@@ -6231,7 +6266,9 @@ mod tests {
             supervisor: None,
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
-            agent_adapters: Arc::new(adapters),
+            agent_adapters: __MATCH__,
+
+            execution_authority: None,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             api_token: Some("test-token".into()),
             operator_id: "test-operator".into(),
@@ -6449,7 +6486,9 @@ mod tests {
                 ),
                 events,
                 execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
-                agent_adapters: Arc::new(HashMap::new()),
+                agent_adapters: __MATCH__,
+
+                execution_authority: None,
                 cancellations: Arc::new(Mutex::new(HashMap::new())),
                 api_token,
                 operator_id: "test-operator".to_string(),
@@ -6766,7 +6805,9 @@ mod tests {
             supervisor: None,
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
-            agent_adapters: Arc::new(adapters),
+            agent_adapters: __MATCH__,
+
+            execution_authority: None,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             api_token: Some("test-token".to_string()),
             operator_id: "test-operator".to_string(),
@@ -6897,7 +6938,9 @@ mod tests {
             supervisor: None,
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
-            agent_adapters: Arc::new(adapters),
+            agent_adapters: __MATCH__,
+
+            execution_authority: None,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             api_token: Some("test-token".into()),
             operator_id: "test-operator".into(),
@@ -7419,7 +7462,9 @@ mod tests {
             supervisor: None,
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
-            agent_adapters: Arc::new(HashMap::new()),
+            agent_adapters: __MATCH__,
+
+            execution_authority: None,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             api_token: Some("test-token".into()),
             operator_id: "test-operator".into(),
@@ -9278,7 +9323,9 @@ mod tests {
             supervisor: None,
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
-            agent_adapters: Arc::new(HashMap::new()),
+            agent_adapters: __MATCH__,
+
+            execution_authority: None,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             api_token: Some("test-token".into()),
             operator_id: "test-operator".into(),
