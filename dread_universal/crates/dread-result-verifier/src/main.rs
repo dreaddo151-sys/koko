@@ -379,7 +379,9 @@ fn validate_shared_output_file(
         || metadata.len() == 0
         || metadata.len() > 64 * 1024
     {
-        return Err("existing verifier output is not a regular file within the 64 KiB limit".into());
+        return Err(
+            "existing verifier output is not a regular file within the 64 KiB limit".into(),
+        );
     }
     #[cfg(unix)]
     {
@@ -461,8 +463,8 @@ fn acquire_process_lock(receipt_dir: &Path) -> Result<ProcessLock, String> {
 }
 
 fn require_private_file_owner(path: &Path, expected_uid: u32, name: &str) -> Result<(), String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("cannot inspect {name}: {error}"))?;
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| format!("cannot inspect {name}: {error}"))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(format!("{name} must be a regular non-symlink file"));
     }
@@ -470,7 +472,9 @@ fn require_private_file_owner(path: &Path, expected_uid: u32, name: &str) -> Res
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         if metadata.uid() != expected_uid || metadata.permissions().mode() & 0o077 != 0 {
-            return Err(format!("{name} must be owned by the verifier UID and use mode 0600"));
+            return Err(format!(
+                "{name} must be owned by the verifier UID and use mode 0600"
+            ));
         }
     }
     #[cfg(not(unix))]
@@ -865,7 +869,14 @@ fn publish_result_receipt(
         return Ok(false);
     }
     let bytes = sign_payload(keypair, key_id, receipt)?;
-    atomic_publish(receipt_dir, &filename, &bytes, true, receipt_uid, receipt_gid)?;
+    atomic_publish(
+        receipt_dir,
+        &filename,
+        &bytes,
+        true,
+        receipt_uid,
+        receipt_gid,
+    )?;
     Ok(true)
 }
 
