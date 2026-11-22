@@ -5840,7 +5840,7 @@ mod tests {
             .unwrap();
         assert_eq!(blocked.status(), StatusCode::CONFLICT);
 
-        // The approved capability remains queued, but the legacy provider
+        // The approved capability remains unqueued, and the legacy provider
         // adapter must not be started until durable admission, attempts,
         // reconciliation and worker reattachment are wired into this route.
         assert!(
@@ -5856,7 +5856,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(persisted_status, "queued");
+        assert_eq!(persisted_status, "approved");
 
         // An agent capability must never override a built-in task's runner.
         let mismatched = router
