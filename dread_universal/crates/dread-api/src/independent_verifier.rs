@@ -97,11 +97,15 @@ impl IndependentResultVerifier {
         let receipt_uid = receipt_uid
             .expect("presence checked")
             .parse::<u32>()
-            .map_err(|_| "independent verifier receipt UID must be a numeric Unix UID".to_string())?;
+            .map_err(|_| {
+                "independent verifier receipt UID must be a numeric Unix UID".to_string()
+            })?;
         let receipt_gid = receipt_gid
             .expect("presence checked")
             .parse::<u32>()
-            .map_err(|_| "independent verifier receipt GID must be a numeric Unix GID".to_string())?;
+            .map_err(|_| {
+                "independent verifier receipt GID must be a numeric Unix GID".to_string()
+            })?;
         validate_secure_directory(&receipt_dir, receipt_uid, receipt_gid)?;
         let verifier_id = verifier_id.expect("presence checked");
         let key_id = key_id.expect("presence checked");
@@ -309,7 +313,9 @@ fn validate_secure_directory(
         format!("cannot inspect independent verifier receipt directory: {error}")
     })?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err("independent verifier receipt path must be a regular non-symlink directory".into());
+        return Err(
+            "independent verifier receipt path must be a regular non-symlink directory".into(),
+        );
     }
     #[cfg(unix)]
     {
@@ -354,9 +360,7 @@ fn validate_secure_receipt_file(
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let mode = metadata.permissions().mode();
-        if metadata.uid() != expected_uid
-            || metadata.gid() != expected_gid
-            || mode & 0o777 != 0o640
+        if metadata.uid() != expected_uid || metadata.gid() != expected_gid || mode & 0o777 != 0o640
         {
             return Err(
                 "receipt files must be verifier-owned, use the configured shared GID, and have mode 0640 (verifier read/write, API group read-only, no other access)"
