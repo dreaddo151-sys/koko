@@ -12,7 +12,7 @@ use ring::{
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     collections::BTreeMap,
     env, fs,
@@ -314,13 +314,27 @@ fn sync_directory(path: &Path) -> Result<(), String> {
 /// Publish complete bytes atomically. Existing symlinks and non-regular files
 /// are never followed or replaced. The process lock prevents competing
 /// verifier instances from racing this writer.
+fn validate_safe_filename(filename: &str) -> Result<(), String> {
+    if filename.is_empty()
+        || filename.len() > 200
+        || filename == "."
+        || filename == ".."
+        || !filename.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')
+        })
+    {
+        return Err("verifier output filename contains invalid characters".into());
+    }
+    Ok(())
+}
+
 fn atomic_publish(
     directory: &Path,
     filename: &str,
     bytes: &[u8],
     allow_replace: bool,
 ) -> Result<(), String> {
-    validate_safe_component("receipt filename", filename, 200)?;
+    validate_safe_filename(filename)?;
     let destination = directory.join(filename);
     let temporary = directory.join(format!(
         ".{filename}.tmp.{}.{}",
@@ -835,23 +849,6 @@ fn check_public_key_environment(keypair: &Ed25519KeyPair) -> Result<(), String> 
     Ok(())
 }
 
-fn run_once(config: &VerifierConfig) -> Result<(usize, usize), String> {
-    let _lock = acquire_process_lock(&config.receipt_dir)?;
-    let keypair = load_private_key(&config.private_key_path)?;
-    check_public_key_environment(&keypair)?;
-    let (policy, policy_digest) = load_policy(&config.policy_path)?;
-    let connection = open_read_only_database(&config.database_path)?;
-    let counts = run_cycle(
-        &connection,
-        &config.receipt_dir,
-        &config.verifier_id,
-        &config.key_id,
-        &keypair,
-        &policy,
-        &policy_digest,
-    )?;
-    Ok(counts)
-}
 
 fn run_daemon(config: VerifierConfig, once: bool) -> Result<(), String> {
     let _lock = acquire_process_lock(&config.receipt_dir)?;
@@ -978,7 +975,7 @@ fn run_cli() -> Result<(), String> {
 mod tests {
     use super::*;
     use ring::signature::KeyPair;
-    use std::{os::unix::fs::PermissionsExt, time::SystemTime};
+    use std::os::unix::fs::PermissionsExt;
 
     fn keypair() -> Ed25519KeyPair {
         let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
@@ -1105,7 +1102,7 @@ mod tests {
     fn pending_query_reads_only_provider_succeeded_rows_and_canonical_identity() {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(
-            "CREATE TABLE dread_task_attempts (
+            r#"CREATE TABLE dread_task_attempts (
                 request_id TEXT, attempt_id TEXT, task_id TEXT, worker_id TEXT,
                 provider_id TEXT, capability_id TEXT, provider_result_json TEXT,
                 provider_error TEXT, dispatch_state TEXT, dispatched_at INTEGER
@@ -1116,10 +1113,10 @@ mod tests {
                 verifier_id TEXT, observed_at INTEGER
              );
              INSERT INTO dread_task_attempts VALUES
-                ('request-1','attempt-1','task-1','worker-1','hermes','hermes.run','{""result"":42}',NULL,'provider_succeeded',10),
-                ('request-2','attempt-2','task-2','worker-2','hermes','hermes.run','{""result"":42}',NULL,'running',11);
+                ('request-1','attempt-1','task-1','worker-1','hermes','hermes.run','{"result":42}',NULL,'provider_succeeded',10),
+                ('request-2','attempt-2','task-2','worker-2','hermes','hermes.run','{"result":42}',NULL,'running',11);
              INSERT INTO dread_dispatch_admissions VALUES ('request-1','operator-1'),('request-2','operator-2');
-             INSERT INTO dread_execution_evidence VALUES ('evidence-1','attempt-1','succeeded','dread-adapter-receipt:hermes',10);"
+             INSERT INTO dread_execution_evidence VALUES ('evidence-1','attempt-1','succeeded','dread-adapter-receipt:hermes',10);"#
         ).unwrap();
         let pending = load_pending_attempts(&connection).unwrap();
         assert_eq!(pending.len(), 1);
