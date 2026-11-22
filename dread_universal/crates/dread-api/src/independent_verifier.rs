@@ -512,8 +512,15 @@ mod tests {
         connection.execute_batch(
             "CREATE TABLE dread_dispatch_admissions(request_id TEXT, requester_id TEXT);
              INSERT INTO dread_dispatch_admissions VALUES ('request-1', 'operator-1');
-             CREATE TABLE dread_execution_evidence(attempt_id TEXT, evidence_kind TEXT, verifier_id TEXT);
-             INSERT INTO dread_execution_evidence VALUES ('attempt-1', 'succeeded', 'dread-adapter-receipt:hermes');"
+             CREATE TABLE dread_execution_evidence(
+                 evidence_id TEXT,
+                 attempt_id TEXT,
+                 evidence_kind TEXT,
+                 verifier_id TEXT,
+                 observed_at INTEGER
+             );
+             INSERT INTO dread_execution_evidence
+                 VALUES ('provider-success-1', 'attempt-1', 'succeeded', 'dread-adapter-receipt:hermes', 1800000000);"
         ).unwrap();
         let attempt = AttemptRecord {
             attempt_id: "attempt-1".into(),
