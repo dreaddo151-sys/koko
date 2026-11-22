@@ -611,7 +611,10 @@ fn validate_policy(policy: &VerificationPolicy) -> Result<(), String> {
             ));
         }
         if seen_rule_ids.insert(rule.rule_id.as_str(), ()).is_some() {
-            return Err(format!("policy contains duplicate rule ID {}", rule.rule_id));
+            return Err(format!(
+                "policy contains duplicate rule ID {}",
+                rule.rule_id
+            ));
         }
     }
     Ok(())
