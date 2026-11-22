@@ -230,17 +230,13 @@ impl IndependentResultVerifier {
             &receipt.source_reference,
             2048,
         )?;
-        if receipt.observed_at <= 0
-            || receipt.observed_at > now
-            || receipt.expires_at <= now
-            || receipt.expires_at <= receipt.observed_at
-            || receipt.expires_at
-                > receipt
-                    .observed_at
-                    .saturating_add(MAX_RESULT_RECEIPT_LIFETIME_SECONDS)
-        {
-            return Err("independent verification receipt is future-dated, expired or outside its lifetime bound".into());
-        }
+        validate_signed_time_window(
+            "independent verification receipt",
+            receipt.observed_at,
+            receipt.expires_at,
+            now,
+            MAX_RESULT_RECEIPT_LIFETIME_SECONDS,
+        )?;
 
         Ok(VerificationFacts {
             evidence_id: receipt.evidence_id,
@@ -259,21 +255,16 @@ impl IndependentResultVerifier {
     fn read_heartbeat(&self, now: i64) -> Result<VerifierHeartbeat, String> {
         let path = self.receipt_dir.join(".dread-verifier-ready.json");
         let heartbeat: VerifierHeartbeat = self.read_signed_payload(&path)?;
-        if heartbeat.schema_version != 1
-            || heartbeat.verifier_id != self.verifier_id
-            || heartbeat.observed_at <= 0
-            || heartbeat.observed_at > now
-            || heartbeat.expires_at <= now
-            || heartbeat.expires_at <= heartbeat.observed_at
-            || heartbeat.expires_at
-                > heartbeat
-                    .observed_at
-                    .saturating_add(MAX_HEARTBEAT_LIFETIME_SECONDS)
-        {
-            return Err(
-                "independent verifier heartbeat is expired, future-dated or invalid".into(),
-            );
+        if heartbeat.schema_version != 1 || heartbeat.verifier_id != self.verifier_id {
+            return Err("independent verifier heartbeat identity or schema is invalid".into());
         }
+        validate_signed_time_window(
+            "independent verifier heartbeat",
+            heartbeat.observed_at,
+            heartbeat.expires_at,
+            now,
+            MAX_HEARTBEAT_LIFETIME_SECONDS,
+        )?;
         Ok(heartbeat)
     }
 
@@ -316,6 +307,27 @@ impl IndependentResultVerifier {
             .map_err(|_| "independent verifier receipt signature is invalid".to_string())?;
         Ok(envelope.payload)
     }
+}
+
+/// Enforce one consistent freshness contract for independently signed
+/// receipts and heartbeats. The maximum lifetime is measured from the signed
+/// observation time, not from the API's read time.
+fn validate_signed_time_window(
+    label: &str,
+    observed_at: i64,
+    expires_at: i64,
+    now: i64,
+    max_lifetime_seconds: i64,
+) -> Result<(), String> {
+    if observed_at <= 0
+        || observed_at > now
+        || expires_at <= now
+        || expires_at <= observed_at
+        || expires_at > observed_at.saturating_add(max_lifetime_seconds)
+    {
+        return Err(format!("{label} is future-dated, expired or outside its lifetime bound"));
+    }
+    Ok(())
 }
 
 fn has_exact_unix_permission_mode(mode: u32, expected: u32) -> bool {
@@ -454,6 +466,33 @@ mod tests {
     fn write_secure(path: &Path, content: &str) {
         fs::write(path, content).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o640)).unwrap();
+    }
+
+    #[test]
+    fn signed_time_window_accepts_exact_maximum_lifetime() {
+        assert!(validate_signed_time_window("receipt", 100, 400, 399, 300).is_ok());
+    }
+
+    #[test]
+    fn signed_time_window_rejects_future_observation() {
+        assert!(validate_signed_time_window("receipt", 101, 200, 100, 300).is_err());
+    }
+
+    #[test]
+    fn signed_time_window_rejects_expired_or_non_increasing_expiry() {
+        assert!(validate_signed_time_window("receipt", 100, 100, 100, 300).is_err());
+        assert!(validate_signed_time_window("receipt", 100, 150, 150, 300).is_err());
+    }
+
+    #[test]
+    fn signed_time_window_rejects_lifetime_overflow() {
+        assert!(validate_signed_time_window("receipt", 100, 401, 200, 300).is_err());
+    }
+
+    #[test]
+    fn signed_time_window_rejects_non_positive_observation() {
+        assert!(validate_signed_time_window("receipt", 0, 100, 50, 300).is_err());
+        assert!(validate_signed_time_window("receipt", -1, 100, 50, 300).is_err());
     }
 
     #[test]
