@@ -3698,7 +3698,7 @@ mod tests {
         let mut db = canonical_db();
         install(&mut db, 10).unwrap();
         db.execute(
-            "INSERT INTO dread_execution_schema_migrations(version, applied_at) VALUES (7, 12)",
+            "INSERT INTO dread_execution_schema_migrations(version, applied_at) VALUES (8, 12)",
             [],
         )
         .unwrap();
