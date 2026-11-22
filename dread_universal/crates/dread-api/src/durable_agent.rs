@@ -996,10 +996,9 @@ pub(super) async fn recover_startup_durable_attempts(state: &AppState) -> Result
 /// attempt preparation before any provider side effect.
 pub(super) fn resume_queued_durable_agents(state: &AppState) -> Result<usize, String> {
     {
-        let connection = state
-            .db
-            .lock()
-            .map_err(|_| "database lock is unavailable while reading queued provider tasks".to_string())?;
+        let connection = state.db.lock().map_err(|_| {
+            "database lock is unavailable while reading queued provider tasks".to_string()
+        })?;
         if !persistence::startup_dispatch_barrier_is_open(&connection)
             .map_err(|error| format!("cannot inspect startup dispatch barrier: {error}"))?
         {
@@ -1008,10 +1007,9 @@ pub(super) fn resume_queued_durable_agents(state: &AppState) -> Result<usize, St
     }
 
     let queued = {
-        let connection = state
-            .db
-            .lock()
-            .map_err(|_| "database lock is unavailable while enumerating queued provider tasks".to_string())?;
+        let connection = state.db.lock().map_err(|_| {
+            "database lock is unavailable while enumerating queued provider tasks".to_string()
+        })?;
         let mut statement = connection
             .prepare(
                 "SELECT id, capability_id, payload_json, agent_provider, provider_event_cursor
