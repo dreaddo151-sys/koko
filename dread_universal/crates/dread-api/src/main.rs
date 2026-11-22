@@ -115,7 +115,9 @@ fn normalize_origin_runtime_endpoint(endpoint: &str) -> Result<String, String> {
     let mut url = reqwest::Url::parse(endpoint)
         .map_err(|error| format!("provider origin URL is invalid: {error}"))?;
     if !url.path().trim_matches('/').is_empty() {
-        return Err("provider runtime attestation endpoint must use an origin without a path".into());
+        return Err(
+            "provider runtime attestation endpoint must use an origin without a path".into(),
+        );
     }
     url.set_path("");
     Ok(url.as_str().trim_end_matches('/').to_string())
@@ -301,8 +303,8 @@ fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn Agen
     ];
     if hermes_keys.iter().any(|key| env::var_os(key).is_some()) {
         let endpoint = env::var("DREAD_HERMES_API_URL")?;
-        let attestation_endpoint = normalize_hermes_runtime_endpoint(&endpoint)
-            .map_err(anyhow::Error::msg)?;
+        let attestation_endpoint =
+            normalize_hermes_runtime_endpoint(&endpoint).map_err(anyhow::Error::msg)?;
         let runtime_attestation = load_runtime_isolation_attestation(
             "DREAD_HERMES_RUNTIME_ATTESTATION_FILE",
             "hermes",
@@ -327,8 +329,8 @@ fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn Agen
     ];
     if deerflow_keys.iter().any(|key| env::var_os(key).is_some()) {
         let endpoint = env::var("DREAD_DEERFLOW_API_URL")?;
-        let api_prefix = env::var("DREAD_DEERFLOW_API_PREFIX")
-            .unwrap_or_else(|_| "/api/langgraph".into());
+        let api_prefix =
+            env::var("DREAD_DEERFLOW_API_PREFIX").unwrap_or_else(|_| "/api/langgraph".into());
         if !matches!(api_prefix.as_str(), "/api" | "/api/langgraph") {
             return Err(anyhow::anyhow!(
                 "DREAD_DEERFLOW_API_PREFIX must be /api or /api/langgraph"
