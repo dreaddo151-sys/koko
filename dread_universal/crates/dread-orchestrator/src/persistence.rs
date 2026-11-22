@@ -3770,6 +3770,11 @@ mod tests {
             require_unique_index(&missing_unique, "sample_events", &["task_id", "sequence"])
                 .is_err()
         );
+        assert!(require_primary_key(&missing_unique, "sample_events", &["task_id"]).is_err());
+        assert!(
+            require_foreign_key(&missing_unique, "sample_events", "tasks", "task_id", "id")
+                .is_err()
+        );
     }
 
     #[test]
