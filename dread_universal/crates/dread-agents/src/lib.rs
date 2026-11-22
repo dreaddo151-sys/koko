@@ -498,6 +498,23 @@ pub trait AgentAdapter: Send + Sync {
         })
     }
 
+    /// Resolve a start request whose acknowledgement may have been lost.
+    /// Implementations must use the stable request/idempotency identity for a
+    /// read-only lookup; the default refuses to replay or guess a provider ID.
+    fn reconcile_start_with_evidence<'a>(
+        &'a self,
+        _identity: &'a AgentExecutionIdentity,
+    ) -> AdapterFuture<'a, AgentOperationReceipt<AgentTask>> {
+        Box::pin(async {
+            Err(AgentAdapterError {
+                code: "durable_reconciliation_unsupported".into(),
+                message: "adapter cannot safely resolve an ambiguous start without a provider ID"
+                    .into(),
+                retryable: false,
+            })
+        })
+    }
+
     fn task_status_with_evidence<'a>(
         &'a self,
         _identity: &'a AgentExecutionIdentity,
