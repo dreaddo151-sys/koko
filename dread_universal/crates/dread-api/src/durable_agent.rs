@@ -253,24 +253,24 @@ fn persist_provider_terminal(
     )
     .map_err(|error| format!("provider terminal result was rejected: {error}"))?;
 
-    if outcome == "succeeded" {
-        if let Err(error) = persistence::record_independent_verification(
+    if outcome == "succeeded"
+        && let Err(error) = persistence::record_independent_verification(
             &mut connection,
             request_id,
             result_json.as_deref(),
             provider_error,
             authority.as_ref(),
             now,
-        ) {
-            // The current authority is intentionally fail-closed until a
-            // separately trusted result verifier is configured. Do not turn
-            // provider success into DREAD task success or advance missions.
-            warn!(
-                request_id,
-                error = %error,
-                "Provider succeeded but independent result verification is still pending"
-            );
-        }
+        )
+    {
+        // The current authority is intentionally fail-closed until a
+        // separately trusted result verifier is configured. Do not turn
+        // provider success into DREAD task success or advance missions.
+        warn!(
+            request_id,
+            error = %error,
+            "Provider succeeded but independent result verification is still pending"
+        );
     }
     Ok(())
 }
@@ -358,7 +358,7 @@ pub(super) async fn execute_durable_agent_task_inner(
     state: AppState,
     adapter: Arc<dyn AgentAdapter>,
     execution: AgentTaskExecution,
-    mut cancellation: watch::Receiver<bool>,
+    cancellation: watch::Receiver<bool>,
 ) {
     let prepared = match prepare_new_attempt(&state, &execution) {
         Ok(Some(prepared)) => prepared,
