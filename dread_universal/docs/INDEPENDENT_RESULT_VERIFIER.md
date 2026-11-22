@@ -46,6 +46,8 @@ The heartbeat is accepted only when its signature/key ID is valid, the verifier 
 
 ## Per-request verification payload
 
+The verifier process should monitor the canonical Phase 6 SQLite database using a read-only connection and select only attempts in `dispatch_state = 'provider_succeeded'`. It needs the attempt's `request_id`, `attempt_id`, `task_id`, `worker_id`, exact `provider_result_json` and `provider_error` bytes, the matching admission's `requester_id`, and the verifier ID from the attempt's authenticated `succeeded` provider evidence. The canonical tables are `dread_task_attempts`, `dread_dispatch_admissions`, and `dread_execution_evidence`; do not create a parallel task or result database. The verifier must apply its own result policy for the task/capability before signing a receipt.
+
 For each durable request, write `<request_id>.json` with this payload shape:
 
 ```json
@@ -78,6 +80,8 @@ Use a unique evidence ID and immutable, create-once receipt file for each reques
 
 - The startup dispatch barrier requires a fresh signed heartbeat in addition to signed execution policy, enabled provider registration, granular isolation evidence, and pinned adapter receipt keys.
 - A provider's signed `succeeded` observation first enters `provider_succeeded`; it does not complete the canonical task or advance mission dependencies.
+- The API polls pending `provider_succeeded` attempts in-process every five seconds; a late receipt can finalize a task without restarting the API.
+- Fresh provider admissions and attempt revalidation require a live signed verifier heartbeat, not merely configured environment variables.
 - The API finalizes the task and mission only after the exact independent verification receipt is accepted and stored transactionally.
 - Missing, stale, mismatched, replayed, or tampered receipts leave provider success pending and keep the startup barrier closed.
 - This contract does not claim that a verifier process, its signing key, or a production verification policy has been deployed. That is a separate acceptance requirement.
