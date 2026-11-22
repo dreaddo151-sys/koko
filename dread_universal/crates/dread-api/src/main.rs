@@ -9383,6 +9383,63 @@ mod tests {
     }
 
     #[test]
+    fn durable_execution_startup_is_idempotent_and_preserves_existing_tasks() {
+        let path = std::env::temp_dir().join(format!("dread-api-reopen-{}.sqlite", Uuid::new_v4()));
+        let path_text = path.to_string_lossy().into_owned();
+
+        {
+            let connection = open_database(&path_text).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO tasks (
+                        id, title, task_type, payload_json, status, approval_required,
+                        created_at, updated_at
+                     ) VALUES ('preserved-task', 'Preserved task', 'agent_task', '{}', 'queued', 1, 10, 10)",
+                    [],
+                )
+                .unwrap();
+        }
+
+        {
+            let connection = open_database(&path_text).unwrap();
+            let task_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM tasks WHERE id = 'preserved-task'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let migration_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM dread_execution_schema_migrations",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let migration_version: i64 = connection
+                .query_row(
+                    "SELECT MAX(version) FROM dread_execution_schema_migrations",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+
+            assert_eq!(task_count, 1, "reopening must preserve canonical task rows");
+            assert_eq!(migration_count, 4, "reopening must not replay migrations");
+            assert_eq!(migration_version, 4);
+            assert!(
+                !dread_orchestrator::persistence::startup_dispatch_barrier_is_open(&connection)
+                    .unwrap(),
+                "reopening must never release the recovery barrier"
+            );
+        }
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(format!("{path_text}-wal"));
+        let _ = fs::remove_file(format!("{path_text}-shm"));
+    }
+
+    #[test]
     fn timestamp_is_unix_epoch_seconds() {
         assert!(now_epoch() > 1_700_000_000);
     }
