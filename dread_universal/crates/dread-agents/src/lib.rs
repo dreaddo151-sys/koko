@@ -491,6 +491,7 @@ pub trait AgentAdapter: Send + Sync {
     fn task_status_with_evidence<'a>(
         &'a self,
         _identity: &'a AgentExecutionIdentity,
+        _provider_execution_id: &'a str,
     ) -> AdapterFuture<'a, AgentOperationReceipt<AgentTask>> {
         Box::pin(async {
             Err(AgentAdapterError {
@@ -504,6 +505,7 @@ pub trait AgentAdapter: Send + Sync {
     fn events_with_evidence<'a>(
         &'a self,
         _identity: &'a AgentExecutionIdentity,
+        _provider_execution_id: &'a str,
         _after_sequence: u64,
     ) -> AdapterFuture<'a, Vec<AgentOperationReceipt<AgentEvent>>> {
         Box::pin(async {
