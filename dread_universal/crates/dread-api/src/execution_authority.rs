@@ -10,7 +10,7 @@
 use crate::execution_policy::{ExecutionPolicyAuthority, ExecutionPolicyInput};
 use dread_agents::{
     AgentAdapter, AgentEvent, AgentOperationEvidenceKind, AgentOperationEvidencePayload,
-    CapabilityKind, CapabilityRecord, CapabilityStatus,
+    AgentOperationReceipt, CapabilityKind, CapabilityRecord, CapabilityStatus,
 };
 use dread_orchestrator::persistence::{
     AdmissionRecord, AttemptRecord, AuthorizationFacts, CurrentRetryContractFacts, DispatchRequest,
@@ -611,6 +611,70 @@ pub fn load_from_env(
             ))))
         }
     }
+}
+
+/// Convert a provider adapter's signed operation receipt into the durable
+/// persistence representation. This function only transports the receipt;
+/// signature, registration, request and attempt verification remains the
+/// responsibility of `Phase6ExecutionAuthority`.
+pub fn provider_evidence_from_adapter_receipt<T>(
+    provider_id: &str,
+    adapter_id: &str,
+    adapter_version: &str,
+    registration_revision: i64,
+    receipt: &AgentOperationReceipt<T>,
+) -> Result<ProviderEvidence, String> {
+    let signed = &receipt.evidence;
+    let payload = &signed.payload;
+    let identity = &payload.identity;
+    if identity.provider_id != provider_id
+        || identity.adapter_id != adapter_id
+        || identity.adapter_version != adapter_version
+        || identity.provider_registration_revision != registration_revision
+    {
+        return Err("adapter receipt identity does not match the selected provider registration".into());
+    }
+    let evidence_kind = match payload.evidence_kind {
+        AgentOperationEvidenceKind::Acknowledged => "acknowledged",
+        AgentOperationEvidenceKind::Active => "active",
+        AgentOperationEvidenceKind::Event => {
+            return Err("provider event receipts must use the event persistence path".into());
+        }
+        AgentOperationEvidenceKind::Succeeded => "succeeded",
+        AgentOperationEvidenceKind::Failed => "failed",
+        AgentOperationEvidenceKind::Cancelled => "cancelled",
+        AgentOperationEvidenceKind::CancellationAccepted => "cancellation_accepted",
+        AgentOperationEvidenceKind::CancellationUnknown => "cancellation_unknown",
+    };
+    let observed_at = i64::try_from(payload.observed_at)
+        .map_err(|_| "adapter receipt observation timestamp is out of range".to_string())?;
+    let expires_at = payload
+        .expires_at
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| "adapter receipt expiry timestamp is out of range".to_string())?;
+    let payload_json = serde_json::to_string(payload)
+        .map_err(|error| format!("cannot serialize signed adapter receipt: {error}"))?;
+
+    Ok(ProviderEvidence {
+        evidence_id: payload.evidence_id.clone(),
+        evidence_kind: evidence_kind.into(),
+        provider_id: provider_id.into(),
+        adapter_id: adapter_id.into(),
+        adapter_version: adapter_version.into(),
+        provider_registration_revision: registration_revision,
+        provider_execution_id: payload.provider_execution_id.clone(),
+        verifier_id: payload.verifier_id.clone(),
+        source_reference: payload.source_reference.clone(),
+        observed_at,
+        expires_at,
+        receipt: Some(SignedProviderReceipt {
+            key_id: signed.key_id.clone(),
+            payload_json,
+            signature_hex: signed.signature_hex.clone(),
+            response_sha256: payload.response_sha256.clone(),
+        }),
+    })
 }
 
 impl ExecutionAuthority for Phase6ExecutionAuthority {
@@ -1402,6 +1466,77 @@ mod tests {
             serde_json::to_vec(&envelope).unwrap(),
             hex_encode(key.public_key().as_ref()),
         )
+    }
+
+    #[test]
+    fn adapter_receipt_conversion_preserves_signed_scope_and_rejects_events() {
+        let identity = dread_agents::AgentExecutionIdentity {
+            request_id: "request-1".into(),
+            attempt_id: "attempt-1".into(),
+            task_id: "task-1".into(),
+            worker_id: "worker-1".into(),
+            provider_id: "hermes".into(),
+            capability_id: "hermes.run".into(),
+            adapter_id: "hermes".into(),
+            adapter_version: "1.0.0".into(),
+            provider_registration_revision: 7,
+            idempotency_key: "project-dread:task-1".into(),
+        };
+        let payload = AgentOperationEvidencePayload {
+            evidence_id: "evidence-1".into(),
+            evidence_kind: AgentOperationEvidenceKind::Acknowledged,
+            identity: identity.clone(),
+            provider_execution_id: Some("remote-1".into()),
+            external_event_id: None,
+            event_type: None,
+            response_sha256: "ab".repeat(32),
+            verifier_id: "dread-adapter-receipt:hermes".into(),
+            source_reference: "http://127.0.0.1:8642".into(),
+            observed_at: 1_800_000_000,
+            expires_at: Some(1_800_000_300),
+        };
+        let receipt = AgentOperationReceipt {
+            response: json!({"provider_task_id":"remote-1"}),
+            evidence: dread_agents::SignedAgentOperationEvidence {
+                key_id: "hermes-receipt-key".into(),
+                payload,
+                signature_hex: "cd".repeat(64),
+            },
+        };
+        let converted =
+            provider_evidence_from_adapter_receipt("hermes", "hermes", "1.0.0", 7, &receipt)
+                .unwrap();
+        assert_eq!(converted.evidence_kind, "acknowledged");
+        assert_eq!(converted.provider_execution_id.as_deref(), Some("remote-1"));
+        assert_eq!(converted.provider_registration_revision, 7);
+        assert_eq!(
+            converted.receipt.as_ref().unwrap().key_id,
+            "hermes-receipt-key"
+        );
+
+        let mut event_receipt = receipt;
+        event_receipt.evidence.payload.evidence_kind = AgentOperationEvidenceKind::Event;
+        assert!(
+            provider_evidence_from_adapter_receipt(
+                "hermes",
+                "hermes",
+                "1.0.0",
+                7,
+                &event_receipt
+            )
+            .is_err()
+        );
+
+        assert!(
+            provider_evidence_from_adapter_receipt(
+                "deerflow",
+                "hermes",
+                "1.0.0",
+                7,
+                &event_receipt
+            )
+            .is_err()
+        );
     }
 
     #[test]
