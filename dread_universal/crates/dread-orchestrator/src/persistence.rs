@@ -60,7 +60,18 @@ type StoredProviderEvidence = (
     String,
     i64,
     Option<i64>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
 );
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedProviderReceipt {
+    pub key_id: String,
+    /// Exact compact JSON payload bytes over which the adapter signed.
+    pub payload_json: String,
+    pub signature_hex: String,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderTerminalPayload<'a> {
@@ -233,6 +244,9 @@ pub struct ProviderEvidence {
     pub source_reference: String,
     pub observed_at: i64,
     pub expires_at: Option<i64>,
+    /// Optional for mock/non-production authorities; the production Phase 6
+    /// authority rejects provider evidence without a trusted signed receipt.
+    pub receipt: Option<SignedProviderReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -322,6 +336,29 @@ pub trait ExecutionAuthority: Send + Sync {
         payload_json: &str,
         now: i64,
     ) -> Result<(), String>;
+
+    /// New signed-event path. Legacy authorities retain their old behavior;
+    /// the production Phase 6 authority requires and verifies the receipt.
+    fn verify_provider_event_receipt(
+        &self,
+        connection: &Connection,
+        attempt: &AttemptRecord,
+        external_event_id: &str,
+        event_type: &str,
+        payload_json: &str,
+        receipt: Option<&SignedProviderReceipt>,
+        now: i64,
+    ) -> Result<(), String> {
+        let _ = receipt;
+        self.verify_provider_event(
+            connection,
+            attempt,
+            external_event_id,
+            event_type,
+            payload_json,
+            now,
+        )
+    }
 
     /// Independently verify the provider's claimed result. The verifier must
     /// be a separate trusted component/identity from the original requester.
