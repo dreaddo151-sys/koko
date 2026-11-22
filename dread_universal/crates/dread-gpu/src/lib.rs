@@ -1,5 +1,6 @@
 pub mod launch;
 pub mod models;
+pub mod token_booster;
 pub mod supervisor;
 pub use supervisor::GpuSupervisorClient;
 

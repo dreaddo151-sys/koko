@@ -35,6 +35,14 @@ pub struct GgufMetadata {
     /// Raw GGUF general.file_type enum value; not translated into a quantization label.
     pub file_type_code: Option<u32>,
     pub quantization_version: Option<u32>,
+    /// `{arch}.block_count`: transformer layer count (KV cache + offload math).
+    pub block_count: Option<u64>,
+    /// `{arch}.attention.head_count`: full attention heads (head_dim math).
+    pub head_count: Option<u64>,
+    /// `{arch}.attention.head_count_kv`: KV heads (KV cache size math).
+    pub head_count_kv: Option<u64>,
+    /// `{arch}.embedding_length`: model dimension.
+    pub embedding_length: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -253,7 +261,7 @@ impl GgufHeaderReader {
 }
 
 /// Parse only the bounded GGUF header and selected scalar metadata; never load tensors.
-fn read_gguf_metadata(path: &Path) -> Result<GgufMetadata, String> {
+pub(crate) fn read_gguf_metadata(path: &Path) -> Result<GgufMetadata, String> {
     let mut reader = GgufHeaderReader::open(path)?;
     let mut magic = [0u8; 4];
     reader
@@ -283,6 +291,10 @@ fn read_gguf_metadata(path: &Path) -> Result<GgufMetadata, String> {
         context_length: None,
         file_type_code: None,
         quantization_version: None,
+        block_count: None,
+        head_count: None,
+        head_count_kv: None,
+        embedding_length: None,
     };
 
     for _ in 0..metadata_count {
@@ -324,17 +336,36 @@ fn read_gguf_metadata(path: &Path) -> Result<GgufMetadata, String> {
             key if key.ends_with(".context_length") => {
                 metadata.context_length = reader.read_nonnegative_integer(value_type)?;
             }
+            key if key.ends_with(".block_count") => {
+                metadata.block_count = reader.read_nonnegative_integer(value_type)?;
+            }
+            key if key.ends_with(".attention.head_count_kv") => {
+                metadata.head_count_kv = reader.read_nonnegative_integer(value_type)?;
+            }
+            key if key.ends_with(".attention.head_count") => {
+                metadata.head_count = reader.read_nonnegative_integer(value_type)?;
+            }
+            key if key.ends_with(".embedding_length") => {
+                metadata.embedding_length = reader.read_nonnegative_integer(value_type)?;
+            }
             _ => reader.skip_value(value_type)?,
         }
 
         // These fields are enough for a useful inventory record — including
         // the quantization code, because some exporters write
         // general.file_type after the architecture block, so a three-field
-        // stop used to miss it. Stop before large tokenizer arrays.
+        // stop used to miss it. The KV-cache fields join the stop set so the
+        // Token Booster advice never depends on where the tokenizer arrays
+        // start; files that truly lack them pay only a bounded full-header
+        // scan. Stop before large tokenizer arrays.
         if metadata.architecture.is_some()
             && metadata.model_name.is_some()
             && metadata.context_length.is_some()
             && metadata.file_type_code.is_some()
+            && metadata.block_count.is_some()
+            && metadata.head_count.is_some()
+            && metadata.head_count_kv.is_some()
+            && metadata.embedding_length.is_some()
         {
             break;
         }
@@ -691,6 +722,51 @@ mod tests {
     /// Exporters like the one used for the maintainer's Qwen2.5-72B shards
     /// write general.file_type AFTER <arch>.context_length. A three-field
     /// early stop used to miss it (quantization label was always None).
+    /// Token Booster advice needs the KV-cache math fields. `head_count` and
+    /// `head_count_kv` are distinct suffixes: each must land in its own
+    /// field no matter which one the exporter wrote first.
+    #[test]
+    fn parses_kv_cache_sizing_fields() {
+        let mut bytes = b"GGUF".to_vec();
+        append_u32(&mut bytes, 3);
+        append_u64(&mut bytes, 7);
+        append_u64(&mut bytes, 7);
+        append_gguf_string(&mut bytes, "general.architecture");
+        append_u32(&mut bytes, 8);
+        append_gguf_string(&mut bytes, "qwen2");
+        append_gguf_string(&mut bytes, "general.name");
+        append_u32(&mut bytes, 8);
+        append_gguf_string(&mut bytes, "kv math probe");
+        append_gguf_string(&mut bytes, "qwen2.attention.head_count");
+        append_u32(&mut bytes, 4);
+        append_u32(&mut bytes, 64);
+        append_gguf_string(&mut bytes, "qwen2.attention.head_count_kv");
+        append_u32(&mut bytes, 4);
+        append_u32(&mut bytes, 8);
+        append_gguf_string(&mut bytes, "qwen2.block_count");
+        append_u32(&mut bytes, 4);
+        append_u32(&mut bytes, 80);
+        append_gguf_string(&mut bytes, "qwen2.embedding_length");
+        append_u32(&mut bytes, 4);
+        append_u32(&mut bytes, 8192);
+        append_gguf_string(&mut bytes, "qwen2.context_length");
+        append_u32(&mut bytes, 4);
+        append_u32(&mut bytes, 32_768);
+
+        let root = temporary_directory("kv-math");
+        let path = root.join("kv-math.gguf");
+        fs::write(&path, &bytes).unwrap();
+
+        let metadata = read_gguf_metadata(&path).unwrap();
+        assert_eq!(metadata.block_count, Some(80));
+        assert_eq!(metadata.head_count, Some(64));
+        assert_eq!(metadata.head_count_kv, Some(8));
+        assert_eq!(metadata.embedding_length, Some(8192));
+        // A model without file_type in the header still parses everything it
+        // has; missing fields stay None instead of failing the inventory.
+        assert_eq!(metadata.file_type_code, None);
+    }
+
     #[test]
     fn parses_file_type_written_after_context_length() {
         let mut bytes = b"GGUF".to_vec();

@@ -194,6 +194,10 @@ mod tests {
             context_length: ctx,
             file_type_code: Some(15),
             quantization_version: Some(2),
+            block_count: None,
+            head_count: None,
+            head_count_kv: None,
+            embedding_length: None,
         }
     }
 
