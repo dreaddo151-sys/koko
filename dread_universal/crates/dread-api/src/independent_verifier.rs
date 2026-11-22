@@ -12,7 +12,6 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     env, fs,
-    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -280,8 +279,22 @@ impl IndependentResultVerifier {
         &self,
         path: &Path,
     ) -> Result<T, String> {
-        let encoded = read_secure_receipt_file(path, self.receipt_uid, self.receipt_gid)?;
-        let envelope: SignedEnvelope<T> = serde_json::from_slice(&encoded)
+        let opened = crate::secure_file::read_regular_file_no_follow(
+            path,
+            MAX_RECEIPT_BYTES,
+            "independent verifier receipt",
+        )?;
+        let mode = opened.metadata.permissions().mode();
+        if opened.metadata.uid() != self.receipt_uid
+            || opened.metadata.gid() != self.receipt_gid
+            || !has_exact_unix_permission_mode(mode, 0o640)
+        {
+            return Err(
+                "receipt files must be verifier-owned, use the configured shared GID, and have exact mode 0640"
+                    .into(),
+            );
+        }
+        let envelope: SignedEnvelope<T> = serde_json::from_slice(&opened.bytes)
             .map_err(|error| format!("independent verifier receipt JSON is invalid: {error}"))?;
         if envelope.key_id != self.key_id {
             return Err(
@@ -342,58 +355,6 @@ fn validate_secure_directory(
     Ok(())
 }
 
-fn read_secure_receipt_file(
-    path: &Path,
-    expected_uid: u32,
-    expected_gid: u32,
-) -> Result<Vec<u8>, String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-
-        // Open the final component without following symlinks. O_NONBLOCK
-        // also prevents a verifier-owned FIFO from stalling the API thread.
-        // Metadata is checked on the opened descriptor, eliminating the
-        // symlink_metadata -> fs::read time-of-check/time-of-use race.
-        let mut options = fs::OpenOptions::new();
-        options.read(true);
-        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
-        let file = options
-            .open(path)
-            .map_err(|error| format!("cannot safely open independent verifier receipt: {error}"))?;
-        let metadata = file
-            .metadata()
-            .map_err(|error| format!("cannot inspect opened verifier receipt: {error}"))?;
-        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_RECEIPT_BYTES {
-            return Err(
-                "independent verifier receipt must be a regular file no larger than 64 KiB".into(),
-            );
-        }
-        let mode = metadata.permissions().mode();
-        if metadata.uid() != expected_uid
-            || metadata.gid() != expected_gid
-            || !has_exact_unix_permission_mode(mode, 0o640)
-        {
-            return Err(
-                "receipt files must be verifier-owned, use the configured shared GID, and have exact mode 0640"
-                    .into(),
-            );
-        }
-        let mut encoded = Vec::with_capacity(metadata.len() as usize);
-        file.take(MAX_RECEIPT_BYTES + 1)
-            .read_to_end(&mut encoded)
-            .map_err(|error| format!("cannot read opened independent verifier receipt: {error}"))?;
-        if encoded.is_empty() || encoded.len() as u64 > MAX_RECEIPT_BYTES {
-            return Err("independent verifier receipt is empty or exceeds 64 KiB".into());
-        }
-        Ok(encoded)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (path, expected_uid, expected_gid);
-        Err("separate verifier receipt access is supported only on Unix hosts".into())
-    }
-}
 
 fn validate_safe_id(name: &str, value: &str) -> Result<(), String> {
     if value.is_empty()
