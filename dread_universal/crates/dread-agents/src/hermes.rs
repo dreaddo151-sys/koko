@@ -548,9 +548,10 @@ impl AgentAdapter for HermesApiAdapter {
         Box::pin(async move {
             request.validate()?;
             let identity = request.identity;
-            let signer = self.receipt_signer.as_ref().ok_or_else(|| {
-                durable_evidence_error("Hermes receipt signer is not configured")
-            })?;
+            let signer = self
+                .receipt_signer
+                .as_ref()
+                .ok_or_else(|| durable_evidence_error("Hermes receipt signer is not configured"))?;
             let response = self.start_task(request.request).await?;
             signed_agent_operation_receipt(
                 signer,
