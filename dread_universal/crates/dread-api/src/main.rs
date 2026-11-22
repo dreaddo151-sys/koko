@@ -1987,6 +1987,19 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
 /// The task's executor is selected by task_type, never by a caller-supplied capability
 /// attached to an unrelated built-in task. This helper is shared by mission validation
 /// and final queue admission to prevent policy drift.
+fn ensure_durable_agent_dispatch_ready(
+    connection: &Connection,
+) -> Result<(), ApiError> {
+    let ready = dread_orchestrator::persistence::startup_dispatch_barrier_is_open(connection)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if !ready {
+        return Err(ApiError::conflict(
+            "Agent dispatch is blocked until durable admission, attempt preparation, startup reconciliation, and worker reattachment are active",
+        ));
+    }
+    Ok(())
+}
+
 fn resolve_agent_provider(
     state: &AppState,
     conn: &Connection,
@@ -3291,6 +3304,14 @@ fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), 
             params![mission_id],
         )
         .map_err(|error| ApiError::internal(error.to_string()))?;
+    }
+
+    // Agent providers must not use the legacy direct-start path while the
+    // durable admission/attempt lifecycle is not yet wired into this handler.
+    // The startup barrier is initialized closed on every API boot and may only
+    // be opened after reconciliation and worker reattachment are implemented.
+    if agent_provider.is_some() {
+        ensure_durable_agent_dispatch_ready(&tx)?;
     }
 
     let runner_name = if let Some(provider) = agent_provider.as_deref() {
@@ -9346,6 +9367,18 @@ mod tests {
         assert_eq!(status, "completed");
         let event = receiver.try_recv().unwrap();
         assert_eq!(event.event_type, "task_succeeded");
+    }
+
+    #[test]
+    fn legacy_agent_dispatch_is_blocked_while_durable_startup_barrier_is_closed() {
+        let connection = open_database(":memory:").unwrap();
+        let error = ensure_durable_agent_dispatch_ready(&connection).unwrap_err();
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert!(
+            error.message.contains("durable admission"),
+            "unexpected fail-closed reason: {}",
+            error.message
+        );
     }
 
     #[test]
