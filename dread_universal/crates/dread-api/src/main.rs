@@ -17,8 +17,9 @@ use axum::{
     routing::get,
 };
 use dread_agents::{
-    AgentAdapter, AgentTaskState, CapabilityKind, CapabilityProvenance, CapabilityRecord,
-    CapabilityStatus, StartTaskRequest, deerflow::DeerFlowApiAdapter, hermes::HermesApiAdapter,
+    AgentAdapter, AgentReceiptSigner, AgentTaskState, CapabilityKind, CapabilityProvenance,
+    CapabilityRecord, CapabilityStatus, StartTaskRequest, deerflow::DeerFlowApiAdapter,
+    hermes::HermesApiAdapter,
     openhands::OpenHandsAgentServerAdapter,
 };
 use dread_discovery::{
@@ -100,6 +101,49 @@ struct OpenHandsAdapterConfig {
     sandbox_policy_verified: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentReceiptSigningKeyFile {
+    key_id: String,
+    seed_hex: String,
+}
+
+fn load_agent_receipt_signer(
+    environment_key: &str,
+) -> Result<Option<AgentReceiptSigner>, String> {
+    let Some(path) = env::var_os(environment_key) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(path);
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|error| format!("cannot inspect {environment_key}: {error}"))?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > 4096
+    {
+        return Err(format!(
+            "{environment_key} must name a regular non-symlink key file no larger than 4096 bytes"
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(format!(
+                "{environment_key} must have owner-only permissions (0600 or stricter)"
+            ));
+        }
+    }
+    let encoded = fs::read_to_string(&path)
+        .map_err(|error| format!("cannot read {environment_key}: {error}"))?;
+    let key: AgentReceiptSigningKeyFile = serde_json::from_str(&encoded)
+        .map_err(|error| format!("invalid receipt key file for {environment_key}: {error}"))?;
+    AgentReceiptSigner::from_seed_hex(&key.key_id, &key.seed_hex)
+        .map(Some)
+        .map_err(|error| format!("invalid receipt key for {environment_key}: {error}"))
+}
+
 fn build_agent_adapters(
     config: AgentAdapterConfig,
 ) -> Result<HashMap<String, Arc<dyn AgentAdapter>>, String> {
@@ -111,8 +155,14 @@ fn build_agent_adapters(
         if !hermes.isolated_workspace_per_task {
             return Err("Hermes requires explicit per-task workspace isolation attestation".into());
         }
-        let adapter = HermesApiAdapter::new(&hermes.endpoint, hermes.api_key, "Hermes")
-            .map_err(|error| error.to_string())?
+        let mut adapter = HermesApiAdapter::new(&hermes.endpoint, hermes.api_key, "Hermes")
+            .map_err(|error| error.to_string())?;
+        if let Some(signer) = load_agent_receipt_signer(
+            "DREAD_HERMES_RECEIPT_SIGNING_KEY_FILE",
+        )? {
+            adapter = adapter.with_receipt_signer(signer);
+        }
+        let adapter = adapter
             .attest_sandbox(&hermes.terminal_backend, true)
             .map_err(|error| error.to_string())?;
         adapters.insert("hermes".into(), Arc::new(adapter));
@@ -126,19 +176,25 @@ fn build_agent_adapters(
                 "DeerFlow requires explicit per-task workspace isolation attestation".into(),
             );
         }
-        let adapter = DeerFlowApiAdapter::new(
+        let mut adapter = DeerFlowApiAdapter::new(
             &deerflow.endpoint,
             &deerflow.api_prefix,
             deerflow.pat,
             "DeerFlow",
         )
-        .map_err(|error| error.to_string())?
-        .attest_container_sandbox(
-            &deerflow.provider_class,
-            true,
-            deerflow.provisioner_url.as_deref(),
-        )
         .map_err(|error| error.to_string())?;
+        if let Some(signer) = load_agent_receipt_signer(
+            "DREAD_DEERFLOW_RECEIPT_SIGNING_KEY_FILE",
+        )? {
+            adapter = adapter.with_receipt_signer(signer);
+        }
+        let adapter = adapter
+            .attest_container_sandbox(
+                &deerflow.provider_class,
+                true,
+                deerflow.provisioner_url.as_deref(),
+            )
+            .map_err(|error| error.to_string())?;
         adapters.insert("deerflow".into(), Arc::new(adapter));
     }
     if let Some(openhands) = config.openhands {
@@ -153,7 +209,7 @@ fn build_agent_adapters(
                 "OpenHands LLM traffic must use DREAD's Docker-reachable local GPU gateway".into(),
             );
         }
-        let adapter = OpenHandsAgentServerAdapter::new(
+        let mut adapter = OpenHandsAgentServerAdapter::new(
             &openhands.endpoint,
             openhands.session_api_key,
             openhands.llm_model,
@@ -161,9 +217,15 @@ fn build_agent_adapters(
             openhands.llm_base_url,
             "OpenHands",
         )
-        .map_err(|error| error.to_string())?
-        .attest_docker_runtime(true, true)
         .map_err(|error| error.to_string())?;
+        if let Some(signer) = load_agent_receipt_signer(
+            "DREAD_OPENHANDS_RECEIPT_SIGNING_KEY_FILE",
+        )? {
+            adapter = adapter.with_receipt_signer(signer);
+        }
+        let adapter = adapter
+            .attest_docker_runtime(true, true)
+            .map_err(|error| error.to_string())?;
         adapters.insert("openhands".into(), Arc::new(adapter));
     }
     Ok(adapters)
@@ -177,6 +239,7 @@ fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn Agen
         "DREAD_HERMES_SANDBOX_BACKEND",
         "DREAD_HERMES_ISOLATED_WORKSPACE_PER_TASK",
         "DREAD_HERMES_SANDBOX_POLICY_VERIFIED",
+        "DREAD_HERMES_RECEIPT_SIGNING_KEY_FILE",
     ];
     if hermes_keys.iter().any(|key| env::var_os(key).is_some()) {
         config.hermes = Some(HermesAdapterConfig {
@@ -198,6 +261,7 @@ fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn Agen
         "DREAD_DEERFLOW_SANDBOX_POLICY_VERIFIED",
         "DREAD_DEERFLOW_API_PREFIX",
         "DREAD_DEERFLOW_PROVISIONER_URL",
+        "DREAD_DEERFLOW_RECEIPT_SIGNING_KEY_FILE",
     ];
     if deerflow_keys.iter().any(|key| env::var_os(key).is_some()) {
         config.deerflow = Some(DeerFlowAdapterConfig {
@@ -223,6 +287,7 @@ fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn Agen
         "DREAD_OPENHANDS_DOCKER_RUNTIME_ENABLED",
         "DREAD_OPENHANDS_SECRET_STORE_CONFIGURED",
         "DREAD_OPENHANDS_SANDBOX_POLICY_VERIFIED",
+        "DREAD_OPENHANDS_RECEIPT_SIGNING_KEY_FILE",
     ];
     if openhands_keys.iter().any(|key| env::var_os(key).is_some()) {
         config.openhands = Some(OpenHandsAdapterConfig {
