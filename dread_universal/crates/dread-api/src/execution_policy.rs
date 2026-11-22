@@ -8,7 +8,7 @@
 use ring::{digest, signature};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::HashSet, env, fs, path::PathBuf};
+use std::{collections::HashSet, env, path::PathBuf};
 
 const MAX_POLICY_BYTES: u64 = 1_048_576;
 const MAX_POLICY_LIFETIME_SECONDS: i64 = 30 * 24 * 60 * 60;
@@ -252,21 +252,12 @@ impl ExecutionPolicyAuthority {
     }
 
     fn refresh(&self, now: i64) -> Result<VerifiedExecutionPolicy, String> {
-        let metadata = fs::symlink_metadata(&self.manifest_path)
-            .map_err(|error| format!("cannot inspect execution policy manifest: {error}"))?;
-        if metadata.file_type().is_symlink()
-            || !metadata.is_file()
-            || metadata.len() == 0
-            || metadata.len() > MAX_POLICY_BYTES
-        {
-            return Err(
-                "execution policy manifest must be a regular non-symlink file no larger than 1 MiB"
-                    .into(),
-            );
-        }
-        let encoded = fs::read(&self.manifest_path)
-            .map_err(|error| format!("cannot read execution policy manifest: {error}"))?;
-        VerifiedExecutionPolicy::verify(&encoded, &self.public_key_hex, now)
+        let opened = crate::secure_file::read_regular_file_no_follow(
+            &self.manifest_path,
+            MAX_POLICY_BYTES,
+            "execution policy manifest",
+        )?;
+        VerifiedExecutionPolicy::verify(&opened.bytes, &self.public_key_hex, now)
     }
 }
 
@@ -416,6 +407,7 @@ fn now_epoch() -> i64 {
 mod tests {
     use super::*;
     use ring::signature::{Ed25519KeyPair, KeyPair};
+    use std::fs;
 
     fn signed_policy(now: i64, rules: Vec<ExecutionPolicyRule>) -> (Vec<u8>, String) {
         let key = Ed25519KeyPair::from_seed_unchecked(&[37_u8; 32]).unwrap();
@@ -551,6 +543,32 @@ mod tests {
         assert!(authority.authorize(input("request-a"), now).is_err());
 
         fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn policy_authority_rejects_symlink_even_when_target_is_valid() {
+        use std::os::unix::fs::symlink;
+
+        let now = 1_800_000_000;
+        let (encoded, key) = signed_policy(now, vec![allow_rule()]);
+        let directory = std::env::temp_dir().join(format!(
+            "dread-execution-policy-symlink-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let target = directory.join("trusted.json");
+        let link = directory.join("policy.json");
+        fs::write(&target, encoded).unwrap();
+        symlink(&target, &link).unwrap();
+
+        let authority = ExecutionPolicyAuthority {
+            manifest_path: link,
+            public_key_hex: key,
+        };
+        assert!(authority.authorize(input("request-a"), now).is_err());
+
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
