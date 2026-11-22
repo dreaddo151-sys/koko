@@ -647,17 +647,14 @@ async fn monitor_durable_attempt(
 
 /// Reconcile existing attempts on boot using authenticated status reads only.
 /// No branch in this function can call the provider start endpoint.
-pub(super) async fn recover_startup_durable_attempts(
-    state: &AppState,
-) -> Result<usize, String> {
+pub(super) async fn recover_startup_durable_attempts(state: &AppState) -> Result<usize, String> {
     if state.execution_authority.is_none() {
         return Ok(0);
     }
     let attempts = {
-        let connection = state
-            .db
-            .lock()
-            .map_err(|_| "database lock is unavailable during durable startup recovery".to_string())?;
+        let connection = state.db.lock().map_err(|_| {
+            "database lock is unavailable during durable startup recovery".to_string()
+        })?;
         persistence::unresolved_attempts(&connection)
             .map_err(|error| format!("cannot enumerate durable attempts: {error}"))?
     };
@@ -666,10 +663,9 @@ pub(super) async fn recover_startup_durable_attempts(
     for attempt in attempts {
         if attempt.dispatch_state == "provider_succeeded" {
             let admission = {
-                let connection = state
-                    .db
-                    .lock()
-                    .map_err(|_| "database lock is unavailable during verification recovery".to_string())?;
+                let connection = state.db.lock().map_err(|_| {
+                    "database lock is unavailable during verification recovery".to_string()
+                })?;
                 persistence::admission_for_request(&connection, &attempt.request_id)
                     .map_err(|error| format!("cannot read durable admission: {error}"))?
             };
@@ -722,7 +718,12 @@ pub(super) async fn recover_startup_durable_attempts(
             .agent_adapters
             .get(&identity.provider_id)
             .cloned()
-            .ok_or_else(|| format!("provider adapter '{}' is not configured", identity.provider_id))?;
+            .ok_or_else(|| {
+                format!(
+                    "provider adapter '{}' is not configured",
+                    identity.provider_id
+                )
+            })?;
         if !adapter.descriptor().enabled
             || adapter.descriptor().adapter != identity.adapter_id
             || adapter.descriptor().version.as_deref() != Some(identity.adapter_version.as_str())
@@ -831,12 +832,14 @@ pub(super) async fn recover_startup_durable_attempts(
                 continue;
             }
         };
-        let authority = state.execution_authority.as_ref().ok_or_else(|| {
-            "signed Phase 6 execution authority is unavailable".to_string()
-        })?;
+        let authority = state
+            .execution_authority
+            .as_ref()
+            .ok_or_else(|| "signed Phase 6 execution authority is unavailable".to_string())?;
         {
             let mut connection = state.db.lock().map_err(|_| {
-                "database lock is unavailable while persisting recovered provider status".to_string()
+                "database lock is unavailable while persisting recovered provider status"
+                    .to_string()
             })?;
             if let Err(error) = persistence::record_provider_active(
                 &mut connection,
@@ -866,8 +869,7 @@ pub(super) async fn recover_startup_durable_attempts(
                 )
                 .map_err(|error| format!("cannot read recovered event cursor: {error}"))?
         };
-        let (cancel_sender, cancel_receiver) =
-            watch::channel(attempt.cancellation_state != "none");
+        let (cancel_sender, cancel_receiver) = watch::channel(attempt.cancellation_state != "none");
         state
             .cancellations
             .lock()
