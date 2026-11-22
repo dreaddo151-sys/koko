@@ -4631,6 +4631,27 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
     };
 
     for task in running_agents {
+        // A provider-backed task may already have executed remotely. Until the
+        // durable attempt record can be reconciled and its worker reattached,
+        // never reset it to queued or invoke the legacy start_task path.
+        emitted.push(
+            append_task_event(
+                &tx,
+                &task.id,
+                "task_recovery_deferred_durable_dispatch",
+                &json!({
+                    "status": "running",
+                    "provider": task.agent_provider,
+                    "provider_event_cursor": task.provider_event_cursor,
+                    "reason": "Durable attempt reconciliation and worker reattachment are not yet integrated"
+                }),
+                "recovery",
+                now,
+            )
+            .map_err(|error| anyhow::anyhow!(error.message))?,
+        );
+        continue;
+
         let provider = task.agent_provider.as_deref().unwrap_or_default();
         let capability_enabled = if let Some(capability_id) = task.capability_id.as_deref() {
             let encoded: Option<String> = tx
@@ -4723,6 +4744,28 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
     };
 
     for task in queued {
+        if task.agent_provider.is_some() {
+            // Queued provider work must wait for the same durable admission
+            // path as new work; startup recovery must not bypass the dispatch
+            // barrier by spawning the legacy provider worker.
+            emitted.push(
+                append_task_event(
+                    &tx,
+                    &task.id,
+                    "task_recovery_deferred_durable_dispatch",
+                    &json!({
+                        "status": "queued",
+                        "provider": task.agent_provider,
+                        "reason": "Durable admission and dispatch are not yet integrated"
+                    }),
+                    "recovery",
+                    now,
+                )
+                .map_err(|error| anyhow::anyhow!(error.message))?,
+            );
+            continue;
+        }
+
         let builtin_eligible = task.task_type == "service_discovery"
             && task.capability_id.is_none()
             && task.agent_provider.is_none()
@@ -6870,9 +6913,29 @@ mod tests {
             .unwrap();
         assert_eq!(status, "completed");
 
+        let running_agent_status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE id = 'running-agent-unavailable'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            running_agent_status,
+            "running",
+            "provider-backed running work must remain unresolved until durable reconciliation"
+        );
+        let deferred_event_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_events WHERE task_id = 'running-agent-unavailable' AND event_type = 'task_recovery_deferred_durable_dispatch'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(deferred_event_count, 1);
+
         for id in [
             "running-interrupted",
-            "running-agent-unavailable",
             "queued-unsupported",
             "queued-gpu-chat",
             "queued-capability",
