@@ -5547,10 +5547,47 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    let startup_now = i64::try_from(now_epoch()).unwrap_or(i64::MAX);
+    let startup_generation = {
+        let mut connection = state
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Database lock is unavailable during startup recovery"))?;
+        dread_orchestrator::persistence::begin_startup_recovery(&mut connection, startup_now)?
+    };
     let recovered_tasks = recover_task_queue(&state)?;
+    let startup_dispatch_barrier_open = {
+        let mut connection = state
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Database lock is unavailable during startup recovery"))?;
+        let legacy_provider_tasks: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM tasks
+             WHERE task_type = 'agent_task'
+               AND status IN ('queued', 'running', 'cancelling')",
+            [],
+            |row| row.get(0),
+        )?;
+        if legacy_provider_tasks == 0 {
+            dread_orchestrator::persistence::release_startup_dispatch_barrier(
+                &mut connection,
+                i64::try_from(now_epoch()).unwrap_or(i64::MAX),
+            )?
+        } else {
+            false
+        }
+    };
+    if !startup_dispatch_barrier_open {
+        warn!(
+            startup_generation,
+            "Startup dispatch barrier remains closed until every legacy provider task and durable attempt is safely reconciled and reattached"
+        );
+    }
     info!(
         recovered_tasks,
-        "Recovered eligible queued tasks and resumed provider cancellation reconciliation; interrupted built-in tasks were marked failed"
+        startup_generation,
+        startup_dispatch_barrier_open,
+        "Completed startup recovery gate evaluation; provider dispatch is enabled only after current-boot reattachment"
     );
     info!(address = %addr, database = %db_path, "PROJECT DREAD Universal API listening");
     axum::serve(listener, app(state))
