@@ -114,7 +114,7 @@ impl DeerFlowApiAdapter {
                 id: "deerflow.gateway".into(),
                 display_name: display_name.into(),
                 adapter: "deerflow.gateway".into(),
-                version: None,
+                version: Some(env!("CARGO_PKG_VERSION").to_owned()),
                 endpoint: Some(format!("{endpoint}{api_prefix}")),
                 enabled: false,
             },
