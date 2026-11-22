@@ -600,7 +600,9 @@ impl Phase6ExecutionAuthority {
                     "DREAD_INDEPENDENT_RESULT_VERIFIER_RECEIPT_DIR",
                     "DREAD_INDEPENDENT_RESULT_VERIFIER_ID",
                     "DREAD_INDEPENDENT_RESULT_VERIFIER_KEY_ID",
-                    "DREAD_INDEPENDENT_RESULT_VERIFIER_PUBLIC_KEY_HEX"
+                    "DREAD_INDEPENDENT_RESULT_VERIFIER_PUBLIC_KEY_HEX",
+                    "DREAD_INDEPENDENT_RESULT_VERIFIER_RECEIPT_UID",
+                    "DREAD_INDEPENDENT_RESULT_VERIFIER_RECEIPT_GID"
                 ]
             }),
         };
