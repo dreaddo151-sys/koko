@@ -5441,6 +5441,7 @@ fn executor_error(error: dread_platform::repair_executor::RepairExecutorError) -
         | E::EmptyActionId
         | E::InvalidTransition { .. } => ApiError::bad_request(error.to_string()),
         E::RunNotFound(_) => ApiError::not_found(error.to_string()),
+        E::Conflict(_) => ApiError::conflict(error.to_string()),
         E::Database(_) | E::CorruptData(_) => ApiError::internal(error.to_string()),
     }
 }
@@ -5694,6 +5695,68 @@ async fn models_autoconfigure(State(state): State<AppState>) -> Result<Json<Valu
     )
     .map_err(ApiError::internal)?;
     Ok(Json(summary))
+}
+
+/// Token Booster: concrete llama.cpp launch advice for one registry model.
+/// VRAM comes from Supervisor telemetry (same source as autoconfigure); with
+/// no telemetry the route refuses to guess instead of inventing a budget.
+async fn model_token_advice(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let vram_bytes: u64 = match &state.supervisor {
+        Some(supervisor) => supervisor
+            .telemetry()
+            .await
+            .ok()
+            .and_then(|telemetry| {
+                telemetry.get("gpus").and_then(Value::as_array).map(|gpus| {
+                    gpus.iter()
+                        .filter_map(|gpu| {
+                            gpu.get("memory_total_mb")
+                                .and_then(Value::as_f64)
+                                .map(|mb| (mb * 1024.0 * 1024.0) as u64)
+                        })
+                        .sum()
+                })
+            })
+            .unwrap_or(0),
+        None => 0,
+    };
+    if vram_bytes == 0 {
+        return Err(ApiError::bad_request(
+            "no GPU Supervisor telemetry: Token Booster refuses to guess a VRAM budget"
+                .to_owned(),
+        ));
+    }
+
+    let path = {
+        let conn = db_lock(&state)?;
+        conn.query_row(
+            "SELECT endpoint FROM registry WHERE id = ?1 AND kind = 'model.gguf'",
+            params![id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| ApiError::internal(error.to_string()))?
+    }
+    .ok_or_else(|| {
+        ApiError::not_found(format!("no model.gguf registry entry with id {id}"))
+    })?;
+
+    let advice = tokio::task::spawn_blocking(move || {
+        dread_gpu::token_booster::advice_for_model_path(
+            std::path::Path::new(&path),
+            vram_bytes,
+            dread_gpu::token_booster::RUNTIME_OVERHEAD_BYTES,
+        )
+        .map(|advice| (path, advice))
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("token advice worker failed: {error}")))?
+    .map_err(ApiError::internal)?;
+
+    to_json(advice, "token boost advice")
 }
 
 fn provider_dropin_dir() -> std::path::PathBuf {
@@ -6015,6 +6078,7 @@ fn app(state: AppState) -> Router {
         )
         .route("/api/skills", get(skills_list))
         .route("/api/skills/sync", axum::routing::post(skills_sync))
+        .route("/api/models/{id}/token-advice", get(model_token_advice))
         .route("/api/repair/plan", get(repair_plan))
         .route(
             "/api/repair/runs",
@@ -10598,6 +10662,7 @@ mod tests {
         let protected_routes = [
             "/api/models/local",
             "/api/repair/plan",
+            "/api/models/model-abc123/token-advice",
             "/api/gpu/telemetry",
             "/api/usage/tokens",
             "/api/prompt/enhance",
