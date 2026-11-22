@@ -485,3 +485,38 @@ Run #1880 job results: Rust / Ubuntu 24.04 = success; Web console / Ubuntu 24.04
 These are repository/source/build/package results only. No verifier process, account, signing key, policy, receipt directory, API group membership, database ACL or service unit has been deployed on the target workstation. The real canonical database/WAL/SHM paths, two-UID receipt access, live signed heartbeat, actual capability semantic result verification, real provider execution, crash/race recovery, physical Ubuntu install/reboot, dual-GPU/ComfyUI contention, and legacy Hub parity remain unaccepted.
 
 The trusted runtime isolation evidence issuer must still be independently operated and bound to actual live observations. Provider dispatch remains fail-closed. PR #16 remains draft and unmerged. No workstation service or user data was changed by these repository operations.
+
+## 16. Exact Unix permission-bit enforcement for verifier boundary — 2026-11-22
+
+### Finding and correction
+
+The previous API/producer permission checks compared ordinary `rwx` bits with `0o777`. That could allow a verifier receipt carrying setuid, setgid or sticky bits to pass despite the intended exact `0640` file contract. Likewise, owner-only key/policy checks did not exclude special mode bits.
+
+The API and standalone producer now compare all permission/special bits using `mode & 0o7777`:
+
+- Receipt directory must remain exact `02750` (setgid is intentional and required for shared-group inheritance).
+- Heartbeat/result files must be exact `0640`; any setuid/setgid/sticky bit or broader permission is rejected.
+- Verifier private PKCS#8 key and policy files must be exact `0600`, owned by the verifier UID.
+- Existing owner UID and shared GID checks remain enforced. The API is still read-only to the verifier-owned receipt directory/files.
+
+### Regression coverage
+
+Added pure permission-mode regressions in both API and producer:
+- Accept the exact expected `0640` or `0600` file mode.
+- Reject `04640`, `02640`, and `01640` for shared receipt files.
+- Reject `04600`, `02600`, and `01600` for private key/policy files.
+- Preserve the exact `02750` receipt directory contract and normal existing file ownership tests.
+
+### Exact-head verification
+
+**Source head:** `b10b8cbb0c2c24818b37ba13ef3dc77e212e51d8`  
+**GitHub Actions run:** [#1885](https://github.com/dreaddo151-sys/koko/actions/runs/45048049119) — completed successfully on that exact SHA.
+
+All three jobs passed:
+1. Rust / Ubuntu 24.04 — rustfmt, strict workspace Clippy, complete workspace tests, optimized release build, installer and signed-release checks, portable upgrade/migration/rollback, Python bridge/importer tests and the single-owner GPU boundary.
+2. Web console / Ubuntu 24.04 — locked dependencies and production build.
+3. Ubuntu packages / smoke test — Debian and portable package assembly, checksums/content checks, packaged API install and production-console smoke.
+
+### Acceptance boundary
+
+This is source-level and CI verification only. It does not deploy the verifier identity, keys, policy, receipt directory, API shared-group membership, SQLite/WAL/SHM ACLs, system unit or heartbeat on the user's workstation. Real capability result semantics, trusted runtime observation issuance, live provider behavior, crash/race acceptance, physical install/reboot, dual-GPU/ComfyUI contention and legacy Hub parity remain unaccepted. Keep provider dispatch fail-closed and PR #16 draft/unmerged.
