@@ -60,6 +60,12 @@ pub struct ProviderTrustRecord {
     pub capability_id: String,
     pub capability_revision: i64,
     pub operation: String,
+    /// Optional for legacy registrations; durable receipt verification refuses
+    /// to proceed unless both values are present and valid.
+    #[serde(default)]
+    pub receipt_key_id: Option<String>,
+    #[serde(default)]
+    pub receipt_public_key_hex: Option<String>,
     pub enabled: bool,
     pub revoked: bool,
     pub evidence_id: String,
@@ -907,6 +913,24 @@ fn validate_manifest_payload(manifest: &ExecutionTrustManifest, now: i64) -> Res
     }
     let mut providers = std::collections::HashSet::new();
     for provider in &manifest.providers {
+        match (
+            provider.receipt_key_id.as_deref(),
+            provider.receipt_public_key_hex.as_deref(),
+        ) {
+            (None, None) => {}
+            (Some(key_id), Some(public_key_hex)) => {
+                validate_text("receipt_key_id", key_id, 128)?;
+                let public_key = decode_hex(public_key_hex)?;
+                if public_key.len() != 32 {
+                    return Err("provider receipt Ed25519 public key must be 32 bytes".into());
+                }
+            }
+            _ => {
+                return Err(
+                    "provider receipt key ID and public key must be configured together".into(),
+                );
+            }
+        }
         for (name, value, limit) in [
             ("provider_id", provider.provider_id.as_str(), 64),
             ("adapter_id", provider.adapter_id.as_str(), 128),
@@ -1118,6 +1142,8 @@ mod tests {
                 capability_id: "hermes.run".into(),
                 capability_revision: 1,
                 operation: AGENT_OPERATION.into(),
+                receipt_key_id: None,
+                receipt_public_key_hex: None,
                 enabled: true,
                 revoked: false,
                 evidence_id: "isolation-evidence-1".into(),
