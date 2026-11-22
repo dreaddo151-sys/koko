@@ -5,6 +5,7 @@ mod independent_verifier;
 mod provider_probe;
 mod providers;
 mod secure_file;
+mod skills;
 
 use axum::{
     Json, Router,
@@ -5526,6 +5527,37 @@ async fn providers_sync(State(state): State<AppState>) -> Result<Json<Value>, Ap
     Ok(Json(report))
 }
 
+fn skill_roots() -> Vec<std::path::PathBuf> {
+    std::env::var_os("DREAD_SKILL_ROOTS")
+        .map(|raw| {
+            std::env::split_paths(&raw)
+                .filter(|p| p.as_os_str() != "")
+                .collect()
+        })
+        .unwrap_or_else(|| vec![std::path::PathBuf::from("skills.d")])
+}
+
+async fn skills_list(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let items = skills::skills_listing(&conn).map_err(ApiError::internal)?;
+    Ok(Json(json!({"skills": items, "count": items.len()})))
+}
+
+async fn skills_sync(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let roots = skill_roots();
+    let (scanned, warnings) = skills::scan_skill_roots(&roots);
+    let conn = db_lock(&state)?;
+    let mut report = skills::register_skills(
+        &conn,
+        &scanned,
+        &roots,
+        i64::try_from(now_epoch()).unwrap_or(i64::MAX),
+    )
+    .map_err(ApiError::internal)?;
+    report["warnings"] = json!(warnings);
+    Ok(Json(report))
+}
+
 async fn probe_provider(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -5649,6 +5681,8 @@ fn app(state: AppState) -> Router {
             "/api/providers/{id}/probe",
             axum::routing::post(probe_provider),
         )
+        .route("/api/skills", get(skills_list))
+        .route("/api/skills/sync", axum::routing::post(skills_sync))
         .route("/api/repair/plan", get(repair_plan))
         .route("/api/media/comfyui/monitor", get(comfyui_monitor))
         .route("/api/media/workflows/discover", get(workflow_discovery))
