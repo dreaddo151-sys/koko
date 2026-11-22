@@ -1494,7 +1494,11 @@ pub fn append_provider_event_with_receipt(
                     receipt_payload_json, receipt_signature_hex, receipt_response_sha256
              FROM dread_provider_event_keys
              WHERE provider_id = ?1 AND attempt_id = ?2 AND external_event_id = ?3",
-            params![attempt.provider_id, attempt.attempt_id, event.external_event_id],
+            params![
+                attempt.provider_id,
+                attempt.attempt_id,
+                event.external_event_id
+            ],
             |row| {
                 Ok(StoredProviderEventKey {
                     event_type: row.get(0)?,
@@ -1525,7 +1529,8 @@ pub fn append_provider_event_with_receipt(
                     && prior.receipt_response_sha256.is_none()
             }
         };
-        if prior.event_type != event.event_type || prior.payload_json != event.payload_json
+        if prior.event_type != event.event_type
+            || prior.payload_json != event.payload_json
             || !receipt_matches
         {
             return Err(PersistenceError::Conflict(
