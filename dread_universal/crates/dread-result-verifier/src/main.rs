@@ -275,9 +275,9 @@ fn read_nofollow_regular_file(
     let mut options = OpenOptions::new();
     options.read(true);
     options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    let file = options
-        .open(path)
-        .map_err(|error| format!("cannot safely open {name} without following symlinks: {error}"))?;
+    let file = options.open(path).map_err(|error| {
+        format!("cannot safely open {name} without following symlinks: {error}")
+    })?;
     let metadata = file
         .metadata()
         .map_err(|error| format!("cannot inspect opened {name}: {error}"))?;
@@ -539,10 +539,7 @@ fn load_private_key(path: &Path, expected_uid: u32) -> Result<Ed25519KeyPair, St
     })
 }
 
-fn load_policy(
-    path: &Path,
-    expected_uid: u32,
-) -> Result<(VerificationPolicy, String), String> {
+fn load_policy(path: &Path, expected_uid: u32) -> Result<(VerificationPolicy, String), String> {
     let encoded = read_owner_private_file(
         path,
         expected_uid,
@@ -1461,16 +1458,17 @@ mod tests {
         let target = directory.join("private-key.pk8");
         let link = directory.join("private-key-link.pk8");
         write_sync_file(&target, b"not-a-real-pkcs8-key").unwrap();
-        assert!(
-            read_owner_private_file(&target, owner_uid, 4096, "test private key").is_ok()
-        );
+        assert!(read_owner_private_file(&target, owner_uid, 4096, "test private key").is_ok());
         symlink(&target, &link).unwrap();
+        assert!(read_owner_private_file(&link, owner_uid, 4096, "test private key").is_err());
         assert!(
-            read_owner_private_file(&link, owner_uid, 4096, "test private key").is_err()
-        );
-        assert!(
-            read_owner_private_file(&target, owner_uid.saturating_add(1), 4096, "test private key")
-                .is_err()
+            read_owner_private_file(
+                &target,
+                owner_uid.saturating_add(1),
+                4096,
+                "test private key"
+            )
+            .is_err()
         );
         fs::remove_dir_all(directory).unwrap();
     }
@@ -1486,13 +1484,16 @@ mod tests {
         let target = directory.join("receipt-target.json");
         let link = directory.join("receipt-link.json");
         write_sync_shared_file(&target, b"not-a-signed-receipt").unwrap();
-        assert!(
-            read_shared_output_file(&target, expected_uid, expected_gid).is_ok()
-        );
+        assert!(read_shared_output_file(&target, expected_uid, expected_gid).is_ok());
         symlink(&target, &link).unwrap();
         assert!(read_shared_output_file(&link, expected_uid, expected_gid).is_err());
         assert!(
-            read_shared_output_file(&target, expected_uid.saturating_add(1), expected_gid).is_err()
+            read_shared_output_file(
+                &target,
+                expected_uid.saturating_add(1),
+                expected_gid
+            )
+            .is_err()
         );
         fs::remove_dir_all(directory).unwrap();
     }
