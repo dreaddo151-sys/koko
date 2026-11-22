@@ -34,7 +34,7 @@ jobs:
           node-version: 22
       - name: Build Rust API
         working-directory: dread_universal
-        run: cargo build --release --locked --bin dread-universal
+        run: cargo build --release --locked --bin dread-universal --bin dread-result-verifier
       - name: Build production web console
         working-directory: dread_universal/web
         run: |
@@ -57,6 +57,7 @@ jobs:
           trap 'rm -f "$archive_listing"' EXIT
           tar -tzf dist/release/dread-universal-ubuntu-*.tar.gz > "$archive_listing"
           grep -Fqx 'bundle/bin/dread-universal' "$archive_listing"
+          grep -Fqx 'bundle/bin/dread-result-verifier' "$archive_listing"
           grep -Fqx 'bundle/web/dist/index.html' "$archive_listing"
       - name: Sign and verify release checksum manifest
         working-directory: dread_universal
