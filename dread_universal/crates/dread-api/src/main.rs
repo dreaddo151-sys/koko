@@ -485,7 +485,7 @@ fn open_database(path: &str) -> anyhow::Result<Connection> {
         fs::create_dir_all(parent)?;
     }
 
-    let conn = Connection::open(path)?;
+    let mut conn = Connection::open(path)?;
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA foreign_keys = ON;
