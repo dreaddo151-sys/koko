@@ -243,6 +243,7 @@ dependencies = [
  "dread-orchestrator",
  "dread-platform",
  "dread-skills",
+ "libc",
  "futures",
  "reqwest",
  "ring",
