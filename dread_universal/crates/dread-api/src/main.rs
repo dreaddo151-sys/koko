@@ -5383,7 +5383,9 @@ async fn execution_trust_status(State(state): State<AppState>) -> Json<Value> {
             "dispatch": "blocked",
             "required_environment": [
                 "DREAD_EXECUTION_TRUST_MANIFEST",
-                "DREAD_EXECUTION_TRUST_PUBLIC_KEY_HEX"
+                "DREAD_EXECUTION_TRUST_PUBLIC_KEY_HEX",
+                "DREAD_EXECUTION_POLICY_MANIFEST",
+                "DREAD_EXECUTION_POLICY_PUBLIC_KEY_HEX"
             ],
             "independent_result_verification": "not_configured_fail_closed"
         })),
