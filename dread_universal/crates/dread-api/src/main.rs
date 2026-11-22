@@ -6746,6 +6746,9 @@ mod tests {
             )
             .unwrap();
         }
+        let adapter = Arc::new(MockAgentAdapter::new());
+        let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
+        adapters.insert("hermes".into(), adapter.clone());
         let (events, _) = broadcast::channel(256);
         let state = AppState {
             db,
@@ -6753,7 +6756,7 @@ mod tests {
             supervisor: None,
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
-            agent_adapters: Arc::new(HashMap::new()),
+            agent_adapters: Arc::new(adapters),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             api_token: Some("test-token".to_string()),
             operator_id: "test-operator".to_string(),
@@ -6808,6 +6811,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(deferred_event_count, 1);
+        assert!(
+            adapter.starts.lock().unwrap().is_empty(),
+            "startup recovery must never resubmit provider-backed work"
+        );
 
         let queued_agent_status: String = conn
             .query_row(
