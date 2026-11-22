@@ -3854,6 +3854,8 @@ mod tests {
     fn mission_cannot_resume_dispatch_while_sibling_requires_reconciliation() {
         let mut db = canonical_db();
         install(&mut db, 100).unwrap();
+        begin_startup_recovery(&mut db, 100).unwrap();
+        assert!(release_startup_dispatch_barrier(&mut db, 100).unwrap());
 
         let first = dispatch_request("request-1", 1);
         authorize_and_persist(&mut db, &first, &TestAuthority, 100).unwrap();
