@@ -1,3 +1,7 @@
+use crate::runtime_attestation::{
+    RuntimeIsolationAttestationSummary, RuntimeIsolationControl,
+    VerifiedRuntimeIsolationAttestation,
+};
 //! Hermes Agent API-server adapter.
 //!
 //! This adapter talks only to the documented HTTP Runs API. The API server has
@@ -30,6 +34,7 @@ pub struct HermesApiAdapter {
     api_key: String,
     sandbox_attested: bool,
     receipt_signer: Option<AgentReceiptSigner>,
+    runtime_attestation: Option<RuntimeIsolationAttestationSummary>,
 }
 
 impl HermesApiAdapter {
@@ -105,6 +110,7 @@ impl HermesApiAdapter {
             api_key,
             sandbox_attested: false,
             receipt_signer: None,
+            runtime_attestation: None,
         })
     }
 
@@ -121,7 +127,7 @@ impl HermesApiAdapter {
     /// Supported backends are isolated execution environments. For Docker,
     /// verify container_persistent is false, no host workspace mount, and no
     /// extra arguments that weaken the provider's container security.
-    pub fn attest_sandbox(
+    pub(crate) fn attest_sandbox(
         mut self,
         terminal_backend: &str,
         isolated_workspace_per_task: bool,
@@ -244,6 +250,10 @@ impl HermesApiAdapter {
 impl AgentAdapter for HermesApiAdapter {
     fn descriptor(&self) -> &AgentDescriptor {
         &self.descriptor
+    }
+
+    fn runtime_isolation_attestation(&self) -> Option<RuntimeIsolationAttestationSummary> {
+        self.runtime_attestation.clone()
     }
 
     fn health<'a>(&'a self) -> AdapterFuture<'a, AgentHealth> {
