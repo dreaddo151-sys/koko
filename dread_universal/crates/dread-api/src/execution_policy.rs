@@ -8,6 +8,8 @@
 use ring::{digest, signature};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{collections::HashSet, env, path::PathBuf};
 
 const MAX_POLICY_BYTES: u64 = 1_048_576;
@@ -257,6 +259,12 @@ impl ExecutionPolicyAuthority {
             MAX_POLICY_BYTES,
             "execution policy manifest",
         )?;
+        #[cfg(unix)]
+        if opened.metadata.permissions().mode() & 0o022 != 0 {
+            return Err(
+                "execution policy manifest must not be group- or world-writable".into(),
+            );
+        }
         VerifiedExecutionPolicy::verify(&opened.bytes, &self.public_key_hex, now)
     }
 }
@@ -543,6 +551,15 @@ mod tests {
         assert!(authority.authorize(input("request-a"), now).is_err());
 
         fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn policy_manifest_mode_rejects_group_and_world_write_bits() {
+        assert_eq!(0o600 & 0o022, 0);
+        assert_eq!(0o640 & 0o022, 0);
+        assert_ne!(0o660 & 0o022, 0);
+        assert_ne!(0o622 & 0o022, 0);
     }
 
     #[cfg(unix)]
