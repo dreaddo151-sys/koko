@@ -8,11 +8,7 @@
 use ring::{digest, signature};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{
-    collections::HashSet,
-    env, fs,
-    path::PathBuf,
-};
+use std::{collections::HashSet, env, fs, path::PathBuf};
 
 const MAX_POLICY_BYTES: u64 = 1_048_576;
 const MAX_POLICY_LIFETIME_SECONDS: i64 = 30 * 24 * 60 * 60;
@@ -176,8 +172,7 @@ impl VerifiedExecutionPolicy {
         });
         let binding_bytes = serde_json::to_vec(&binding)
             .map_err(|error| format!("cannot bind execution policy decision: {error}"))?;
-        let binding_sha256 =
-            hex_encode(digest::digest(&digest::SHA256, &binding_bytes).as_ref());
+        let binding_sha256 = hex_encode(digest::digest(&digest::SHA256, &binding_bytes).as_ref());
         let decision_id = format!(
             "policy:{}:{}:{}",
             manifest.policy_id, manifest.revision, binding_sha256
@@ -344,7 +339,9 @@ fn validate_input(input: &ExecutionPolicyInput<'_>) -> Result<(), String> {
         || input.operation != "agent.execute"
         || input.permission_scope != "agent:execute"
     {
-        return Err("execution policy input has an unsupported operation, scope, or attempt".into());
+        return Err(
+            "execution policy input has an unsupported operation, scope, or attempt".into(),
+        );
     }
     Ok(())
 }
@@ -537,8 +534,7 @@ mod tests {
         let (encoded, key) = signed_policy(now, vec![allow_rule()]);
         assert!(VerifiedExecutionPolicy::verify(&encoded, &key, now + 3600).is_err());
 
-        let mut envelope: SignedExecutionPolicyEnvelope =
-            serde_json::from_slice(&encoded).unwrap();
+        let mut envelope: SignedExecutionPolicyEnvelope = serde_json::from_slice(&encoded).unwrap();
         envelope.payload.rules[0].requester_id = "attacker".into();
         let tampered = serde_json::to_vec(&envelope).unwrap();
         assert!(VerifiedExecutionPolicy::verify(&tampered, &key, now).is_err());
