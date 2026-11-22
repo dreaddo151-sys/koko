@@ -842,6 +842,20 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
         })
     }
 
+    fn reconcile_start_with_evidence<'a>(
+        &'a self,
+        identity: &'a AgentExecutionIdentity,
+    ) -> AdapterFuture<'a, AgentOperationReceipt<AgentTask>> {
+        Box::pin(async move {
+            // OpenHands conversation IDs are deterministically equal to the
+            // DREAD task ID. This is a read-only GET; it never creates or
+            // resumes a conversation and can safely resolve a lost ack.
+            let provider_execution_id = identity.task_id.clone();
+            self.task_status_with_evidence(identity, &provider_execution_id)
+                .await
+        })
+    }
+
     fn task_status_with_evidence<'a>(
         &'a self,
         identity: &'a AgentExecutionIdentity,
