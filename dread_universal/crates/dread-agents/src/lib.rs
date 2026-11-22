@@ -14,7 +14,7 @@ use futures::future::BoxFuture;
 use ring::{digest, signature};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{fmt, sync::Arc};
+use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
