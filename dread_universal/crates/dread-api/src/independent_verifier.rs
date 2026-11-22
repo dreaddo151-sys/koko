@@ -265,9 +265,7 @@ impl IndependentResultVerifier {
         }
         let signature_bytes = decode_hex(&envelope.signature_hex)?;
         if signature_bytes.len() != 64 {
-            return Err(
-                "independent verifier Ed25519 signature must be exactly 64 bytes".into(),
-            );
+            return Err("independent verifier Ed25519 signature must be exactly 64 bytes".into());
         }
         let payload_bytes = serde_json::to_vec(&envelope.payload).map_err(|error| {
             format!("cannot canonicalize independent verifier payload: {error}")
