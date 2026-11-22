@@ -2,6 +2,7 @@ mod durable_agent;
 mod execution_authority;
 mod execution_policy;
 mod independent_verifier;
+mod provider_probe;
 mod providers;
 mod secure_file;
 
@@ -5525,6 +5526,43 @@ async fn providers_sync(State(state): State<AppState>) -> Result<Json<Value>, Ap
     Ok(Json(report))
 }
 
+async fn probe_provider(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let metadata = {
+        let conn = db_lock(&state)?;
+        conn.query_row(
+            "SELECT metadata FROM registry WHERE id = ?1 AND kind LIKE 'provider.%'",
+            rusqlite::params![id],
+            |r| r.get::<_, String>(0),
+        )
+        .map_err(|_| ApiError::not_found("provider not found"))?
+    };
+    let meta: Value =
+        serde_json::from_str(&metadata).map_err(|e| ApiError::internal(e.to_string()))?;
+    let spec: providers::ProviderSpec = serde_json::from_value(meta["provider_spec"].clone())
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let api_key = spec
+        .api_key_env
+        .as_ref()
+        .and_then(|name| std::env::var(name).ok());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let report = provider_probe::probe_openai_compat(
+        &client,
+        &spec.base_url,
+        api_key.as_deref(),
+        spec.model.as_deref(),
+    )
+    .await;
+    Ok(Json(
+        serde_json::to_value(&report).map_err(|e| ApiError::internal(e.to_string()))?,
+    ))
+}
+
 async fn comfyui_monitor() -> Result<Json<dread_media::ComfyUiMonitor>, ApiError> {
     let client = dread_media::ComfyUiClient::from_env()
         .map_err(|error| ApiError::internal(format!("Invalid ComfyUI configuration: {error}")))?;
@@ -5607,6 +5645,10 @@ fn app(state: AppState) -> Router {
         )
         .route("/api/providers", get(providers_list))
         .route("/api/providers/sync", axum::routing::post(providers_sync))
+        .route(
+            "/api/providers/{id}/probe",
+            axum::routing::post(probe_provider),
+        )
         .route("/api/repair/plan", get(repair_plan))
         .route("/api/media/comfyui/monitor", get(comfyui_monitor))
         .route("/api/media/workflows/discover", get(workflow_discovery))
