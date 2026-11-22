@@ -698,9 +698,7 @@ pub fn provider_evidence_from_adapter_receipt<T: serde::Serialize>(
     let recomputed_digest =
         response_sha256(&receipt.response).map_err(|error| error.to_string())?;
     if recomputed_digest != payload.response_sha256 {
-        return Err(
-            "adapter receipt response digest does not match the returned response".into(),
-        );
+        return Err("adapter receipt response digest does not match the returned response".into());
     }
     let evidence_kind = match payload.evidence_kind {
         AgentOperationEvidenceKind::Acknowledged => "acknowledged",
