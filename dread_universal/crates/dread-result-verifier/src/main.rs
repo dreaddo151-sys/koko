@@ -258,6 +258,10 @@ where
     Ok(envelope.payload)
 }
 
+fn has_exact_unix_permission_mode(mode: u32, expected: u32) -> bool {
+    mode & 0o7777 == expected
+}
+
 fn secure_file_metadata(path: &Path, max_bytes: u64, name: &str) -> Result<fs::Metadata, String> {
     let metadata =
         fs::symlink_metadata(path).map_err(|error| format!("cannot inspect {name}: {error}"))?;
@@ -270,8 +274,8 @@ fn secure_file_metadata(path: &Path, max_bytes: u64, name: &str) -> Result<fs::M
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(format!("{name} must be owner-only (0600 or stricter)"));
+        if !has_exact_unix_permission_mode(metadata.permissions().mode(), 0o600) {
+            return Err(format!("{name} must have exact owner-only mode 0600"));
         }
     }
     Ok(metadata)
@@ -397,7 +401,7 @@ fn validate_shared_output_file(
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         if metadata.uid() != expected_uid
             || metadata.gid() != expected_gid
-            || metadata.permissions().mode() & 0o777 != 0o640
+            || !has_exact_unix_permission_mode(metadata.permissions().mode(), 0o640)
         {
             return Err("existing verifier output has an unexpected owner, group or mode".into());
         }
@@ -480,9 +484,11 @@ fn require_private_file_owner(path: &Path, expected_uid: u32, name: &str) -> Res
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        if metadata.uid() != expected_uid || metadata.permissions().mode() & 0o077 != 0 {
+        if metadata.uid() != expected_uid
+            || !has_exact_unix_permission_mode(metadata.permissions().mode(), 0o600)
+        {
             return Err(format!(
-                "{name} must be owned by the verifier UID and use mode 0600"
+                "{name} must be owned by the verifier UID and use exact mode 0600"
             ));
         }
     }
@@ -1218,6 +1224,19 @@ mod tests {
     }
 
     #[test]
+    fn exact_permission_check_rejects_special_mode_bits() {
+        assert!(has_exact_unix_permission_mode(0o600, 0o600));
+        assert!(!has_exact_unix_permission_mode(0o4600, 0o600));
+        assert!(!has_exact_unix_permission_mode(0o2600, 0o600));
+        assert!(!has_exact_unix_permission_mode(0o1600, 0o600));
+        assert!(!has_exact_unix_permission_mode(0o640, 0o600));
+        assert!(has_exact_unix_permission_mode(0o640, 0o640));
+        assert!(!has_exact_unix_permission_mode(0o4640, 0o640));
+        assert!(!has_exact_unix_permission_mode(0o2640, 0o640));
+        assert!(!has_exact_unix_permission_mode(0o1640, 0o640));
+    }
+
+    #[test]
     fn capability_policy_requires_declared_non_null_result_paths() {
         let policy = policy();
         assert!(
@@ -1392,7 +1411,7 @@ mod tests {
         let output = fs::metadata(directory.join("sample.json")).unwrap();
         assert_eq!(output.uid(), uid);
         assert_eq!(output.gid(), gid);
-        assert_eq!(output.permissions().mode() & 0o777, 0o640);
+        assert_eq!(output.permissions().mode() & 0o7777, 0o640);
         fs::remove_dir_all(directory).unwrap();
     }
 
