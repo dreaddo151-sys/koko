@@ -4701,49 +4701,8 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
             && task.agent_provider.is_none()
             && task.approval_required
             && task.approved_by.is_some();
-        let agent_eligible = if let (Some(provider), Some(capability_id)) = (
-            task.agent_provider.as_deref(),
-            task.capability_id.as_deref(),
-        ) {
-            let encoded: Option<String> = tx
-                .query_row(
-                    "SELECT record_json FROM capabilities WHERE id = ?1",
-                    params![capability_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let capability_enabled = encoded
-                .and_then(|value| serde_json::from_str::<CapabilityRecord>(&value).ok())
-                .is_some_and(|capability| {
-                    capability.status == CapabilityStatus::Enabled
-                        && capability.adapter.as_deref() == Some(provider)
-                });
-            let adapter_enabled = state
-                .agent_adapters
-                .get(provider)
-                .is_some_and(|adapter| adapter.descriptor().enabled);
-            task.approval_required
-                && task.approved_by.is_some()
-                && capability_enabled
-                && adapter_enabled
-        } else {
-            false
-        };
 
-        if builtin_eligible || agent_eligible {
-            if task.agent_provider.is_some() {
-                emitted.push(
-                    append_task_event(
-                        &tx,
-                        &task.id,
-                        "task_recovery_resumed",
-                        &json!({"status": "queued", "provider": task.agent_provider}),
-                        "recovery",
-                        now,
-                    )
-                    .map_err(|error| anyhow::anyhow!(error.message))?,
-                );
-            }
+        if builtin_eligible {
             resumable.push(task);
             continue;
         }
@@ -4801,35 +4760,16 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
             .lock()
             .map_err(|_| anyhow::anyhow!("Task cancellation registry is unavailable"))?
             .insert(task.id.clone(), cancel_sender);
-        if let Some(provider) = task.agent_provider {
-            let adapter = state
-                .agent_adapters
-                .get(&provider)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("Recovered provider adapter disappeared"))?;
-            tokio::spawn(execute_agent_task(
-                state.clone(),
-                adapter,
-                AgentTaskExecution {
-                    task_id: task.id,
-                    provider,
-                    capability_id: task.capability_id.unwrap_or_default(),
-                    payload: task.payload,
-                    initial_event_cursor: task.provider_event_cursor,
-                },
-                cancel_receiver,
-            ));
-        } else {
-            tokio::spawn(execute_approved_task(
-                state.clone(),
-                task.id,
-                task.task_type,
-                task.payload,
-                cancel_receiver,
-            ));
-        }
+        // Only built-in work enters this list. Provider-backed work is always
+        // deferred above until durable dispatch and recovery are integrated.
+        tokio::spawn(execute_approved_task(
+            state.clone(),
+            task.id,
+            task.task_type,
+            task.payload,
+            cancel_receiver,
+        ));
     }
-
     Ok(recovered_count)
 }
 
