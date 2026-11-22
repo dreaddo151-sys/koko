@@ -5,7 +5,7 @@
 //! transport outcome remains nonterminal and is left for reconciliation.
 
 use crate::{
-    AgentTaskExecution, AppState, TaskEvent,
+    AgentTaskExecution, AppState, TaskEvent, finish_agent_task,
     execution_authority::{
         agent_execution_identity, durable_agent_start_request, provider_event_from_adapter_receipt,
         provider_evidence_from_adapter_receipt,
@@ -15,6 +15,7 @@ use dread_agents::{AgentAdapter, AgentTaskState};
 use dread_orchestrator::persistence::{
     self, DispatchPreparation, DispatchRequest, EventAppendResult, ProviderTerminalPayload,
 };
+use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use std::{
     sync::Arc,
@@ -82,6 +83,84 @@ fn mark_reconciliation_required(state: &AppState, request_id: &str, reason: &str
     {
         warn!(request_id, error = %error, "Could not persist reconciliation-required state");
     }
+}
+
+fn unresolved_request_for_task(
+    connection: &rusqlite::Connection,
+    task_id: &str,
+) -> Result<Option<String>, rusqlite::Error> {
+    connection
+        .query_row(
+            "SELECT request_id
+             FROM dread_task_attempts
+             WHERE task_id = ?1
+               AND (
+                   dispatch_state IN (
+                       'dispatching', 'acknowledged', 'running',
+                       'provider_succeeded', 'reconciliation_required'
+                   )
+                   OR cancellation_state IN (
+                       'requested', 'request_sent', 'accepted', 'cancelling', 'unknown'
+                   )
+               )
+             ORDER BY attempt_number DESC
+             LIMIT 1",
+            [task_id],
+            |row| row.get(0),
+        )
+        .optional()
+}
+
+fn handle_durable_preparation_failure(state: &AppState, task_id: &str, reason: &str) {
+    let unresolved_request = {
+        let connection = match state.db.lock() {
+            Ok(connection) => connection,
+            Err(_) => {
+                warn!(
+                    task_id,
+                    error = %reason,
+                    "Could not inspect durable attempts after pre-start preparation failure; task state is left unchanged"
+                );
+                return;
+            }
+        };
+        match unresolved_request_for_task(&connection, task_id) {
+            Ok(request_id) => request_id,
+            Err(error) => {
+                warn!(
+                    task_id,
+                    database_error = %error,
+                    preparation_error = %reason,
+                    "Could not determine whether a provider side effect may exist; task state is left unchanged"
+                );
+                return;
+            }
+        }
+    };
+
+    if let Some(request_id) = unresolved_request {
+        // Preserve the ambiguous remote outcome. A task with an unresolved
+        // durable attempt must never be finalized as a local pre-start failure.
+        mark_reconciliation_required(
+            state,
+            &request_id,
+            &format!("durable preparation could not continue: {reason}"),
+        );
+        return;
+    }
+
+    // No unresolved attempt means this failure happened before a provider
+    // side effect could be issued. Persist a terminal task result/event instead
+    // of leaving an accepted task queued forever with no worker to resume it.
+    finish_agent_task(
+        state,
+        task_id,
+        "failed",
+        None,
+        Some(format!(
+            "Durable provider dispatch failed before start: {reason}"
+        )),
+    );
 }
 
 /// Admission and attempt creation happen after the shared ExecutionGate grants
@@ -399,7 +478,12 @@ pub(super) async fn execute_durable_agent_task_inner(
         Ok(Some(prepared)) => prepared,
         Ok(None) => return,
         Err(error) => {
-            warn!(task_id = %execution.task_id, error = %error, "Durable provider dispatch preparation failed; no provider start was sent");
+            warn!(
+                task_id = %execution.task_id,
+                error = %error,
+                "Durable provider dispatch preparation failed; no provider start was sent"
+            );
+            handle_durable_preparation_failure(&state, &execution.task_id, &error);
             return;
         }
     };
