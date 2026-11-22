@@ -83,11 +83,13 @@ make_bundle() {
   mkdir -p "$bundle/bin" "$bundle/web/dist/assets" "$bundle/config" "$bundle/scripts" "$bundle/docs"
   mkdir -p "$bundle/systemd"
   printf '#!/usr/bin/env bash\necho %s\n' "$version" > "$bundle/bin/dread-universal"
-  chmod +x "$bundle/bin/dread-universal"
+  printf '#!/usr/bin/env bash\necho verifier-%s\n' "$version" > "$bundle/bin/dread-result-verifier"
+  chmod +x "$bundle/bin/dread-universal" "$bundle/bin/dread-result-verifier"
   printf '<div id="root"></div>\n' > "$bundle/web/dist/index.html"
   printf 'body{}\n' > "$bundle/web/dist/assets/app.css"
   printf 'default-services\n' > "$bundle/config/services.toml"
   printf 'default-agents\n' > "$bundle/config/agents.toml"
+  printf '{"schema_version":1,"policy_id":"example","rules":[]}\n' > "$bundle/config/independent-result-verifier.policy.example.json"
   printf '# docs\n' > "$bundle/README.md"
   printf '# docs\n' > "$bundle/docs/README.md"
   printf '#!/usr/bin/env bash\n' > "$bundle/scripts/helper.sh"
@@ -114,6 +116,8 @@ run_installer() {
 BUNDLE1="$(make_bundle v1)"
 run_installer "$BUNDLE1"
 [[ "$("$PREFIX/bin/dread-universal")" == v1 ]]
+[[ "$("$PREFIX/bin/dread-result-verifier")" == verifier-v1 ]]
+[[ -f "$PREFIX/config/independent-result-verifier.policy.example.json" ]]
 grep -q 'custom-services-config' "$HOME/.config/dread-universal/services.toml"
 grep -q 'legacy-sqlite-bytes' "$HOME/.local/share/dread-universal/data/dread_registry.sqlite3"
 grep -q 'legacy-api-token' "$HOME/.config/dread-universal/dread.env"
@@ -148,6 +152,7 @@ printf 'DREAD_COMFYUI_URL=http://127.0.0.1:8999\nDREAD_COMFYUI_USER_ROOT=/custom
 BUNDLE2="$(make_bundle v2)"
 run_installer "$BUNDLE2"
 [[ "$("$PREFIX/bin/dread-universal")" == v2 ]]
+[[ "$("$PREFIX/bin/dread-result-verifier")" == verifier-v2 ]]
 [[ "$(cat "$STATE")" == active ]]
 grep -q 'operator-watchdog-override' "$HOME/.config/systemd/user/dread-watchdog.service"
 grep -q 'operator-watchdog-timer-override' "$HOME/.config/systemd/user/dread-watchdog.timer"
