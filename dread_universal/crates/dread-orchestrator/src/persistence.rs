@@ -534,6 +534,7 @@ pub fn install(connection: &mut Connection, now: i64) -> Result<(), PersistenceE
             "receipt_key_id",
             "receipt_payload_json",
             "receipt_signature_hex",
+            "receipt_response_sha256",
         ],
     )?;
     require_columns(
@@ -544,6 +545,7 @@ pub fn install(connection: &mut Connection, now: i64) -> Result<(), PersistenceE
             "receipt_key_id",
             "receipt_payload_json",
             "receipt_signature_hex",
+            "receipt_response_sha256",
         ],
     )?;
     require_columns(
@@ -1478,7 +1480,15 @@ pub fn append_provider_event_with_receipt(
             now,
         )
         .map_err(PersistenceError::Authority)?;
-    let prior: Option<(String, String, i64, Option<String>, Option<String>, Option<String>, Option<String>)> = tx
+    let prior: Option<(
+        String,
+        String,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = tx
         .query_row(
             "SELECT event_type, payload_json, task_event_sequence, receipt_key_id,
                     receipt_payload_json, receipt_signature_hex, receipt_response_sha256
@@ -1498,7 +1508,16 @@ pub fn append_provider_event_with_receipt(
             },
         )
         .optional()?;
-    if let Some((prior_type, prior_payload, sequence, prior_key, prior_receipt, prior_signature, prior_hash)) = prior {
+    if let Some((
+        prior_type,
+        prior_payload,
+        sequence,
+        prior_key,
+        prior_receipt,
+        prior_signature,
+        prior_hash,
+    )) = prior
+    {
         let receipt_matches = match receipt {
             Some(receipt) => {
                 prior_key.as_deref() == Some(receipt.key_id.as_str())
@@ -1511,7 +1530,7 @@ pub fn append_provider_event_with_receipt(
                     && prior_receipt.is_none()
                     && prior_signature.is_none()
                     && prior_hash.is_none()
-            },
+            }
         };
         if prior_type != event_type || prior_payload != payload_json || !receipt_matches {
             return Err(PersistenceError::Conflict(
@@ -3251,10 +3270,22 @@ fn persist_evidence(
             evidence.source_reference.clone(),
             evidence.observed_at,
             evidence.expires_at,
-            evidence.receipt.as_ref().map(|receipt| receipt.key_id.clone()),
-            evidence.receipt.as_ref().map(|receipt| receipt.payload_json.clone()),
-            evidence.receipt.as_ref().map(|receipt| receipt.signature_hex.clone()),
-            evidence.receipt.as_ref().map(|receipt| receipt.response_sha256.clone()),
+            evidence
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.key_id.clone()),
+            evidence
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.payload_json.clone()),
+            evidence
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.signature_hex.clone()),
+            evidence
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.response_sha256.clone()),
         );
         if existing == expected {
             return Ok(());
@@ -3284,10 +3315,22 @@ fn persist_evidence(
             evidence.source_reference,
             evidence.observed_at,
             evidence.expires_at,
-            evidence.receipt.as_ref().map(|receipt| receipt.key_id.as_str()),
-            evidence.receipt.as_ref().map(|receipt| receipt.payload_json.as_str()),
-            evidence.receipt.as_ref().map(|receipt| receipt.signature_hex.as_str()),
-            evidence.receipt.as_ref().map(|receipt| receipt.response_sha256.as_str())
+            evidence
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.key_id.as_str()),
+            evidence
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.payload_json.as_str()),
+            evidence
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.signature_hex.as_str()),
+            evidence
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.response_sha256.as_str())
         ],
     )?;
     Ok(())
