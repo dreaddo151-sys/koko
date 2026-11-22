@@ -30,7 +30,7 @@ use dread_agents::{
     runtime_attestation::VerifiedRuntimeIsolationAttestation,
 };
 use dread_discovery::{
-    discover, discover_agent_manifests, discover_agents, known_agent_endpoints, load_agents,
+    discover, discover_agent_manifests, discover_agents, known_agent_endpoints, load_agents, AgentEndpoint,
     load_services,
 };
 use dread_gpu::{GpuGatewayClient, GpuSupervisorClient};
@@ -885,6 +885,27 @@ async fn agents() -> Result<Json<Value>, ApiError> {
         if !endpoints.iter().any(|item| item.id == candidate.id) {
             endpoints.push(candidate);
         }
+    }
+    // Downloaded agents become visible without any configuration: manifests
+    // on disk are loopback-URL validated at discovery and always merged
+    // disabled, so they are listed as DISABLED with no probe and no
+    // execution path. Enabling stays an explicit agents.toml edit.
+    match tokio::task::spawn_blocking(discover_agent_manifests).await {
+        Ok(inventory) => {
+            for manifest in inventory.manifests {
+                if endpoints.iter().any(|item| item.id == manifest.id) {
+                    continue;
+                }
+                endpoints.push(AgentEndpoint {
+                    id: manifest.id,
+                    name: manifest.name,
+                    adapter: manifest.adapter,
+                    health_url: manifest.health_url,
+                    enabled: false,
+                });
+            }
+        }
+        Err(error) => eprintln!("agent manifest merge skipped: {error}"),
     }
     let results = discover_agents(endpoints).await;
     serde_json::to_value(results).map(Json).map_err(|error| {
