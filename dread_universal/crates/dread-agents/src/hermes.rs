@@ -7,7 +7,7 @@
 use crate::{
     AdapterFuture, AgentAdapter, AgentAdapterError, AgentCapability, AgentDescriptor, AgentEvent,
     AgentExecutionIdentity, AgentHealth, AgentHealthState, AgentOperationEvidenceKind,
-    AgentOperationReceipt, AgentReceiptSigner, AgentTask, AgentTaskState, DurableAgentStartRequest,
+    AgentOperationReceiptDetails, AgentOperationReceipt, AgentReceiptSigner, AgentTask, AgentTaskState, DurableAgentStartRequest,
     StartTaskRequest, durable_evidence_error, signed_agent_operation_receipt,
 };
 use reqwest::{Client, StatusCode, Url};
