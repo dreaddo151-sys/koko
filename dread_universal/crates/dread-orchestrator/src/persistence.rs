@@ -3147,6 +3147,22 @@ fn ensure_mission_task_dispatchable(
         ));
     }
 
+    let unresolved_siblings: i64 = tx.query_row(
+        "SELECT COUNT(*)
+         FROM mission_tasks mt
+         JOIN dread_task_attempts attempt ON attempt.task_id = mt.task_id
+         WHERE mt.mission_id = ?1
+           AND mt.task_id != ?2
+           AND attempt.dispatch_state = 'reconciliation_required'",
+        params![mission_id, task_id],
+        |row| row.get(0),
+    )?;
+    if unresolved_siblings != 0 {
+        return Err(PersistenceError::Conflict(format!(
+            "mission {mission_id} has another task requiring provider reconciliation"
+        )));
+    }
+
     for dependency_node_id in dependencies {
         let dependency_status: Option<String> = tx
             .query_row(
@@ -3832,6 +3848,57 @@ mod tests {
         )
         .unwrap();
         assert!(install(&mut db, 13).is_err());
+    }
+
+    #[test]
+    fn mission_cannot_resume_dispatch_while_sibling_requires_reconciliation() {
+        let mut db = canonical_db();
+        install(&mut db, 100).unwrap();
+
+        let first = dispatch_request("request-1", 1);
+        authorize_and_persist(&mut db, &first, &TestAuthority, 100).unwrap();
+        prepare_dispatch(&mut db, &first, &TestAuthority, 101).unwrap();
+        mark_reconciliation_required(
+            &mut db,
+            "request-1",
+            r#"{"reason":"provider outcome unknown"}"#,
+            102,
+        )
+        .unwrap();
+
+        db.execute("UPDATE missions SET status = 'queued' WHERE id = 'mission-1'", [])
+            .unwrap();
+        db.execute_batch(
+            "INSERT INTO tasks(
+                id,title,task_type,capability_id,payload_json,status,approval_required,
+                created_at,updated_at,provider_event_cursor
+             ) VALUES('task-2','Second','agent_task','cap-1','{}','queued',1,1,1,0);
+             INSERT INTO mission_tasks(mission_id,node_id,task_id,depends_on_json)
+             VALUES('mission-1','node-2','task-2','[]');",
+        )
+        .unwrap();
+
+        let second = DispatchRequest {
+            request_id: "request-2".into(),
+            task_id: "task-2".into(),
+            requester_id: "operator-1".into(),
+            worker_id: "dread-worker-2".into(),
+            attempt_number: 1,
+            permission_scope: "workspace:mission-1".into(),
+        };
+        authorize_and_persist(&mut db, &second, &TestAuthority, 103).unwrap();
+        assert!(
+            prepare_dispatch(&mut db, &second, &TestAuthority, 104).is_err(),
+            "a sibling reconciliation hold must block mission dispatch"
+        );
+        let mission_status: String = db
+            .query_row(
+                "SELECT status FROM missions WHERE id = 'mission-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mission_status, "queued");
     }
 
     #[test]
