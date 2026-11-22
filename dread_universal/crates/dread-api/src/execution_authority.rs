@@ -187,7 +187,10 @@ fn verify_runtime_isolation_binding(
         || runtime.attestor_id == registration.adapter_id
         || runtime.attestor_id == isolation.provenance.recorded_by_adapter_id
     {
-        return Err("runtime isolation attestor identity is not independent from the provider/adapter".into());
+        return Err(
+            "runtime isolation attestor identity is not independent from the provider/adapter"
+                .into(),
+        );
     }
     if runtime.attestation_id != isolation.evidence_id
         || runtime.provider_id != provider_id
@@ -210,17 +213,22 @@ fn verify_runtime_isolation_binding(
         );
     }
     if runtime.checks.len() != IsolationControl::ALL.len() {
-        return Err("independent runtime attestation does not contain exactly eight control observations".into());
+        return Err(
+            "independent runtime attestation does not contain exactly eight control observations"
+                .into(),
+        );
     }
     for control in IsolationControl::ALL {
-        let expected = isolation
-            .checks
-            .get(&control)
-            .ok_or_else(|| "signed provider isolation record is missing a required control".to_string())?;
+        let expected = isolation.checks.get(&control).ok_or_else(|| {
+            "signed provider isolation record is missing a required control".to_string()
+        })?;
         let actual = runtime
             .checks
             .get(isolation_control_name(control))
-            .ok_or_else(|| "independent runtime attestation is missing a required control observation".to_string())?;
+            .ok_or_else(|| {
+                "independent runtime attestation is missing a required control observation"
+                    .to_string()
+            })?;
         if !expected.verified || expected.durable_observation_id != *actual {
             return Err(format!(
                 "runtime attestation observation for '{}' does not match the signed provider registration",
@@ -1775,7 +1783,11 @@ mod tests {
             endpoint: registration.endpoint.clone(),
             runtime_identity: registration.isolation.runtime_identity.clone(),
             sandbox_backend: "modal".into(),
-            source_observation_id: registration.isolation.provenance.source_observation_id.clone(),
+            source_observation_id: registration
+                .isolation
+                .provenance
+                .source_observation_id
+                .clone(),
             evidence_bundle_sha256: registration.isolation.provenance.evidence_sha256.clone(),
             observed_at: registration.isolation.checked_at,
             expires_at: registration.isolation.expires_at,
@@ -1797,26 +1809,18 @@ mod tests {
     fn runtime_observer_must_match_every_signed_manifest_observation() {
         let now = 1_800_000_000;
         let (encoded, public_key) = signed_manifest(now);
-        let manifest =
-            VerifiedExecutionTrustManifest::verify(&encoded, &public_key, now).unwrap();
+        let manifest = VerifiedExecutionTrustManifest::verify(&encoded, &public_key, now).unwrap();
         let registration = manifest.provider("hermes", now).unwrap();
         let summary = runtime_summary_for(registration);
-        assert!(
-            verify_runtime_isolation_binding("hermes", registration, &summary, now).is_ok()
-        );
+        assert!(verify_runtime_isolation_binding("hermes", registration, &summary, now).is_ok());
 
         let mut changed_observation = summary.clone();
         changed_observation
             .checks
             .insert("egress_policy".into(), "different-observation".into());
         assert!(
-            verify_runtime_isolation_binding(
-                "hermes",
-                registration,
-                &changed_observation,
-                now
-            )
-            .is_err()
+            verify_runtime_isolation_binding("hermes", registration, &changed_observation, now)
+                .is_err()
         );
 
         let mut changed_bundle = summary.clone();
