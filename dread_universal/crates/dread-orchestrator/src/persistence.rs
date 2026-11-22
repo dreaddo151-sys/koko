@@ -47,24 +47,25 @@ type StoredRetryContractEvidence = (
     i64,
     bool,
 );
-type StoredProviderEvidence = (
-    String,
-    String,
-    String,
-    String,
-    String,
-    i64,
-    Option<String>,
-    String,
-    String,
-    String,
-    i64,
-    Option<i64>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-);
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoredProviderEvidence {
+    attempt_id: String,
+    request_id: String,
+    provider_id: String,
+    adapter_id: String,
+    adapter_version: String,
+    provider_registration_revision: i64,
+    provider_execution_id: Option<String>,
+    evidence_kind: String,
+    verifier_id: String,
+    source_reference: String,
+    observed_at: i64,
+    expires_at: Option<i64>,
+    receipt_key_id: Option<String>,
+    receipt_payload_json: Option<String>,
+    receipt_signature_hex: Option<String>,
+    receipt_response_sha256: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignedProviderReceipt {
@@ -3235,58 +3236,58 @@ fn persist_evidence(
          FROM dread_execution_evidence WHERE evidence_id = ?1",
             [&evidence.evidence_id],
             |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                    row.get(8)?,
-                    row.get(9)?,
-                    row.get(10)?,
-                    row.get(11)?,
-                    row.get(12)?,
-                    row.get(13)?,
-                    row.get(14)?,
-                    row.get(15)?,
-                ))
+                Ok(StoredProviderEvidence {
+                    attempt_id: row.get(0)?,
+                    request_id: row.get(1)?,
+                    provider_id: row.get(2)?,
+                    adapter_id: row.get(3)?,
+                    adapter_version: row.get(4)?,
+                    provider_registration_revision: row.get(5)?,
+                    provider_execution_id: row.get(6)?,
+                    evidence_kind: row.get(7)?,
+                    verifier_id: row.get(8)?,
+                    source_reference: row.get(9)?,
+                    observed_at: row.get(10)?,
+                    expires_at: row.get(11)?,
+                    receipt_key_id: row.get(12)?,
+                    receipt_payload_json: row.get(13)?,
+                    receipt_signature_hex: row.get(14)?,
+                    receipt_response_sha256: row.get(15)?,
+                })
             },
         )
         .optional()?;
     if let Some(existing) = existing {
-        let expected = (
-            attempt.attempt_id.clone(),
-            attempt.request_id.clone(),
-            evidence.provider_id.clone(),
-            evidence.adapter_id.clone(),
-            evidence.adapter_version.clone(),
-            evidence.provider_registration_revision,
-            evidence.provider_execution_id.clone(),
-            evidence.evidence_kind.clone(),
-            evidence.verifier_id.clone(),
-            evidence.source_reference.clone(),
-            evidence.observed_at,
-            evidence.expires_at,
-            evidence
+        let expected = StoredProviderEvidence {
+            attempt_id: attempt.attempt_id.clone(),
+            request_id: attempt.request_id.clone(),
+            provider_id: evidence.provider_id.clone(),
+            adapter_id: evidence.adapter_id.clone(),
+            adapter_version: evidence.adapter_version.clone(),
+            provider_registration_revision: evidence.provider_registration_revision,
+            provider_execution_id: evidence.provider_execution_id.clone(),
+            evidence_kind: evidence.evidence_kind.clone(),
+            verifier_id: evidence.verifier_id.clone(),
+            source_reference: evidence.source_reference.clone(),
+            observed_at: evidence.observed_at,
+            expires_at: evidence.expires_at,
+            receipt_key_id: evidence
                 .receipt
                 .as_ref()
                 .map(|receipt| receipt.key_id.clone()),
-            evidence
+            receipt_payload_json: evidence
                 .receipt
                 .as_ref()
                 .map(|receipt| receipt.payload_json.clone()),
-            evidence
+            receipt_signature_hex: evidence
                 .receipt
                 .as_ref()
                 .map(|receipt| receipt.signature_hex.clone()),
-            evidence
+            receipt_response_sha256: evidence
                 .receipt
                 .as_ref()
                 .map(|receipt| receipt.response_sha256.clone()),
-        );
+        };
         if existing == expected {
             return Ok(());
         }
