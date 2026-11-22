@@ -635,7 +635,9 @@ pub fn agent_execution_identity(
         || admission.adapter_version.is_empty()
         || attempt.worker_id.is_empty()
     {
-        return Err("durable admission and attempt do not describe the same provider execution".into());
+        return Err(
+            "durable admission and attempt do not describe the same provider execution".into(),
+        );
     }
     Ok(AgentExecutionIdentity {
         request_id: attempt.request_id.clone(),
@@ -689,12 +691,16 @@ pub fn provider_evidence_from_adapter_receipt<T: serde::Serialize>(
         || identity.adapter_version != adapter_version
         || identity.provider_registration_revision != registration_revision
     {
-        return Err("adapter receipt identity does not match the selected provider registration".into());
+        return Err(
+            "adapter receipt identity does not match the selected provider registration".into(),
+        );
     }
-    let recomputed_digest = response_sha256(&receipt.response)
-        .map_err(|error| error.to_string())?;
+    let recomputed_digest =
+        response_sha256(&receipt.response).map_err(|error| error.to_string())?;
     if recomputed_digest != payload.response_sha256 {
-        return Err("adapter receipt response digest does not match the returned response".into());
+        return Err(
+            "adapter receipt response digest does not match the returned response".into(),
+        );
     }
     let evidence_kind = match payload.evidence_kind {
         AgentOperationEvidenceKind::Acknowledged => "acknowledged",
@@ -1818,14 +1824,8 @@ mod tests {
         let mut event_receipt = receipt;
         event_receipt.evidence.payload.evidence_kind = AgentOperationEvidenceKind::Event;
         assert!(
-            provider_evidence_from_adapter_receipt(
-                "hermes",
-                "hermes",
-                "1.0.0",
-                7,
-                &event_receipt
-            )
-            .is_err()
+            provider_evidence_from_adapter_receipt("hermes", "hermes", "1.0.0", 7, &event_receipt)
+                .is_err()
         );
 
         assert!(
