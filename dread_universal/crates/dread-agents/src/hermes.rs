@@ -560,9 +560,11 @@ impl AgentAdapter for HermesApiAdapter {
                 &identity,
                 AgentOperationEvidenceKind::Acknowledged,
                 response.clone(),
-                response.provider_task_id.clone(),
-                None,
-                None,
+                AgentOperationReceiptDetails {
+                    provider_execution_id: response.provider_task_id.clone(),
+                    external_event_id: None,
+                    event_type: None,
+                },
             )
         })
     }
@@ -591,9 +593,11 @@ impl AgentAdapter for HermesApiAdapter {
                 identity,
                 kind,
                 response,
-                Some(provider_execution_id.to_owned()),
-                None,
-                None,
+                AgentOperationReceiptDetails {
+                    provider_execution_id: Some(provider_execution_id.to_owned()),
+                    external_event_id: None,
+                    event_type: None,
+                },
             )
         })
     }
@@ -623,9 +627,11 @@ impl AgentAdapter for HermesApiAdapter {
                     identity,
                     AgentOperationEvidenceKind::Event,
                     event,
-                    Some(provider_execution_id.to_owned()),
-                    Some(external_event_id),
-                    Some(event_type),
+                    AgentOperationReceiptDetails {
+                        provider_execution_id: Some(provider_execution_id.to_owned()),
+                        external_event_id: Some(external_event_id),
+                        event_type: Some(event_type),
+                    },
                 )?);
             }
             Ok(receipts)
@@ -659,9 +665,11 @@ impl AgentAdapter for HermesApiAdapter {
                 identity,
                 kind,
                 response,
-                Some(provider_execution_id.to_owned()),
-                None,
-                None,
+                AgentOperationReceiptDetails {
+                    provider_execution_id: Some(provider_execution_id.to_owned()),
+                    external_event_id: None,
+                    event_type: None,
+                },
             )
         })
     }
@@ -690,9 +698,11 @@ impl AgentAdapter for HermesApiAdapter {
                 identity,
                 kind,
                 response,
-                Some(provider_execution_id.to_owned()),
-                None,
-                None,
+                AgentOperationReceiptDetails {
+                    provider_execution_id: Some(provider_execution_id.to_owned()),
+                    external_event_id: None,
+                    event_type: None,
+                },
             )
         })
     }
