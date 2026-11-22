@@ -7,8 +7,8 @@
 use crate::{
     AgentTaskExecution, AppState, TaskEvent,
     execution_authority::{
-        agent_execution_identity, durable_agent_start_request,
-        provider_evidence_from_adapter_receipt, provider_event_from_adapter_receipt,
+        agent_execution_identity, durable_agent_start_request, provider_event_from_adapter_receipt,
+        provider_evidence_from_adapter_receipt,
     },
 };
 use dread_agents::{AgentAdapter, AgentTaskState};
@@ -23,6 +23,12 @@ use std::{
 use tokio::sync::watch;
 use tracing::{info, warn};
 use uuid::Uuid;
+
+struct PreparedDurableDispatch {
+    request_id: String,
+    identity: dread_agents::AgentExecutionIdentity,
+    start_request: dread_agents::DurableAgentStartRequest,
+}
 
 fn now_epoch_i64() -> i64 {
     SystemTime::now()
@@ -42,15 +48,15 @@ fn mark_reconciliation_required(state: &AppState, request_id: &str, reason: &str
     })
     .to_string();
     let Ok(mut connection) = state.db.lock() else {
-        warn!(request_id, "Could not acquire the database lock to record reconciliation");
+        warn!(
+            request_id,
+            "Could not acquire the database lock to record reconciliation"
+        );
         return;
     };
-    if let Err(error) = persistence::mark_reconciliation_required(
-        &mut connection,
-        request_id,
-        &reason_json,
-        now,
-    ) {
+    if let Err(error) =
+        persistence::mark_reconciliation_required(&mut connection, request_id, &reason_json, now)
+    {
         warn!(request_id, error = %error, "Could not persist reconciliation-required state");
     }
 }
@@ -61,7 +67,7 @@ fn mark_reconciliation_required(state: &AppState, request_id: &str, reason: &str
 fn prepare_new_attempt(
     state: &AppState,
     execution: &AgentTaskExecution,
-) -> Result<Option<(String, dread_agents::AgentExecutionIdentity, dread_agents::DurableAgentStartRequest)>, String> {
+) -> Result<Option<PreparedDurableDispatch>, String> {
     let authority = state
         .execution_authority
         .as_ref()
@@ -104,20 +110,12 @@ fn prepare_new_attempt(
         permission_scope: "agent:execute".into(),
     };
     let now = now_epoch_i64();
-    let admission = persistence::authorize_and_persist(
-        &mut connection,
-        &request,
-        authority.as_ref(),
-        now,
-    )
-    .map_err(|error| format!("durable provider admission was rejected: {error}"))?;
-    let preparation = persistence::prepare_dispatch(
-        &mut connection,
-        &request,
-        authority.as_ref(),
-        now,
-    )
-    .map_err(|error| format!("durable provider attempt preparation failed: {error}"))?;
+    let admission =
+        persistence::authorize_and_persist(&mut connection, &request, authority.as_ref(), now)
+            .map_err(|error| format!("durable provider admission was rejected: {error}"))?;
+    let preparation =
+        persistence::prepare_dispatch(&mut connection, &request, authority.as_ref(), now)
+            .map_err(|error| format!("durable provider attempt preparation failed: {error}"))?;
 
     let attempt = match preparation {
         DispatchPreparation::Created(attempt) => attempt,
@@ -141,7 +139,11 @@ fn prepare_new_attempt(
     }
     let start_request =
         durable_agent_start_request(&admission, &attempt, execution.payload.clone())?;
-    Ok(Some((request.request_id, identity, start_request)))
+    Ok(Some(PreparedDurableDispatch {
+        request_id: request.request_id,
+        identity,
+        start_request,
+    }))
 }
 
 fn persist_provider_event(
@@ -328,7 +330,9 @@ async fn cancel_with_evidence(
                 authority.as_ref(),
                 now,
             )
-            .map_err(|error| format!("provider cancellation acknowledgement was rejected: {error}"))?;
+            .map_err(|error| {
+                format!("provider cancellation acknowledgement was rejected: {error}")
+            })?;
             Ok(false)
         }
         _ => {
@@ -364,7 +368,11 @@ pub(super) async fn execute_durable_agent_task_inner(
             return;
         }
     };
-    let (request_id, identity, start_request) = prepared;
+    let PreparedDurableDispatch {
+        request_id,
+        identity,
+        start_request,
+    } = prepared;
     if *cancellation.borrow() {
         mark_reconciliation_required(
             &state,
@@ -462,13 +470,8 @@ pub(super) async fn execute_durable_agent_task_inner(
     loop {
         if *cancellation.borrow() && !cancellation_submitted {
             cancellation_submitted = true;
-            match cancel_with_evidence(
-                &state,
-                adapter.as_ref(),
-                &identity,
-                &provider_execution_id,
-            )
-            .await
+            match cancel_with_evidence(&state, adapter.as_ref(), &identity, &provider_execution_id)
+                .await
             {
                 Ok(true) => return,
                 Ok(false) => {}
