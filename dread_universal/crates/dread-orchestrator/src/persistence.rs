@@ -3766,7 +3766,10 @@ mod tests {
         missing_unique
             .execute_batch("CREATE TABLE sample_events(task_id TEXT, sequence INTEGER);")
             .unwrap();
-        assert!(require_unique_index(&missing_unique, "sample_events", &["task_id", "sequence"]).is_err());
+        assert!(
+            require_unique_index(&missing_unique, "sample_events", &["task_id", "sequence"])
+                .is_err()
+        );
     }
 
     #[test]
