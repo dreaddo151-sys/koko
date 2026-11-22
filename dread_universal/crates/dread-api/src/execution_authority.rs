@@ -1686,7 +1686,7 @@ mod tests {
         assert_eq!(request.request.idempotency_key, "project-dread:task-1");
 
         let mut mismatched = attempt;
-        mismatched.worker_id = "other-worker".into();
+        mismatched.operation = "agent.other".into();
         assert!(agent_execution_identity(&admission, &mismatched).is_err());
     }
 
@@ -1787,6 +1787,7 @@ mod tests {
             provider_registration_revision: 7,
             idempotency_key: "project-dread:task-1".into(),
         };
+        let response = json!({"provider_task_id":"remote-1"});
         let payload = AgentOperationEvidencePayload {
             evidence_id: "evidence-1".into(),
             evidence_kind: AgentOperationEvidenceKind::Acknowledged,
@@ -1794,14 +1795,14 @@ mod tests {
             provider_execution_id: Some("remote-1".into()),
             external_event_id: None,
             event_type: None,
-            response_sha256: "ab".repeat(32),
+            response_sha256: response_sha256(&response).unwrap(),
             verifier_id: "dread-adapter-receipt:hermes".into(),
             source_reference: "http://127.0.0.1:8642".into(),
             observed_at: 1_800_000_000,
             expires_at: Some(1_800_000_300),
         };
         let receipt = AgentOperationReceipt {
-            response: json!({"provider_task_id":"remote-1"}),
+            response,
             evidence: dread_agents::SignedAgentOperationEvidence {
                 key_id: "hermes-receipt-key".into(),
                 payload,
