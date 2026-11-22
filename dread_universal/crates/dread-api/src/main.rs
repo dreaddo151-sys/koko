@@ -1,3 +1,4 @@
+mod durable_agent;
 mod execution_authority;
 mod execution_policy;
 
@@ -3499,6 +3500,7 @@ async fn execute_agent_task(
 ) {
     let task_id = execution.task_id.clone();
     let worker_state = state.clone();
+    let durable_execution = state.execution_authority.is_some();
     let result = state
         .execution
         .run_managed_for_resources(
@@ -3506,7 +3508,17 @@ async fn execute_agent_task(
             task_id.clone(),
             cancellation,
             move |cancellation| async move {
-                execute_agent_task_inner(worker_state, adapter, execution, cancellation).await;
+                if durable_execution {
+                    durable_agent::execute_durable_agent_task_inner(
+                        worker_state,
+                        adapter,
+                        execution,
+                        cancellation,
+                    )
+                    .await;
+                } else {
+                    execute_agent_task_inner(worker_state, adapter, execution, cancellation).await;
+                }
                 Ok(())
             },
         )
