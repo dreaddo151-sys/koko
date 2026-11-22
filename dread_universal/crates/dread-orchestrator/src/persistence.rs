@@ -1517,7 +1517,8 @@ pub fn append_provider_event_with_receipt(
             Some(receipt) => {
                 prior.receipt_key_id.as_deref() == Some(receipt.key_id.as_str())
                     && prior.receipt_payload_json.as_deref() == Some(receipt.payload_json.as_str())
-                    && prior.receipt_signature_hex.as_deref() == Some(receipt.signature_hex.as_str())
+                    && prior.receipt_signature_hex.as_deref()
+                        == Some(receipt.signature_hex.as_str())
                     && prior.receipt_response_sha256.as_deref()
                         == Some(receipt.response_sha256.as_str())
             }
