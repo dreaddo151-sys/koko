@@ -6799,6 +6799,12 @@ mod tests {
                 params![now],
             )
             .unwrap();
+            conn.execute(
+                "INSERT INTO tasks (id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, approval_reason, created_at, updated_at, agent_provider, provider_event_cursor)
+                 VALUES ('queued-agent-deferred', 'queued-agent-deferred', 'agent_task', 'hermes.capability', '{}', 'queued', 1, 'test-operator', 'approved in test', ?1, ?1, 'hermes', 0)",
+                params![now],
+            )
+            .unwrap();
         }
         let (events, _) = broadcast::channel(256);
         let state = AppState {
@@ -6863,6 +6869,27 @@ mod tests {
             )
             .unwrap();
         assert_eq!(deferred_event_count, 1);
+
+        let queued_agent_status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE id = 'queued-agent-deferred'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            queued_agent_status,
+            "queued",
+            "queued provider work must remain queued rather than enter the legacy worker"
+        );
+        let queued_deferred_event_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_events WHERE task_id = 'queued-agent-deferred' AND event_type = 'task_recovery_deferred_durable_dispatch'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued_deferred_event_count, 1);
 
         for id in [
             "running-interrupted",
