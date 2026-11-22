@@ -514,13 +514,11 @@ pub(super) async fn execute_durable_agent_task_inner(
 
 /// Reattach the persisted provider execution ID to an already-created local
 /// worker. This function is invoked only inside the shared ExecutionGate slot.
-/// Provider dispatch stays closed until the signed policy and a distinct
-/// independent-result verifier are both available and currently valid.
-fn durable_dispatch_activation_ready(state: &AppState, now: i64) -> bool {
-    let Some(authority) = state.execution_authority.as_ref() else {
-        return false;
-    };
-    let status = authority.status(now);
+/// A pure, testable release predicate for the signed execution status.
+/// Disabled providers do not block another fully trusted provider, but at
+/// least one provider must be enabled and every enabled provider must have
+/// current isolation evidence and a manifest-pinned receipt verification key.
+fn dispatch_activation_status_ready(status: &Value) -> bool {
     if status["execution_policy"]["status"] != "verified"
         || status["independent_result_verification"] != "verified"
     {
@@ -529,13 +527,32 @@ fn durable_dispatch_activation_ready(state: &AppState, now: i64) -> bool {
     let Some(providers) = status["providers"].as_array() else {
         return false;
     };
-    !providers.is_empty()
-        && providers.iter().all(|provider| {
-            provider["enabled"] == true
-                && provider["isolation_verified"] == true
+    if providers.is_empty()
+        || providers
+            .iter()
+            .any(|provider| provider["enabled"] == true && provider["revoked"] == true)
+    {
+        return false;
+    }
+    let enabled = providers
+        .iter()
+        .filter(|provider| provider["enabled"] == true)
+        .collect::<Vec<_>>();
+    !enabled.is_empty()
+        && enabled.iter().all(|provider| {
+            provider["isolation_verified"] == true
                 && provider["receipt_key_pinned"] == true
                 && provider["revoked"] != true
         })
+}
+
+/// Provider dispatch stays closed until the signed policy and a distinct
+/// independent-result verifier are both available and currently valid.
+fn durable_dispatch_activation_ready(state: &AppState, now: i64) -> bool {
+    let Some(authority) = state.execution_authority.as_ref() else {
+        return false;
+    };
+    dispatch_activation_status_ready(&authority.status(now))
 }
 
 fn attach_recovered_worker(state: &AppState, request_id: &str) -> Result<bool, String> {
@@ -1120,3 +1137,75 @@ pub(super) fn resume_queued_durable_agents(state: &AppState) -> Result<usize, St
     }
     Ok(resumed)
 }
+
+#[cfg(test)]
+mod durable_activation_tests {
+    use super::*;
+
+    fn trusted_status() -> Value {
+        json!({
+            "execution_policy": {"status": "verified"},
+            "independent_result_verification": "verified",
+            "providers": [{
+                "provider_id": "hermes",
+                "enabled": true,
+                "revoked": false,
+                "isolation_verified": true,
+                "receipt_key_pinned": true
+            }]
+        })
+    }
+
+    #[test]
+    fn dispatch_activation_requires_independent_verification() {
+        let mut status = trusted_status();
+        status["independent_result_verification"] = json!("not_configured_fail_closed");
+        assert!(!dispatch_activation_status_ready(&status));
+    }
+
+    #[test]
+    fn dispatch_activation_requires_a_current_signed_policy() {
+        let mut status = trusted_status();
+        status["execution_policy"]["status"] = json!("invalid_or_expired");
+        assert!(!dispatch_activation_status_ready(&status));
+    }
+
+    #[test]
+    fn dispatch_activation_requires_pinned_receipt_keys_and_isolation() {
+        let mut status = trusted_status();
+        status["providers"][0]["receipt_key_pinned"] = json!(false);
+        assert!(!dispatch_activation_status_ready(&status));
+
+        let mut status = trusted_status();
+        status["providers"][0]["isolation_verified"] = json!(false);
+        assert!(!dispatch_activation_status_ready(&status));
+    }
+
+    #[test]
+    fn disabled_provider_does_not_block_another_fully_trusted_provider() {
+        let mut status = trusted_status();
+        status["providers"].as_array_mut().unwrap().push(json!({
+            "provider_id": "deerflow",
+            "enabled": false,
+            "revoked": false,
+            "isolation_verified": false,
+            "receipt_key_pinned": false
+        }));
+        assert!(dispatch_activation_status_ready(&status));
+    }
+
+    #[test]
+    fn dispatch_activation_requires_at_least_one_enabled_provider() {
+        let mut status = trusted_status();
+        status["providers"][0]["enabled"] = json!(false);
+        assert!(!dispatch_activation_status_ready(&status));
+    }
+
+    #[test]
+    fn revoked_provider_cannot_be_marked_enabled_for_dispatch() {
+        let mut status = trusted_status();
+        status["providers"][0]["revoked"] = json!(true);
+        assert!(!dispatch_activation_status_ready(&status));
+    }
+}
+
