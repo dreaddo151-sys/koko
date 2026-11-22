@@ -6,4 +6,4 @@ ALTER TABLE dread_task_attempts
     CHECK (recovery_generation >= 0);
 
 INSERT OR IGNORE INTO dread_execution_runtime_state(state_key, state_value, updated_at)
-VALUES ('startup_recovery_generation', '0', 0);
+VALUES ('startup_recovery_generation', '1', 0);
