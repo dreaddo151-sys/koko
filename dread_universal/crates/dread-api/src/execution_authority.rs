@@ -328,6 +328,16 @@ impl Phase6ExecutionAuthority {
         }
     }
 
+    fn require_independent_verifier_ready(&self, now: i64) -> Result<(), String> {
+        self.independent_verifier
+            .as_ref()
+            .ok_or_else(|| {
+                "independent result verifier is not configured; new provider admission is blocked"
+                    .to_string()
+            })?
+            .ensure_ready(now)
+    }
+
     fn refresh_manifest(&self, now: i64) -> Result<VerifiedExecutionTrustManifest, String> {
         match (&self.manifest_path, &self.public_key_hex) {
             (Some(path), Some(public_key)) => read_and_verify_manifest(path, public_key, now),
@@ -882,6 +892,7 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
         if request.permission_scope != "agent:execute" {
             return Err("unsupported permission scope".into());
         }
+        self.require_independent_verifier_ready(now)?;
         let capability_id: String = connection
             .query_row(
                 "SELECT capability_id FROM tasks WHERE id = ?1",
@@ -987,6 +998,7 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
         if admission.expires_at <= now {
             return Err("dispatch admission expired".into());
         }
+        self.require_independent_verifier_ready(now)?;
         self.verify_admission_scope(connection, admission, now)
     }
 
