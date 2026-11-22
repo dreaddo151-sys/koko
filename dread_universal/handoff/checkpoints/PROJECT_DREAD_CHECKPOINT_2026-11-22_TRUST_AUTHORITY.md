@@ -410,3 +410,37 @@ Workspace test output included 37 agent tests, 91 API tests, 14 discovery tests,
 ### Acceptance boundary
 
 This is a source and CI milestone, not a live provider deployment. Independent result verification, live runtime-isolation attestation issuance, separate verifier UID/GID service deployment, capability-specific semantic/result evidence policies, real provider behavior, crash/race acceptance, physical workstation deployment and GPU/ComfyUI contention tests remain outstanding. Keep provider dispatch fail-closed until those gates are met. PR #16 remains draft and unmerged.
+
+## 14. Direct no-provider-start proof for durable preparation failure — 2026-11-22
+
+**Verified code head:** `0a8ece2cbe884ad458d30f7aca39e65105a2c31f`  
+**CI run:** [#1870 — all jobs passed](https://github.com/dreaddo151-sys/koko/actions/runs/45043437675)
+
+The previous durable pre-start failure handling was tested at the task-state helper boundary. This update adds a stronger worker-level regression that invokes `execute_durable_agent_task_inner` with a queued canonical agent task, a configured mock Hermes adapter, and no Phase 6 execution authority.
+
+The test proves both required effects:
+- The durable preparation path fails before a provider side effect; the adapter's recorded `start_task` calls remain empty.
+- The accepted queued task is persisted as `failed` with a `task_results.error` identifying the durable preparation failure before start.
+
+The complementary durable-worker tests remain:
+- A task with no unresolved durable attempt transitions to failed and emits `task_failed`.
+- Existing terminal failed attempts do not block pre-start local failure classification.
+- Dispatching and cancellation-unknown attempts are treated as unresolved remote-side-effect blockers and retain reconciliation rather than being finalized locally.
+- If the database cannot be inspected, no local terminal assumption is made.
+
+### Exact-head verification
+
+Run #1870 completed successfully on the exact source SHA above. All three jobs passed:
+
+1. **Rust / Ubuntu 24.04:** formatting, strict workspace Clippy, workspace tests, optimized release build, installer and signed-release checks, portable migration/rollback, Python bridge/importer regressions, and single-owner GPU boundary.
+2. **Web console / Ubuntu 24.04:** locked dependency install and production build.
+3. **Ubuntu packages / smoke test:** portable and Debian package assembly, checksums/content verification, packaged API installation and production-console smoke test.
+
+The test output includes the direct `durable_worker_does_not_start_provider_when_preparation_fails` regression, the task-state and unresolved-attempt tests, and 92 API tests with zero failures. Agent tests: 37; discovery: 14; GPU: 15; media: 6; orchestrator: 36; platform: 31; standalone verifier: 11; skills: 7. All reported zero failures.
+
+**Run:** https://github.com/dreaddo151-sys/koko/actions/runs/45043437675  
+**Commit:** https://github.com/dreaddo151-sys/koko/commit/0a8ece2cbe884ad458d30f7aca39e65105a2c31f
+
+### Unchanged deployment and safety boundary
+
+This is repository-level source and CI verification only. No provider start was sent during these tests; no real provider, independent verifier service, runtime attestor, API shared-group/receipt ACL or canonical database/WAL/SHM permissions were deployed on the workstation. Live provider crash/race handling, separate-UID receipt read/write denial, real capability semantic evidence, physical Ubuntu install/reboot, and actual dual-GPU/ComfyUI contention acceptance remain outstanding. Dispatch remains fail-closed until those gates pass. PR #16 remains draft and unmerged.
