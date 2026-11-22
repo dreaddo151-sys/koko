@@ -504,9 +504,9 @@ pub fn install(connection: &mut Connection, now: i64) -> Result<(), PersistenceE
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    if max_version > 6 || version_count != max_version {
+    if max_version > 7 || version_count != max_version {
         return Err(PersistenceError::Invalid(format!(
-            "unsupported or non-contiguous DREAD execution schema history (max={max_version}, count={version_count}, supported_through=6)"
+            "unsupported or non-contiguous DREAD execution schema history (max={max_version}, count={version_count}, supported_through=7)"
         )));
     }
 
@@ -530,6 +530,10 @@ pub fn install(connection: &mut Connection, now: i64) -> Result<(), PersistenceE
         (
             6_i64,
             include_str!("../migrations/0006_signed_adapter_receipts.sql"),
+        ),
+        (
+            7_i64,
+            include_str!("../migrations/0007_extended_cancellation_evidence.sql"),
         ),
     ] {
         let applied: bool = tx.query_row(
@@ -3670,7 +3674,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(versions, 6);
+        assert_eq!(versions, 7);
     }
 
     #[test]
