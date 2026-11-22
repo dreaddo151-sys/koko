@@ -132,6 +132,13 @@ fn prepare_new_attempt(
         }
     };
     let identity = agent_execution_identity(&admission, &attempt)?;
+    if identity.provider_id != execution.provider
+        || identity.capability_id != execution.capability_id
+    {
+        return Err(
+            "selected API adapter does not match the canonical durable provider identity".into(),
+        );
+    }
     let start_request =
         durable_agent_start_request(&admission, &attempt, execution.payload.clone())?;
     Ok(Some((request.request_id, identity, start_request)))
@@ -302,7 +309,7 @@ async fn cancel_with_evidence(
         &receipt,
     )?;
     match receipt.response.state {
-        AgentTaskState::Cancelled => {
+        AgentTaskState::Cancelled | AgentTaskState::Succeeded | AgentTaskState::Failed => {
             persist_provider_terminal(state, &identity.request_id, &receipt.response, &evidence)?;
             Ok(true)
         }
@@ -451,8 +458,10 @@ pub(super) async fn execute_durable_agent_task_inner(
     }
 
     let mut cursor = execution.initial_event_cursor;
+    let mut cancellation_submitted = false;
     loop {
-        if *cancellation.borrow() {
+        if *cancellation.borrow() && !cancellation_submitted {
+            cancellation_submitted = true;
             match cancel_with_evidence(
                 &state,
                 adapter.as_ref(),
