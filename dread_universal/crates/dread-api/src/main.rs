@@ -20,10 +20,9 @@ use axum::{
 };
 use dread_agents::{
     AgentAdapter, AgentReceiptSigner, AgentTaskState, CapabilityKind, CapabilityProvenance,
-    CapabilityRecord, CapabilityStatus, StartTaskRequest,
+    CapabilityRecord, CapabilityStatus, StartTaskRequest, deerflow::DeerFlowApiAdapter,
+    hermes::HermesApiAdapter, openhands::OpenHandsAgentServerAdapter,
     runtime_attestation::VerifiedRuntimeIsolationAttestation,
-    deerflow::DeerFlowApiAdapter, hermes::HermesApiAdapter,
-    openhands::OpenHandsAgentServerAdapter,
 };
 use dread_discovery::{
     discover, discover_agent_manifests, discover_agents, known_agent_endpoints, load_agents,
@@ -113,7 +112,9 @@ fn load_runtime_isolation_attestation(
 ) -> Result<VerifiedRuntimeIsolationAttestation, String> {
     let path = env::var_os(environment_path_key)
         .map(PathBuf::from)
-        .ok_or_else(|| format!("{environment_path_key} is required when configuring {provider_id}"))?;
+        .ok_or_else(|| {
+            format!("{environment_path_key} is required when configuring {provider_id}")
+        })?;
     let metadata = fs::symlink_metadata(&path)
         .map_err(|error| format!("cannot inspect {environment_path_key}: {error}"))?;
     if metadata.file_type().is_symlink()
@@ -137,10 +138,12 @@ fn load_runtime_isolation_attestation(
 
     let key_id = env::var("DREAD_RUNTIME_ISOLATION_ATTESTATION_KEY_ID")
         .map_err(|_| "DREAD_RUNTIME_ISOLATION_ATTESTATION_KEY_ID is required".to_string())?;
-    let public_key_hex = env::var("DREAD_RUNTIME_ISOLATION_ATTESTATION_PUBLIC_KEY_HEX")
-        .map_err(|_| "DREAD_RUNTIME_ISOLATION_ATTESTATION_PUBLIC_KEY_HEX is required".to_string())?;
-    let encoded = fs::read(&path)
-        .map_err(|error| format!("cannot read {environment_path_key}: {error}"))?;
+    let public_key_hex =
+        env::var("DREAD_RUNTIME_ISOLATION_ATTESTATION_PUBLIC_KEY_HEX").map_err(|_| {
+            "DREAD_RUNTIME_ISOLATION_ATTESTATION_PUBLIC_KEY_HEX is required".to_string()
+        })?;
+    let encoded =
+        fs::read(&path).map_err(|error| format!("cannot read {environment_path_key}: {error}"))?;
     VerifiedRuntimeIsolationAttestation::verify(
         &encoded,
         &key_id,
@@ -5753,7 +5756,6 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ring::signature::{Ed25519KeyPair, KeyPair};
     use axum::{
         body::{Body, to_bytes},
         http::{HeaderMap, Request},
@@ -5765,6 +5767,7 @@ mod tests {
     };
     #[cfg(test)]
     use futures::StreamExt;
+    use ring::signature::{Ed25519KeyPair, KeyPair};
     use serde_json::json;
     use tokio::net::TcpListener;
     use tower::ServiceExt;
@@ -6752,17 +6755,14 @@ mod tests {
             expires_at: observed_at + 180,
             checks: dread_agents::runtime_attestation::RuntimeIsolationControl::ALL
                 .into_iter()
-                .map(|control| {
-                    dread_agents::runtime_attestation::RuntimeIsolationCheck {
+                .map(
+                    |control| dread_agents::runtime_attestation::RuntimeIsolationCheck {
                         control,
                         verified: true,
-                        observation_id: format!(
-                            "{}-{provider_id}-observation",
-                            control.as_str()
-                        ),
+                        observation_id: format!("{}-{provider_id}-observation", control.as_str()),
                         evidence_sha256: "de".repeat(32),
-                    }
-                })
+                    },
+                )
                 .collect(),
         };
         let payload_bytes = serde_json::to_vec(&payload).unwrap();
@@ -6847,11 +6847,7 @@ mod tests {
             hermes: Some(HermesAdapterConfig {
                 endpoint: hermes_endpoint.into(),
                 api_key: "test-api-key".into(),
-                runtime_attestation: test_runtime_attestation(
-                    "hermes",
-                    hermes_endpoint,
-                    "modal",
-                ),
+                runtime_attestation: test_runtime_attestation("hermes", hermes_endpoint, "modal"),
             }),
             deerflow: Some(DeerFlowAdapterConfig {
                 endpoint: deerflow_endpoint.into(),
