@@ -3866,8 +3866,11 @@ mod tests {
         )
         .unwrap();
 
-        db.execute("UPDATE missions SET status = 'queued' WHERE id = 'mission-1'", [])
-            .unwrap();
+        db.execute(
+            "UPDATE missions SET status = 'queued' WHERE id = 'mission-1'",
+            [],
+        )
+        .unwrap();
         db.execute_batch(
             "INSERT INTO tasks(
                 id,title,task_type,capability_id,payload_json,status,approval_required,
