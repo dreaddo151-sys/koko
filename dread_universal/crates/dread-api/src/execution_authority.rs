@@ -972,6 +972,161 @@ mod tests {
         assert!(VerifiedExecutionTrustManifest::verify(&tampered, &key, now).is_err());
     }
 
+    fn enabled_test_capability() -> CapabilityRecord {
+        CapabilityRecord {
+            id: "hermes.run".into(),
+            name: "Hermes runner".into(),
+            kind: CapabilityKind::Agent,
+            description: "Test agent capability".into(),
+            version: Some("1.0.0".into()),
+            license: Some("MIT".into()),
+            provenance: dread_agents::CapabilityProvenance {
+                source_name: "test registry".into(),
+                source_uri: Some("https://example.invalid/hermes".into()),
+                source_version: Some("1.0.0".into()),
+                source_revision: Some("test-revision".into()),
+                imported_at: 100,
+            },
+            compatibility: "compatible".into(),
+            dependencies: Vec::new(),
+            adapter: Some("hermes".into()),
+            status: CapabilityStatus::Enabled,
+            manifest: json!({
+                "approval": {
+                    "approved_by": "test-operator",
+                    "approved_at": 100,
+                    "reason": "verified test fixture"
+                }
+            }),
+        }
+    }
+
+    #[test]
+    fn capability_revision_requires_latest_enabled_audit_record() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE capabilities (id TEXT PRIMARY KEY, record_json TEXT NOT NULL);
+                 CREATE TABLE capability_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    capability_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    actor TEXT NOT NULL
+                 );",
+            )
+            .unwrap();
+        let encoded = serde_json::to_string(&enabled_test_capability()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO capabilities(id, record_json) VALUES ('hermes.run', ?1)",
+                [&encoded],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO capability_events(capability_id, event_type, actor)
+                 VALUES ('hermes.run', 'enabled', 'test-operator')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            Phase6ExecutionAuthority::capability_revision(
+                &connection,
+                "hermes.run",
+                "hermes"
+            )
+            .unwrap(),
+            1
+        );
+        connection
+            .execute(
+                "INSERT INTO capability_events(capability_id, event_type, actor)
+                 VALUES ('hermes.run', 'disabled', 'test-operator')",
+                [],
+            )
+            .unwrap();
+        assert!(
+            Phase6ExecutionAuthority::capability_revision(
+                &connection,
+                "hermes.run",
+                "hermes"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn task_approval_is_bound_to_operator_and_current_state() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE tasks (
+                    id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    task_type TEXT NOT NULL,
+                    approved_by TEXT,
+                    capability_id TEXT
+                 );
+                 CREATE TABLE task_events (
+                    sequence INTEGER NOT NULL,
+                    task_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                 );
+                 CREATE TABLE mission_tasks (
+                    mission_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL
+                 );
+                 INSERT INTO tasks(id, status, task_type, approved_by, capability_id)
+                 VALUES ('task-1', 'queued', 'agent_task', 'test-operator', 'hermes.run');
+                 INSERT INTO task_events(sequence, task_id, event_type, actor, payload_json)
+                 VALUES (7, 'task-1', 'task_approved', 'test-operator',
+                         '{\"approved_by\":\"test-operator\",\"reason\":\"approved\"}');",
+            )
+            .unwrap();
+        assert_eq!(
+            Phase6ExecutionAuthority::approved_task(
+                &connection,
+                "task-1",
+                "test-operator",
+                false
+            )
+            .unwrap(),
+            (None, 7)
+        );
+        assert!(
+            Phase6ExecutionAuthority::approved_task(
+                &connection,
+                "task-1",
+                "different-operator",
+                false
+            )
+            .is_err()
+        );
+        connection
+            .execute("UPDATE tasks SET status = 'running' WHERE id = 'task-1'", [])
+            .unwrap();
+        assert!(
+            Phase6ExecutionAuthority::approved_task(
+                &connection,
+                "task-1",
+                "test-operator",
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            Phase6ExecutionAuthority::approved_task(
+                &connection,
+                "task-1",
+                "test-operator",
+                true
+            )
+            .is_ok()
+        );
+    }
+
     #[test]
     fn rejects_expired_or_unsafe_isolation_manifest() {
         let now = 1_800_000_000;
