@@ -5670,12 +5670,19 @@ async fn main() -> anyhow::Result<()> {
         warn!(
             startup_generation,
             recovered_durable_workers,
-            "Startup dispatch barrier remains closed: a current-boot recovery, signed policy, or independent verifier condition is not satisfied"
+            "Startup dispatch barrier remains closed: a current-boot recovery, signed policy, pinned receipt key, or independent verifier condition is not satisfied"
         );
     }
+    let resumed_durable_tasks = if startup_dispatch_barrier_open {
+        durable_agent::resume_queued_durable_agents(&state)
+            .map_err(|error| anyhow::anyhow!("Could not resume queued durable provider tasks: {error}"))?
+    } else {
+        0
+    };
     info!(
         recovered_tasks,
         recovered_durable_workers,
+        resumed_durable_tasks,
         startup_generation,
         startup_dispatch_barrier_open,
         "Completed startup recovery gate evaluation"
