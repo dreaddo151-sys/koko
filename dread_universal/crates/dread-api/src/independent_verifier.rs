@@ -539,6 +539,42 @@ mod tests {
     }
 
     #[test]
+    fn signed_heartbeat_symlink_is_not_followed() {
+        let seed = [33_u8; 32];
+        let key = Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
+        let dir = temp_dir();
+        let verifier = IndependentResultVerifier {
+            receipt_dir: dir.clone(),
+            verifier_id: "dread-independent-result-verifier".into(),
+            key_id: "result-verifier-key-1".into(),
+            public_key: key.public_key().as_ref().to_vec(),
+            receipt_uid: fs::metadata(&dir).unwrap().uid(),
+            receipt_gid: fs::metadata(&dir).unwrap().gid(),
+        };
+        let now = 1_800_000_000_i64;
+        let heartbeat = VerifierHeartbeat {
+            schema_version: 1,
+            verifier_id: verifier.verifier_id.clone(),
+            observed_at: now,
+            expires_at: now + 60,
+        };
+        let target = dir.join("signed-heartbeat-target.json");
+        write_secure(&target, &signed(&key, &verifier.key_id, &heartbeat));
+        std::os::unix::fs::symlink(
+            &target,
+            dir.join(".dread-verifier-ready.json"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            verifier.status(now + 1)["status"],
+            "configured_unavailable",
+            "a verifier-controlled symlink must not be followed by the API"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn signed_result_receipt_binds_exact_attempt_and_result_bytes() {
         let seed = [32_u8; 32];
         let key = Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
