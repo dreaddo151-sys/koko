@@ -1761,6 +1761,77 @@ mod tests {
         )
     }
 
+    fn runtime_summary_for(
+        registration: &ProviderTrustRecord,
+    ) -> RuntimeIsolationAttestationSummary {
+        RuntimeIsolationAttestationSummary {
+            attestation_id: registration.isolation.evidence_id.clone(),
+            attestor_id: "dread-runtime-observer-test".into(),
+            provider_id: registration.provider_id.clone(),
+            provider_registration_revision: registration.registration_revision,
+            adapter_id: registration.adapter_id.clone(),
+            adapter_version: registration.adapter_version.clone(),
+            endpoint: registration.endpoint.clone(),
+            runtime_identity: registration.isolation.runtime_identity.clone(),
+            sandbox_backend: "modal".into(),
+            source_observation_id: registration.isolation.provenance.source_observation_id.clone(),
+            evidence_bundle_sha256: registration.isolation.provenance.evidence_sha256.clone(),
+            observed_at: registration.isolation.checked_at,
+            expires_at: registration.isolation.expires_at,
+            checks: registration
+                .isolation
+                .checks
+                .iter()
+                .map(|(control, evidence)| {
+                    (
+                        isolation_control_name(*control).to_owned(),
+                        evidence.durable_observation_id.clone(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn runtime_observer_must_match_every_signed_manifest_observation() {
+        let now = 1_800_000_000;
+        let (encoded, public_key) = signed_manifest(now);
+        let manifest =
+            VerifiedExecutionTrustManifest::verify(&encoded, &public_key, now).unwrap();
+        let registration = manifest.provider("hermes", now).unwrap();
+        let summary = runtime_summary_for(registration);
+        assert!(
+            verify_runtime_isolation_binding("hermes", registration, &summary, now).is_ok()
+        );
+
+        let mut changed_observation = summary.clone();
+        changed_observation
+            .checks
+            .insert("egress_policy".into(), "different-observation".into());
+        assert!(
+            verify_runtime_isolation_binding(
+                "hermes",
+                registration,
+                &changed_observation,
+                now
+            )
+            .is_err()
+        );
+
+        let mut changed_bundle = summary.clone();
+        changed_bundle.evidence_bundle_sha256 = "c".repeat(64);
+        assert!(
+            verify_runtime_isolation_binding("hermes", registration, &changed_bundle, now).is_err()
+        );
+
+        let mut changed_revision = summary;
+        changed_revision.provider_registration_revision += 1;
+        assert!(
+            verify_runtime_isolation_binding("hermes", registration, &changed_revision, now)
+                .is_err()
+        );
+    }
+
     fn test_identity() -> AgentExecutionIdentity {
         AgentExecutionIdentity {
             request_id: "request-1".into(),
