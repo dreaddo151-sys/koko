@@ -230,10 +230,6 @@ impl Phase6ExecutionAuthority {
         }
     }
 
-    pub fn manifest(&self) -> &VerifiedExecutionTrustManifest {
-        &self.manifest
-    }
-
     fn registration(
         &self,
         provider_id: &str,
@@ -847,11 +843,13 @@ fn validate_text(name: &str, value: &str, limit: usize) -> Result<(), String> {
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
-    if value.is_empty() || value.len() % 2 != 0 {
+    if value.is_empty() || !value.len().is_multiple_of(2) {
         return Err("hex value has an invalid length".into());
     }
     let mut output = Vec::with_capacity(value.len() / 2);
-    for pair in value.as_bytes().chunks_exact(2) {
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    debug_assert!(remainder.is_empty());
+    for pair in pairs {
         let high = hex_nibble(pair[0])?;
         let low = hex_nibble(pair[1])?;
         output.push((high << 4) | low);
