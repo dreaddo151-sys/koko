@@ -9,12 +9,14 @@ pub mod extensions;
 pub mod deerflow;
 pub mod hermes;
 pub mod openhands;
+pub mod runtime_attestation;
 
 use futures::future::BoxFuture;
 use ring::signature::KeyPair;
 use ring::{digest, signature};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use runtime_attestation::RuntimeIsolationAttestationSummary;
 use std::{
     fmt,
     time::{SystemTime, UNIX_EPOCH},
@@ -479,6 +481,13 @@ pub type AdapterFuture<'a, T> = BoxFuture<'a, AdapterResult<T>>;
 /// for non-idempotent operations, and report task state without hiding failures.
 pub trait AgentAdapter: Send + Sync {
     fn descriptor(&self) -> &AgentDescriptor;
+
+    /// Independently signed runtime isolation evidence currently attached to
+    /// this adapter. The default is absent and therefore cannot pass the
+    /// Phase 6 provider-registration gate.
+    fn runtime_isolation_attestation(&self) -> Option<RuntimeIsolationAttestationSummary> {
+        None
+    }
     fn health<'a>(&'a self) -> AdapterFuture<'a, AgentHealth>;
     fn capabilities<'a>(&'a self) -> AdapterFuture<'a, Vec<AgentCapability>>;
     fn start_task<'a>(&'a self, request: StartTaskRequest) -> AdapterFuture<'a, AgentTask>;
