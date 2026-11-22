@@ -155,20 +155,14 @@ fn prepare_new_attempt(
     let identity = match agent_execution_identity(&admission, &attempt) {
         Ok(identity) => identity,
         Err(error) => {
-            record_pre_start_reconciliation(
-                &mut connection,
-                &request.request_id,
-                &error,
-                now,
-            );
+            record_pre_start_reconciliation(&mut connection, &request.request_id, &error, now);
             return Err(error);
         }
     };
     if identity.provider_id != execution.provider
         || identity.capability_id != execution.capability_id
     {
-        let error =
-            "selected API adapter does not match the canonical durable provider identity";
+        let error = "selected API adapter does not match the canonical durable provider identity";
         record_pre_start_reconciliation(&mut connection, &request.request_id, error, now);
         return Err(error.into());
     }
@@ -176,12 +170,7 @@ fn prepare_new_attempt(
         match durable_agent_start_request(&admission, &attempt, execution.payload.clone()) {
             Ok(request) => request,
             Err(error) => {
-                record_pre_start_reconciliation(
-                    &mut connection,
-                    &request.request_id,
-                    &error,
-                    now,
-                );
+                record_pre_start_reconciliation(&mut connection, &request.request_id, &error, now);
                 return Err(error);
             }
         };
