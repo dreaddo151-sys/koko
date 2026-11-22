@@ -8,6 +8,7 @@
 //! separately authenticated verifier integration is configured.
 
 use crate::execution_policy::{ExecutionPolicyAuthority, ExecutionPolicyInput};
+use crate::independent_verifier::IndependentResultVerifier;
 use dread_agents::{
     AgentAdapter, AgentEvent, AgentExecutionIdentity, AgentOperationEvidenceKind,
     AgentOperationEvidencePayload, AgentOperationReceipt, CapabilityKind, CapabilityRecord,
@@ -305,6 +306,7 @@ pub struct Phase6ExecutionAuthority {
     public_key_hex: Option<String>,
     adapters: Arc<HashMap<String, Arc<dyn AgentAdapter>>>,
     policy: Option<ExecutionPolicyAuthority>,
+    independent_verifier: Option<IndependentResultVerifier>,
 }
 
 impl Phase6ExecutionAuthority {
@@ -314,6 +316,7 @@ impl Phase6ExecutionAuthority {
         manifest_path: PathBuf,
         public_key_hex: String,
         policy: Option<ExecutionPolicyAuthority>,
+        independent_verifier: Option<IndependentResultVerifier>,
     ) -> Self {
         Self {
             manifest,
@@ -321,6 +324,7 @@ impl Phase6ExecutionAuthority {
             public_key_hex: Some(public_key_hex),
             adapters,
             policy,
+            independent_verifier,
         }
     }
 
@@ -577,9 +581,24 @@ impl Phase6ExecutionAuthority {
                 ]
             }),
         };
+        let verifier_status = match self.independent_verifier.as_ref() {
+            Some(verifier) => verifier.status(now),
+            None => json!({
+                "status": "not_configured_fail_closed",
+                "dispatch": "blocked",
+                "required_environment": [
+                    "DREAD_INDEPENDENT_RESULT_VERIFIER_RECEIPT_DIR",
+                    "DREAD_INDEPENDENT_RESULT_VERIFIER_ID",
+                    "DREAD_INDEPENDENT_RESULT_VERIFIER_KEY_ID",
+                    "DREAD_INDEPENDENT_RESULT_VERIFIER_PUBLIC_KEY_HEX"
+                ]
+            }),
+        };
+        status["independent_result_verification"] = verifier_status["status"].clone();
+        status["independent_verifier"] = verifier_status;
         // Policy admission alone cannot enable dispatch: startup reattachment,
-        // authenticated provider operation evidence and independent result
-        // verification are still separate release conditions.
+        // authenticated provider operation evidence and a live independent
+        // result-verifier heartbeat are separate release conditions.
         status["dispatch"] = json!("blocked");
         status
     }
@@ -612,6 +631,7 @@ pub fn load_from_env(
     now: i64,
 ) -> Result<Option<Arc<Phase6ExecutionAuthority>>, String> {
     let policy = ExecutionPolicyAuthority::load_from_env()?;
+    let independent_verifier = IndependentResultVerifier::load_from_env()?;
     let path = env::var_os("DREAD_EXECUTION_TRUST_MANIFEST");
     let key = env::var("DREAD_EXECUTION_TRUST_PUBLIC_KEY_HEX").ok();
     match (path, key) {
@@ -628,7 +648,12 @@ pub fn load_from_env(
             let path = PathBuf::from(path);
             let manifest = read_and_verify_manifest(&path, &key, now)?;
             Ok(Some(Arc::new(Phase6ExecutionAuthority::with_source(
-                manifest, adapters, path, key, policy,
+                manifest,
+                adapters,
+                path,
+                key,
+                policy,
+                independent_verifier,
             ))))
         }
     }
@@ -1116,16 +1141,19 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
 
     fn verify_independent_result(
         &self,
-        _connection: &Connection,
-        _attempt: &AttemptRecord,
-        _result_json: Option<&str>,
-        _provider_error: Option<&str>,
-        _now: i64,
+        connection: &Connection,
+        attempt: &AttemptRecord,
+        result_json: Option<&str>,
+        provider_error: Option<&str>,
+        now: i64,
     ) -> Result<VerificationFacts, String> {
-        Err(
-            "independent result verifier is not configured; provider success remains unverified"
-                .into(),
-        )
+        self.independent_verifier
+            .as_ref()
+            .ok_or_else(|| {
+                "independent result verifier is not configured; provider success remains unverified"
+                    .to_string()
+            })?
+            .verify_result(connection, attempt, result_json, provider_error, now)
     }
 
     fn verify_retry_contract_for_retry(
