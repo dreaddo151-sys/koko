@@ -277,18 +277,6 @@ pub struct Phase6ExecutionAuthority {
 }
 
 impl Phase6ExecutionAuthority {
-    pub fn new(
-        manifest: VerifiedExecutionTrustManifest,
-        adapters: Arc<HashMap<String, Arc<dyn AgentAdapter>>>,
-    ) -> Self {
-        Self {
-            manifest,
-            manifest_path: None,
-            public_key_hex: None,
-            adapters,
-        }
-    }
-
     fn with_source(
         manifest: VerifiedExecutionTrustManifest,
         adapters: Arc<HashMap<String, Arc<dyn AgentAdapter>>>,
