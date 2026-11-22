@@ -368,8 +368,12 @@ fn validate_shared_output_file(
 ) -> Result<(), String> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("cannot inspect verifier output {}: {error}", path.display()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err("existing verifier output is not a regular file".into());
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > 64 * 1024
+    {
+        return Err("existing verifier output is not a regular file within the 64 KiB limit".into());
     }
     #[cfg(unix)]
     {
@@ -434,6 +438,7 @@ fn atomic_publish(
     let cleanup_result = fs::remove_file(&temporary)
         .map_err(|error| format!("cannot remove verifier temporary file: {error}"));
     result?;
+    validate_shared_output_file(&destination, expected_uid, expected_gid)?;
     cleanup_result?;
     sync_directory(directory)
 }
@@ -447,6 +452,27 @@ fn acquire_process_lock(receipt_dir: &Path) -> Result<ProcessLock, String> {
         )
     })?;
     Ok(ProcessLock { path, _file: file })
+}
+
+fn require_private_file_owner(path: &Path, expected_uid: u32, name: &str) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect {name}: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!("{name} must be a regular non-symlink file"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.uid() != expected_uid || metadata.permissions().mode() & 0o077 != 0 {
+            return Err(format!("{name} must be owned by the verifier UID and use mode 0600"));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = expected_uid;
+        return Err("separate verifier key ownership is supported only on Unix hosts".into());
+    }
+    Ok(())
 }
 
 fn load_private_key(path: &Path) -> Result<Ed25519KeyPair, String> {
@@ -976,6 +1002,16 @@ fn check_public_key_environment(keypair: &Ed25519KeyPair) -> Result<(), String> 
 
 fn run_daemon(config: VerifierConfig, once: bool) -> Result<(), String> {
     let _lock = acquire_process_lock(&config.receipt_dir)?;
+    require_private_file_owner(
+        &config.private_key_path,
+        config.receipt_uid,
+        "independent verifier private key",
+    )?;
+    require_private_file_owner(
+        &config.policy_path,
+        config.receipt_uid,
+        "independent verifier policy",
+    )?;
     let keypair = load_private_key(&config.private_key_path)?;
     check_public_key_environment(&keypair)?;
     let (policy, policy_digest) = load_policy(&config.policy_path)?;
@@ -1282,9 +1318,16 @@ mod tests {
     #[test]
     fn atomic_publication_refuses_symlink_and_preserves_existing_file_without_replace() {
         let directory = temp_dir();
-        atomic_publish(&directory, "sample.json", b"first", false).unwrap();
-        assert!(atomic_publish(&directory, "sample.json", b"second", false).is_err());
+        let metadata = fs::metadata(&directory).unwrap();
+        let uid = metadata.uid();
+        let gid = metadata.gid();
+        atomic_publish(&directory, "sample.json", b"first", false, uid, gid).unwrap();
+        assert!(atomic_publish(&directory, "sample.json", b"second", false, uid, gid).is_err());
         assert_eq!(fs::read(directory.join("sample.json")).unwrap(), b"first");
+        let output = fs::metadata(directory.join("sample.json")).unwrap();
+        assert_eq!(output.uid(), uid);
+        assert_eq!(output.gid(), gid);
+        assert_eq!(output.permissions().mode() & 0o777, 0o640);
         fs::remove_dir_all(directory).unwrap();
     }
 
