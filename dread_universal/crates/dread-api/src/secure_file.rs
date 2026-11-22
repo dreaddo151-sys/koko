@@ -57,14 +57,14 @@ pub(crate) fn read_regular_file_no_follow(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, os::unix::fs::symlink, path::PathBuf, time::SystemTime};
+    use std::{fs, os::unix::fs::symlink, path::PathBuf, time::UNIX_EPOCH};
 
     fn temp_dir() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "dread-secure-file-{}-{}",
             std::process::id(),
             SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
+                .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
