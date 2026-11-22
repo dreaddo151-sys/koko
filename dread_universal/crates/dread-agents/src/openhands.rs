@@ -131,7 +131,7 @@ impl OpenHandsAgentServerAdapter {
                 id: "openhands.agent_server".into(),
                 display_name: display_name.into(),
                 adapter: "openhands.agent_server".into(),
-                version: None,
+                version: Some(env!("CARGO_PKG_VERSION").to_owned()),
                 endpoint: Some(endpoint),
                 enabled: false,
             },
