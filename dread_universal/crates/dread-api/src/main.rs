@@ -9364,7 +9364,13 @@ mod tests {
                 .unwrap(),
             "dispatch must remain blocked until provider reconciliation is integrated"
         );
-        for table in ["tasks", "task_events", "task_results", "missions", "mission_tasks"] {
+        for table in [
+            "tasks",
+            "task_events",
+            "task_results",
+            "missions",
+            "mission_tasks",
+        ] {
             let exists: bool = connection
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
