@@ -305,7 +305,11 @@ fn decode_receipt_hex(value: &str) -> Result<Vec<u8>, ()> {
         return Err(());
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);
-    for pair in value.as_bytes().chunks_exact(2) {
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return Err(());
+    }
+    for pair in pairs {
         let high = receipt_hex_nibble(pair[0]).ok_or(())?;
         let low = receipt_hex_nibble(pair[1]).ok_or(())?;
         bytes.push((high << 4) | low);
