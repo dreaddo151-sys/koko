@@ -2,6 +2,7 @@ mod durable_agent;
 mod execution_authority;
 mod execution_policy;
 mod independent_verifier;
+mod providers;
 mod secure_file;
 
 use axum::{
@@ -5498,6 +5499,32 @@ async fn models_autoconfigure(State(state): State<AppState>) -> Result<Json<Valu
     Ok(Json(summary))
 }
 
+fn provider_dropin_dir() -> std::path::PathBuf {
+    std::env::var_os("DREAD_PROVIDER_DROPINS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("providers.d"))
+}
+
+async fn providers_list(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let providers = providers::providers_listing(&conn).map_err(ApiError::internal)?;
+    Ok(Json(
+        json!({"providers": providers, "count": providers.len()}),
+    ))
+}
+
+async fn providers_sync(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let dir = provider_dropin_dir();
+    let conn = db_lock(&state)?;
+    let mut report = providers::register_all_providers(
+        &conn,
+        &dir,
+        i64::try_from(now_epoch()).unwrap_or(i64::MAX),
+    );
+    report["dropin_directory"] = json!(dir.to_string_lossy());
+    Ok(Json(report))
+}
+
 async fn comfyui_monitor() -> Result<Json<dread_media::ComfyUiMonitor>, ApiError> {
     let client = dread_media::ComfyUiClient::from_env()
         .map_err(|error| ApiError::internal(format!("Invalid ComfyUI configuration: {error}")))?;
@@ -5578,6 +5605,8 @@ fn app(state: AppState) -> Router {
             "/api/models/autoconfigure",
             axum::routing::post(models_autoconfigure),
         )
+        .route("/api/providers", get(providers_list))
+        .route("/api/providers/sync", axum::routing::post(providers_sync))
         .route("/api/repair/plan", get(repair_plan))
         .route("/api/media/comfyui/monitor", get(comfyui_monitor))
         .route("/api/media/workflows/discover", get(workflow_discovery))
