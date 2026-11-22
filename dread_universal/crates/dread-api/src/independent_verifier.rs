@@ -560,11 +560,7 @@ mod tests {
         };
         let target = dir.join("signed-heartbeat-target.json");
         write_secure(&target, &signed(&key, &verifier.key_id, &heartbeat));
-        std::os::unix::fs::symlink(
-            &target,
-            dir.join(".dread-verifier-ready.json"),
-        )
-        .unwrap();
+        std::os::unix::fs::symlink(&target, dir.join(".dread-verifier-ready.json")).unwrap();
 
         assert_eq!(
             verifier.status(now + 1)["status"],
