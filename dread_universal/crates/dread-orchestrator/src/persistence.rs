@@ -483,9 +483,9 @@ pub fn install(connection: &mut Connection, now: i64) -> Result<(), PersistenceE
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    if max_version > 5 || version_count != max_version {
+    if max_version > 6 || version_count != max_version {
         return Err(PersistenceError::Invalid(format!(
-            "unsupported or non-contiguous DREAD execution schema history (max={max_version}, count={version_count}, supported_through=5)"
+            "unsupported or non-contiguous DREAD execution schema history (max={max_version}, count={version_count}, supported_through=6)"
         )));
     }
 
@@ -506,6 +506,10 @@ pub fn install(connection: &mut Connection, now: i64) -> Result<(), PersistenceE
             5_i64,
             include_str!("../migrations/0005_startup_recovery_generation.sql"),
         ),
+        (
+            6_i64,
+            include_str!("../migrations/0006_signed_adapter_receipts.sql"),
+        ),
     ] {
         let applied: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM dread_execution_schema_migrations WHERE version = ?1)",
@@ -520,6 +524,26 @@ pub fn install(connection: &mut Connection, now: i64) -> Result<(), PersistenceE
             )?;
         }
     }
+    require_columns(
+        &tx,
+        "dread_execution_evidence",
+        &[
+            "evidence_id",
+            "receipt_key_id",
+            "receipt_payload_json",
+            "receipt_signature_hex",
+        ],
+    )?;
+    require_columns(
+        &tx,
+        "dread_provider_event_keys",
+        &[
+            "external_event_id",
+            "receipt_key_id",
+            "receipt_payload_json",
+            "receipt_signature_hex",
+        ],
+    )?;
     require_columns(
         &tx,
         "dread_task_execution_contracts",
@@ -3532,7 +3556,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(versions, 5);
+        assert_eq!(versions, 6);
     }
 
     #[test]
@@ -3556,7 +3580,7 @@ mod tests {
         let mut db = canonical_db();
         install(&mut db, 10).unwrap();
         db.execute(
-            "INSERT INTO dread_execution_schema_migrations(version, applied_at) VALUES (6, 12)",
+            "INSERT INTO dread_execution_schema_migrations(version, applied_at) VALUES (7, 12)",
             [],
         )
         .unwrap();
