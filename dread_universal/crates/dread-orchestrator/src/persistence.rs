@@ -1410,6 +1410,31 @@ pub fn append_provider_event(
     authority: &dyn ExecutionAuthority,
     now: i64,
 ) -> Result<EventAppendResult, PersistenceError> {
+    append_provider_event_with_receipt(
+        connection,
+        request_id,
+        external_event_id,
+        event_type,
+        payload_json,
+        None,
+        authority,
+        now,
+    )
+}
+
+/// Record a provider event with its signed operation receipt. Production
+/// authorities validate the signature and exact attempt/event/response scope
+/// before the event enters the canonical task event stream.
+pub fn append_provider_event_with_receipt(
+    connection: &mut Connection,
+    request_id: &str,
+    external_event_id: &str,
+    event_type: &str,
+    payload_json: &str,
+    receipt: Option<&SignedProviderReceipt>,
+    authority: &dyn ExecutionAuthority,
+    now: i64,
+) -> Result<EventAppendResult, PersistenceError> {
     validate_text("external_event_id", external_event_id, 1024)?;
     validate_text("event_type", event_type, 256)?;
     validate_json_text(payload_json)?;
@@ -1417,27 +1442,47 @@ pub fn append_provider_event(
     let attempt = load_attempt_by_request(&tx, request_id)?
         .ok_or_else(|| PersistenceError::NotFound(request_id.to_owned()))?;
     authority
-        .verify_provider_event(
+        .verify_provider_event_receipt(
             &tx,
             &attempt,
             external_event_id,
             event_type,
             payload_json,
+            receipt,
             now,
         )
         .map_err(PersistenceError::Authority)?;
-    let prior: Option<(String, String, i64)> = tx
+    let prior: Option<(String, String, i64, Option<String>, Option<String>, Option<String>)> = tx
         .query_row(
-            "SELECT event_type, payload_json, task_event_sequence FROM dread_provider_event_keys
-         WHERE provider_id = ?1 AND attempt_id = ?2 AND external_event_id = ?3",
+            "SELECT event_type, payload_json, task_event_sequence, receipt_key_id,
+                    receipt_payload_json, receipt_signature_hex
+             FROM dread_provider_event_keys
+             WHERE provider_id = ?1 AND attempt_id = ?2 AND external_event_id = ?3",
             params![attempt.provider_id, attempt.attempt_id, external_event_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
         )
         .optional()?;
-    if let Some((prior_type, prior_payload, sequence)) = prior {
-        if prior_type != event_type || prior_payload != payload_json {
+    if let Some((prior_type, prior_payload, sequence, prior_key, prior_receipt, prior_signature)) = prior {
+        let receipt_matches = match receipt {
+            Some(receipt) => {
+                prior_key.as_deref() == Some(receipt.key_id.as_str())
+                    && prior_receipt.as_deref() == Some(receipt.payload_json.as_str())
+                    && prior_signature.as_deref() == Some(receipt.signature_hex.as_str())
+            }
+            None => prior_key.is_none() && prior_receipt.is_none() && prior_signature.is_none(),
+        };
+        if prior_type != event_type || prior_payload != payload_json || !receipt_matches {
             return Err(PersistenceError::Conflict(
-                "provider reused an event identity with different type or payload".into(),
+                "provider reused an event identity with different type, payload, or receipt".into(),
             ));
         }
         tx.commit()?;
@@ -1454,8 +1499,9 @@ pub fn append_provider_event(
     tx.execute(
         "INSERT INTO dread_provider_event_keys (
             provider_id, attempt_id, external_event_id, event_type, payload_json,
-            task_event_sequence, recorded_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            task_event_sequence, recorded_at, receipt_key_id, receipt_payload_json,
+            receipt_signature_hex
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             attempt.provider_id,
             attempt.attempt_id,
@@ -1463,7 +1509,10 @@ pub fn append_provider_event(
             event_type,
             payload_json,
             sequence,
-            now
+            now,
+            receipt.map(|value| value.key_id.as_str()),
+            receipt.map(|value| value.payload_json.as_str()),
+            receipt.map(|value| value.signature_hex.as_str())
         ],
     )?;
     tx.commit()?;
