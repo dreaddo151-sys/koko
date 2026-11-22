@@ -146,12 +146,16 @@ fn load_runtime_isolation_attestation(
         fs::read(&path).map_err(|error| format!("cannot read {environment_path_key}: {error}"))?;
     VerifiedRuntimeIsolationAttestation::verify(
         &encoded,
-        &key_id,
-        &public_key_hex,
-        provider_id,
-        adapter_id,
-        adapter_version,
-        endpoint,
+        dread_agents::runtime_attestation::RuntimeAttestationTrustAnchor {
+            key_id: &key_id,
+            public_key_hex: &public_key_hex,
+        },
+        dread_agents::runtime_attestation::RuntimeAttestationAdapterBinding {
+            provider_id: provider_id,
+            adapter_id: adapter_id,
+            adapter_version: adapter_version,
+            endpoint: endpoint,
+        },
         i64::try_from(now_epoch()).unwrap_or(i64::MAX),
     )
     .map_err(|error| format!("invalid runtime isolation attestation for {provider_id}: {error}"))
@@ -6791,15 +6795,19 @@ mod tests {
         }))
         .unwrap();
         VerifiedRuntimeIsolationAttestation::verify(
-            &encoded,
-            "runtime-attestor-test-key",
-            &public_key_hex,
-            provider_id,
-            provider_id,
-            env!("CARGO_PKG_VERSION"),
-            endpoint,
-            observed_at + 1,
-        )
+        &encoded,
+        dread_agents::runtime_attestation::RuntimeAttestationTrustAnchor {
+            key_id: "runtime-attestor-test-key",
+            public_key_hex: &public_key_hex,
+        },
+        dread_agents::runtime_attestation::RuntimeAttestationAdapterBinding {
+            provider_id: provider_id,
+            adapter_id: provider_id,
+            adapter_version: env!("CARGO_PKG_VERSION"),
+            endpoint: endpoint,
+        },
+        observed_at + 1,
+    )
         .unwrap()
     }
 
