@@ -540,6 +540,14 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         fs::write(&path, encoded).unwrap();
+        // The loader is fail-closed on group/world write bits; default file
+        // mode depends on the process umask (e.g. 0002 on some workstations,
+        // while CI runners use 0022). Pin the mode for a deterministic test.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
 
         let authority = ExecutionPolicyAuthority {
             manifest_path: path.clone(),
