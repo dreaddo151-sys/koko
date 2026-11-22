@@ -16,6 +16,59 @@ use std::{error::Error, fmt};
 const MAX_ADMISSION_LIFETIME_SECONDS: i64 = 300;
 const MAX_EVENT_BYTES: usize = 1_048_576;
 
+type StoredVerificationEvidence = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    bool,
+    String,
+    i64,
+    Option<i64>,
+);
+type PendingVerificationResult = (String, Option<String>, Option<String>);
+type StoredRetryContractEvidence = (
+    String,
+    String,
+    i64,
+    String,
+    i64,
+    String,
+    String,
+    String,
+    i64,
+    bool,
+    bool,
+    String,
+    String,
+    String,
+    i64,
+    i64,
+    bool,
+);
+type StoredProviderEvidence = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    Option<String>,
+    String,
+    String,
+    String,
+    i64,
+    Option<i64>,
+);
+
+#[derive(Debug, Clone, Copy)]
+pub struct ProviderTerminalPayload<'a> {
+    pub outcome: &'a str,
+    pub result_json: Option<&'a str>,
+    pub provider_error: Option<&'a str>,
+}
+
 /// Phase 6 stores task timestamps as Unix seconds; task_results.elapsed_ms is milliseconds.
 /// This preserves the canonical schema and reports whole-second precision without unit mismatch.
 fn elapsed_ms_from_epoch_seconds(started_at: i64, ended_at: i64) -> i64 {
@@ -1579,13 +1632,16 @@ pub fn unresolved_attempts(
 pub fn record_provider_terminal(
     connection: &mut Connection,
     request_id: &str,
-    outcome: &str,
-    result_json: Option<&str>,
-    provider_error: Option<&str>,
+    terminal: ProviderTerminalPayload<'_>,
     evidence: &ProviderEvidence,
     authority: &dyn ExecutionAuthority,
     now: i64,
 ) -> Result<(), PersistenceError> {
+    let ProviderTerminalPayload {
+        outcome,
+        result_json,
+        provider_error,
+    } = terminal;
     if !matches!(outcome, "succeeded" | "failed" | "cancelled") {
         return Err(PersistenceError::Invalid(
             "unsupported provider terminal outcome".into(),
@@ -1860,7 +1916,7 @@ pub fn record_independent_verification(
                         .into(),
                 ));
             }
-            let prior: Option<(String, String, String, String, String, bool, String, i64, Option<i64>)> = tx.query_row(
+            let prior: Option<StoredVerificationEvidence> = tx.query_row(
                 "SELECT evidence_id, verifier_id, requester_id, provider_verifier_id,
                         worker_id, passed, source_reference, observed_at, expires_at
                  FROM dread_verification_evidence WHERE evidence_id = ?1 AND attempt_id = ?2 AND task_id = ?3",
@@ -2032,7 +2088,7 @@ pub fn record_independent_verification(
 /// terminal-successful but whose independent DREAD verification is still due.
 pub fn pending_verification_results(
     connection: &Connection,
-) -> Result<Vec<(String, Option<String>, Option<String>)>, PersistenceError> {
+) -> Result<Vec<PendingVerificationResult>, PersistenceError> {
     let mut statement = connection.prepare(
         "SELECT request_id, provider_result_json, provider_error
          FROM dread_task_attempts WHERE dispatch_state = 'provider_succeeded'
@@ -2340,25 +2396,7 @@ fn persist_retry_contract_evidence(
             "retry-contract provenance is future-dated or expired".into(),
         ));
     }
-    let existing: Option<(
-        String,
-        String,
-        i64,
-        String,
-        i64,
-        String,
-        String,
-        String,
-        i64,
-        bool,
-        bool,
-        String,
-        String,
-        String,
-        i64,
-        i64,
-        bool,
-    )> = tx
+    let existing: Option<StoredRetryContractEvidence> = tx
         .query_row(
             "SELECT contract_id, provider_id, provider_registration_revision,
                 capability_id, capability_revision, adapter_id, adapter_version,
@@ -2464,25 +2502,7 @@ fn validate_retry_contract_evidence_current(
             "current retry-contract evidence is expired or future-dated".into(),
         ));
     }
-    let stored: Option<(
-        String,
-        String,
-        i64,
-        String,
-        i64,
-        String,
-        String,
-        String,
-        i64,
-        bool,
-        bool,
-        String,
-        String,
-        String,
-        i64,
-        i64,
-        bool,
-    )> = tx
+    let stored: Option<StoredRetryContractEvidence> = tx
         .query_row(
             "SELECT contract_id, provider_id, provider_registration_revision,
                 capability_id, capability_revision, adapter_id, adapter_version,
@@ -2995,20 +3015,7 @@ fn persist_evidence(
     validate_text("evidence_id", &evidence.evidence_id, 1024)?;
     validate_text("verifier_id", &evidence.verifier_id, 512)?;
     validate_text("source_reference", &evidence.source_reference, 2048)?;
-    let existing: Option<(
-        String,
-        String,
-        String,
-        String,
-        String,
-        i64,
-        Option<String>,
-        String,
-        String,
-        String,
-        i64,
-        Option<i64>,
-    )> = tx
+    let existing: Option<StoredProviderEvidence> = tx
         .query_row(
             "SELECT attempt_id, request_id, provider_id, adapter_id, adapter_version,
                 provider_registration_revision, provider_execution_id, evidence_kind,
@@ -3513,9 +3520,11 @@ mod tests {
         record_provider_terminal(
             &mut db,
             "request-1",
-            "succeeded",
-            Some(result),
-            None,
+            ProviderTerminalPayload {
+                outcome: "succeeded",
+                result_json: Some(result),
+                provider_error: None,
+            },
             &success,
             &authority,
             108,

@@ -13,7 +13,7 @@ use serde_json::json;
 
 use crate::lifecycle::RetryDecision;
 use crate::persistence::{
-    AttemptRecord, ExecutionAuthority, PersistenceError, ProviderEvidence,
+    AttemptRecord, ExecutionAuthority, PersistenceError, ProviderEvidence, ProviderTerminalPayload,
     mark_reconciliation_required, pending_verification_results, record_independent_verification,
     record_provider_ack, record_provider_active, record_provider_terminal,
     release_startup_dispatch_barrier, schedule_retry_after_definite_failure, unresolved_attempts,
@@ -213,9 +213,11 @@ pub async fn reconcile_startup<S: ProviderReconciliationSource>(
                 record_provider_terminal(
                     connection,
                     &attempt.request_id,
-                    "succeeded",
-                    result_json.as_deref(),
-                    provider_error.as_deref(),
+                    ProviderTerminalPayload {
+                        outcome: "succeeded",
+                        result_json: result_json.as_deref(),
+                        provider_error: provider_error.as_deref(),
+                    },
                     &evidence,
                     authority,
                     now,
@@ -238,9 +240,11 @@ pub async fn reconcile_startup<S: ProviderReconciliationSource>(
                 record_provider_terminal(
                     connection,
                     &attempt.request_id,
-                    "failed",
-                    result_json.as_deref(),
-                    provider_error.as_deref(),
+                    ProviderTerminalPayload {
+                        outcome: "failed",
+                        result_json: result_json.as_deref(),
+                        provider_error: provider_error.as_deref(),
+                    },
                     &evidence,
                     authority,
                     now,
@@ -263,9 +267,11 @@ pub async fn reconcile_startup<S: ProviderReconciliationSource>(
                 record_provider_terminal(
                     connection,
                     &attempt.request_id,
-                    "cancelled",
-                    result_json.as_deref(),
-                    provider_error.as_deref(),
+                    ProviderTerminalPayload {
+                        outcome: "cancelled",
+                        result_json: result_json.as_deref(),
+                        provider_error: provider_error.as_deref(),
+                    },
                     &evidence,
                     authority,
                     now,
