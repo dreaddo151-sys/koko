@@ -12,8 +12,9 @@ use crate::independent_verifier::IndependentResultVerifier;
 use dread_agents::{
     AgentAdapter, AgentEvent, AgentExecutionIdentity, AgentOperationEvidenceKind,
     AgentOperationEvidencePayload, AgentOperationReceipt, CapabilityKind, CapabilityRecord,
-    CapabilityStatus, DurableAgentStartRequest, StartTaskRequest, response_sha256,
-, RuntimeIsolationAttestationSummary};
+    CapabilityStatus, DurableAgentStartRequest, RuntimeIsolationAttestationSummary,
+    StartTaskRequest, response_sha256,
+};
 use dread_orchestrator::persistence::{
     AdmissionRecord, AttemptRecord, AuthorizationFacts, CurrentRetryContractFacts, DispatchRequest,
     ExecutionAuthority, ProviderEventReceiptContext, ProviderEvidence, SignedProviderReceipt,
