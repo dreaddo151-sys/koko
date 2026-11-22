@@ -9726,7 +9726,8 @@ mod tests {
         let error = ensure_durable_agent_dispatch_ready(&connection).unwrap_err();
         assert_eq!(error.status, StatusCode::CONFLICT);
         assert!(
-            error.message.contains("durable admission"),
+            error.message.contains("current-boot reconciliation")
+                && error.message.contains("signed provider activation"),
             "unexpected fail-closed reason: {}",
             error.message
         );
