@@ -260,7 +260,7 @@ fn secure_file_metadata(path: &Path, max_bytes: u64, name: &str) -> Result<fs::M
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         if metadata.permissions().mode() & 0o077 != 0 {
             return Err(format!("{name} must be owner-only (0600 or stricter)"));
         }
@@ -330,6 +330,12 @@ fn write_sync_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
 fn write_sync_shared_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let mut file = open_create_new(path, 0o640)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o640))
+            .map_err(|error| format!("cannot set verifier receipt permissions: {error}"))?;
+    }
     file.write_all(bytes)
         .map_err(|error| format!("cannot write verifier receipt {}: {error}", path.display()))?;
     file.sync_all()
