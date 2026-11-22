@@ -90,6 +90,9 @@ make_bundle() {
   printf 'default-services\n' > "$bundle/config/services.toml"
   printf 'default-agents\n' > "$bundle/config/agents.toml"
   printf '{"schema_version":1,"policy_id":"example","rules":[]}\n' > "$bundle/config/independent-result-verifier.policy.example.json"
+  printf 'DREAD_VERIFIER_DB_PATH=/path/to/canonical.sqlite\n' > "$bundle/config/independent-result-verifier.env.example"
+  printf '[Service]\nExecStart=/usr/bin/dread-result-verifier run\n' > "$bundle/systemd/dread-result-verifier.service.example"
+  printf 'd /var/lib/dread-verifier/receipts 2750 dread-verifier dread-api-verifier -\n' > "$bundle/systemd/dread-result-verifier.tmpfiles.example"
   printf '# docs\n' > "$bundle/README.md"
   printf '# docs\n' > "$bundle/docs/README.md"
   printf '#!/usr/bin/env bash\n' > "$bundle/scripts/helper.sh"
@@ -118,6 +121,9 @@ run_installer "$BUNDLE1"
 [[ "$("$PREFIX/bin/dread-universal")" == v1 ]]
 [[ "$("$PREFIX/bin/dread-result-verifier")" == verifier-v1 ]]
 [[ -f "$PREFIX/config/independent-result-verifier.policy.example.json" ]]
+[[ -f "$PREFIX/config/independent-result-verifier.env.example" ]]
+[[ -f "$PREFIX/systemd/dread-result-verifier.service.example" ]]
+[[ -f "$PREFIX/systemd/dread-result-verifier.tmpfiles.example" ]]
 grep -q 'custom-services-config' "$HOME/.config/dread-universal/services.toml"
 grep -q 'legacy-sqlite-bytes' "$HOME/.local/share/dread-universal/data/dread_registry.sqlite3"
 grep -q 'legacy-api-token' "$HOME/.config/dread-universal/dread.env"
