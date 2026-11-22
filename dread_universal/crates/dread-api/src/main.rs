@@ -19,8 +19,7 @@ use axum::{
 use dread_agents::{
     AgentAdapter, AgentReceiptSigner, AgentTaskState, CapabilityKind, CapabilityProvenance,
     CapabilityRecord, CapabilityStatus, StartTaskRequest, deerflow::DeerFlowApiAdapter,
-    hermes::HermesApiAdapter,
-    openhands::OpenHandsAgentServerAdapter,
+    hermes::HermesApiAdapter, openhands::OpenHandsAgentServerAdapter,
 };
 use dread_discovery::{
     discover, discover_agent_manifests, discover_agents, known_agent_endpoints, load_agents,
@@ -108,9 +107,7 @@ struct AgentReceiptSigningKeyFile {
     seed_hex: String,
 }
 
-fn load_agent_receipt_signer(
-    environment_key: &str,
-) -> Result<Option<AgentReceiptSigner>, String> {
+fn load_agent_receipt_signer(environment_key: &str) -> Result<Option<AgentReceiptSigner>, String> {
     let Some(path) = env::var_os(environment_key) else {
         return Ok(None);
     };
@@ -157,9 +154,7 @@ fn build_agent_adapters(
         }
         let mut adapter = HermesApiAdapter::new(&hermes.endpoint, hermes.api_key, "Hermes")
             .map_err(|error| error.to_string())?;
-        if let Some(signer) = load_agent_receipt_signer(
-            "DREAD_HERMES_RECEIPT_SIGNING_KEY_FILE",
-        )? {
+        if let Some(signer) = load_agent_receipt_signer("DREAD_HERMES_RECEIPT_SIGNING_KEY_FILE")? {
             adapter = adapter.with_receipt_signer(signer);
         }
         let adapter = adapter
@@ -183,9 +178,9 @@ fn build_agent_adapters(
             "DeerFlow",
         )
         .map_err(|error| error.to_string())?;
-        if let Some(signer) = load_agent_receipt_signer(
-            "DREAD_DEERFLOW_RECEIPT_SIGNING_KEY_FILE",
-        )? {
+        if let Some(signer) =
+            load_agent_receipt_signer("DREAD_DEERFLOW_RECEIPT_SIGNING_KEY_FILE")?
+        {
             adapter = adapter.with_receipt_signer(signer);
         }
         let adapter = adapter
@@ -218,9 +213,9 @@ fn build_agent_adapters(
             "OpenHands",
         )
         .map_err(|error| error.to_string())?;
-        if let Some(signer) = load_agent_receipt_signer(
-            "DREAD_OPENHANDS_RECEIPT_SIGNING_KEY_FILE",
-        )? {
+        if let Some(signer) =
+            load_agent_receipt_signer("DREAD_OPENHANDS_RECEIPT_SIGNING_KEY_FILE")?
+        {
             adapter = adapter.with_receipt_signer(signer);
         }
         let adapter = adapter
