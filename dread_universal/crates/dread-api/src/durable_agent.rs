@@ -566,20 +566,6 @@ async fn monitor_durable_attempt(
 ) {
     let mut cancellation_submitted = false;
     loop {
-        if *cancellation.borrow() && !cancellation_submitted {
-            cancellation_submitted = true;
-            match cancel_with_evidence(&state, adapter.as_ref(), &identity, &provider_execution_id)
-                .await
-            {
-                Ok(true) => return,
-                Ok(false) => {}
-                Err(error) => {
-                    mark_reconciliation_required(&state, &request_id, &error);
-                    return;
-                }
-            }
-        }
-
         let events = match adapter
             .events_with_evidence(&identity, &provider_execution_id, cursor)
             .await
@@ -702,6 +688,23 @@ async fn monitor_durable_attempt(
         if let Err(error) = persist_active_status(&state, &request_id, &active) {
             mark_reconciliation_required(&state, &request_id, &error);
             return;
+        }
+
+        // Reconcile status before sending cancellation. A task that completed
+        // while DREAD was offline must be recorded as terminal, not cancelled
+        // again. Cancellation is submitted at most once by this worker.
+        if *cancellation.borrow() && !cancellation_submitted {
+            cancellation_submitted = true;
+            match cancel_with_evidence(&state, adapter.as_ref(), &identity, &provider_execution_id)
+                .await
+            {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => {
+                    mark_reconciliation_required(&state, &request_id, &error);
+                    return;
+                }
+            }
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
