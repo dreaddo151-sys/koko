@@ -9,8 +9,8 @@
 
 use dread_agents::{AgentAdapter, CapabilityKind, CapabilityRecord, CapabilityStatus};
 use dread_orchestrator::persistence::{
-    AdmissionRecord, AttemptRecord, AuthorizationFacts, CurrentRetryContractFacts,
-    DispatchRequest, ExecutionAuthority, ProviderEvidence, VerificationFacts,
+    AdmissionRecord, AttemptRecord, AuthorizationFacts, CurrentRetryContractFacts, DispatchRequest,
+    ExecutionAuthority, ProviderEvidence, VerificationFacts,
 };
 use ring::{digest, signature};
 use rusqlite::{Connection, OptionalExtension};
@@ -114,18 +114,12 @@ pub struct VerifiedExecutionTrustManifest {
 }
 
 impl VerifiedExecutionTrustManifest {
-    pub fn verify(
-        encoded: &[u8],
-        public_key_hex: &str,
-        now: i64,
-    ) -> Result<Self, String> {
+    pub fn verify(encoded: &[u8], public_key_hex: &str, now: i64) -> Result<Self, String> {
         if encoded.is_empty() || encoded.len() as u64 > MAX_MANIFEST_BYTES {
             return Err("execution trust manifest is empty or exceeds 1 MiB".into());
         }
-        let envelope: SignedExecutionTrustEnvelope =
-            serde_json::from_slice(encoded).map_err(|error| {
-                format!("execution trust manifest JSON is invalid: {error}")
-            })?;
+        let envelope: SignedExecutionTrustEnvelope = serde_json::from_slice(encoded)
+            .map_err(|error| format!("execution trust manifest JSON is invalid: {error}"))?;
         validate_text("key_id", &envelope.key_id, 128)?;
         let public_key = decode_hex(public_key_hex)?;
         let signature_bytes = decode_hex(&envelope.signature_hex)?;
@@ -177,7 +171,9 @@ impl VerifiedExecutionTrustManifest {
             return Err(format!("provider '{provider_id}' is disabled or revoked"));
         }
         if record.expires_at <= now || self.expires_at() <= now {
-            return Err(format!("provider '{provider_id}' trust evidence has expired"));
+            return Err(format!(
+                "provider '{provider_id}' trust evidence has expired"
+            ));
         }
         Ok(record)
     }
@@ -340,7 +336,8 @@ impl Phase6ExecutionAuthority {
             .optional()
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("task '{task_id}' does not exist"))?;
-        if !(status == "queued" || (allow_active && matches!(status.as_str(), "running" | "cancelling")))
+        if !(status == "queued"
+            || (allow_active && matches!(status.as_str(), "running" | "cancelling")))
             || task_type != "agent_task"
             || approved_by.as_deref() != Some(requester_id)
             || capability_id.is_none()
@@ -358,8 +355,7 @@ impl Phase6ExecutionAuthority {
             .optional()
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "task has no durable approval event".to_string())?;
-        let payload: Value =
-            serde_json::from_str(&payload).map_err(|error| error.to_string())?;
+        let payload: Value = serde_json::from_str(&payload).map_err(|error| error.to_string())?;
         if actor != requester_id
             || payload.get("approved_by").and_then(Value::as_str) != Some(requester_id)
         {
@@ -401,8 +397,12 @@ impl Phase6ExecutionAuthority {
         if revision != admission.capability_revision {
             return Err("capability approval revision changed after admission".into());
         }
-        let (mission_id, _) =
-            Self::approved_task(connection, &admission.task_id, &admission.requester_id, true)?;
+        let (mission_id, _) = Self::approved_task(
+            connection,
+            &admission.task_id,
+            &admission.requester_id,
+            true,
+        )?;
         if mission_id != admission.mission_id {
             return Err("canonical mission mapping changed after admission".into());
         }
@@ -486,14 +486,15 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
             .as_deref()
             .ok_or_else(|| "agent capability has no provider adapter".to_string())?;
         let (registration, adapter_version) = self.registration(provider_id, now)?;
-        let actual_revision =
-            Self::capability_revision(connection, &capability_id, provider_id)?;
+        let actual_revision = Self::capability_revision(connection, &capability_id, provider_id)?;
         if capability_revision != actual_revision
             || registration.capability_id != capability_id
             || registration.capability_revision != actual_revision
             || registration.operation != AGENT_OPERATION
         {
-            return Err("signed provider registration does not match current capability state".into());
+            return Err(
+                "signed provider registration does not match current capability state".into(),
+            );
         }
         if request.attempt_number > registration.retry_contract.max_attempts {
             return Err("verified retry contract attempt limit is exhausted".into());
@@ -567,7 +568,9 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
             || evidence.observed_at > now
             || evidence.expires_at.is_some_and(|expiry| expiry <= now)
         {
-            return Err("provider evidence is not bound to the authenticated adapter registration".into());
+            return Err(
+                "provider evidence is not bound to the authenticated adapter registration".into(),
+            );
         }
         if let Some(execution_id) = evidence.provider_execution_id.as_deref()
             && attempt
@@ -575,10 +578,15 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
                 .as_deref()
                 .is_some_and(|existing| existing != execution_id)
         {
-            return Err("provider evidence execution identity conflicts with the durable attempt".into());
+            return Err(
+                "provider evidence execution identity conflicts with the durable attempt".into(),
+            );
         }
         if evidence.evidence_kind == "acknowledged"
-            && evidence.provider_execution_id.as_deref().is_none_or(str::is_empty)
+            && evidence
+                .provider_execution_id
+                .as_deref()
+                .is_none_or(str::is_empty)
         {
             return Err("provider acknowledgement evidence has no execution identity".into());
         }
@@ -604,7 +612,9 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
             || serde_json::from_str::<Value>(payload_json).is_err()
             || attempt.provider_execution_id.is_none()
         {
-            return Err("provider event is malformed or not attached to an acknowledged attempt".into());
+            return Err(
+                "provider event is malformed or not attached to an acknowledged attempt".into(),
+            );
         }
         let _ = self.registration(&attempt.provider_id, now)?;
         // This method is internal to the authenticated AgentAdapter polling path.
@@ -656,8 +666,7 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
             idempotent_operation: contract.idempotent_operation,
             provider_keys_supported: contract.provider_keys_supported,
             revoked: registration.revoked || !registration.enabled,
-            valid_at_observation: contract.observed_at <= now
-                && contract.expires_at > now,
+            valid_at_observation: contract.observed_at <= now && contract.expires_at > now,
         })
     }
 }
@@ -704,10 +713,7 @@ fn load_admission_for_authority(
         .ok_or_else(|| format!("dispatch admission '{request_id}' does not exist"))
 }
 
-fn validate_manifest_payload(
-    manifest: &ExecutionTrustManifest,
-    now: i64,
-) -> Result<(), String> {
+fn validate_manifest_payload(manifest: &ExecutionTrustManifest, now: i64) -> Result<(), String> {
     if manifest.schema_version != 1 {
         return Err("unsupported execution trust manifest schema version".into());
     }
@@ -739,10 +745,26 @@ fn validate_manifest_payload(
             ("operation", provider.operation.as_str(), 128),
             ("evidence_id", provider.evidence_id.as_str(), 160),
             ("source_reference", provider.source_reference.as_str(), 2048),
-            ("retry_contract_id", provider.retry_contract.contract_id.as_str(), 160),
-            ("retry_evidence_id", provider.retry_contract.evidence_id.as_str(), 160),
-            ("retry_verifier_id", provider.retry_contract.verifier_id.as_str(), 160),
-            ("retry_source_reference", provider.retry_contract.source_reference.as_str(), 2048),
+            (
+                "retry_contract_id",
+                provider.retry_contract.contract_id.as_str(),
+                160,
+            ),
+            (
+                "retry_evidence_id",
+                provider.retry_contract.evidence_id.as_str(),
+                160,
+            ),
+            (
+                "retry_verifier_id",
+                provider.retry_contract.verifier_id.as_str(),
+                160,
+            ),
+            (
+                "retry_source_reference",
+                provider.retry_contract.source_reference.as_str(),
+                2048,
+            ),
             ("retry_sha256", provider.retry_contract.sha256.as_str(), 64),
         ] {
             validate_text(name, value, limit)?;
@@ -770,7 +792,9 @@ fn validate_manifest_payload(
         if !provider.endpoint.starts_with("https://")
             && !provider.endpoint.starts_with("http://127.0.0.1:")
             && !provider.endpoint.starts_with("http://localhost:")
-            && !provider.endpoint.starts_with("http://host.docker.internal:")
+            && !provider
+                .endpoint
+                .starts_with("http://host.docker.internal:")
         {
             return Err("provider endpoint must use HTTPS or an approved local endpoint".into());
         }
@@ -908,8 +932,7 @@ mod tests {
     fn verifies_signed_manifest_and_reports_only_public_metadata() {
         let now = 1_800_000_000;
         let (encoded, key) = signed_manifest(now);
-        let verified =
-            VerifiedExecutionTrustManifest::verify(&encoded, &key, now).unwrap();
+        let verified = VerifiedExecutionTrustManifest::verify(&encoded, &key, now).unwrap();
         assert_eq!(verified.manifest_id(), "trust-manifest-test");
         assert_eq!(verified.providers().len(), 1);
         assert_eq!(verified.public_status(now)["status"], "verified");
@@ -923,13 +946,10 @@ mod tests {
     fn rejects_modified_payload_and_bad_signature() {
         let now = 1_800_000_000;
         let (encoded, key) = signed_manifest(now);
-        let mut envelope: SignedExecutionTrustEnvelope =
-            serde_json::from_slice(&encoded).unwrap();
+        let mut envelope: SignedExecutionTrustEnvelope = serde_json::from_slice(&encoded).unwrap();
         envelope.payload.providers[0].endpoint = "https://attacker.invalid".into();
         let tampered = serde_json::to_vec(&envelope).unwrap();
-        assert!(
-            VerifiedExecutionTrustManifest::verify(&tampered, &key, now).is_err()
-        );
+        assert!(VerifiedExecutionTrustManifest::verify(&tampered, &key, now).is_err());
     }
 
     #[test]
@@ -940,13 +960,13 @@ mod tests {
 
         let mut envelope: SignedExecutionTrustEnvelope =
             serde_json::from_slice(&encoded).unwrap();
-        envelope.payload.providers[0].isolation.network_egress_restricted = false;
+        envelope.payload.providers[0]
+            .isolation
+            .network_egress_restricted = false;
         let keypair = Ed25519KeyPair::from_seed_unchecked(&[19_u8; 32]).unwrap();
         let payload_bytes = serde_json::to_vec(&envelope.payload).unwrap();
         envelope.signature_hex = hex_encode(keypair.sign(&payload_bytes).as_ref());
         let unsafe_signed = serde_json::to_vec(&envelope).unwrap();
-        assert!(
-            VerifiedExecutionTrustManifest::verify(&unsafe_signed, &key, now).is_err()
-        );
+        assert!(VerifiedExecutionTrustManifest::verify(&unsafe_signed, &key, now).is_err());
     }
 }
