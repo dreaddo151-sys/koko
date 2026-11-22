@@ -5688,6 +5688,7 @@ async fn main() -> anyhow::Result<()> {
         startup_dispatch_barrier_open,
         "Completed startup recovery gate evaluation"
     );
+    durable_agent::spawn_independent_verification_reconciler(state.clone());
     info!(address = %addr, database = %db_path, "PROJECT DREAD Universal API listening");
     axum::serve(listener, app(state))
         .with_graceful_shutdown(async {
