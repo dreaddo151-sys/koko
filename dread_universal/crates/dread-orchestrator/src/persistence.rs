@@ -3771,7 +3771,10 @@ mod tests {
             DispatchPreparation::Created(attempt) => attempt,
             DispatchPreparation::Existing(_) => panic!("first preparation must create the attempt"),
         };
-        assert_eq!(attempt_for_request(&db, "request-1").unwrap(), Some(attempt.clone()));
+        assert_eq!(
+            attempt_for_request(&db, "request-1").unwrap(),
+            Some(attempt.clone())
+        );
         assert_eq!(attempt.dispatch_state, "dispatching");
         assert_eq!(attempt.idempotency_key, "logical-key-1");
 
