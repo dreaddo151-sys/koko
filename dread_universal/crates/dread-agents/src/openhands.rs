@@ -1,3 +1,7 @@
+use crate::runtime_attestation::{
+    RuntimeIsolationAttestationSummary, RuntimeIsolationControl,
+    VerifiedRuntimeIsolationAttestation,
+};
 //! OpenHands Agent Server adapter.
 //!
 //! Every DREAD conversation requests DockerExecutionWorkspace. The adapter only
@@ -38,6 +42,7 @@ pub struct OpenHandsAgentServerAdapter {
     sandbox_attested: bool,
     secret_store_attested: bool,
     receipt_signer: Option<AgentReceiptSigner>,
+    runtime_attestation: Option<RuntimeIsolationAttestationSummary>,
 }
 
 impl OpenHandsAgentServerAdapter {
@@ -144,6 +149,7 @@ impl OpenHandsAgentServerAdapter {
             sandbox_attested: false,
             secret_store_attested: false,
             receipt_signer: None,
+            runtime_attestation: None,
         })
     }
 
@@ -158,7 +164,7 @@ impl OpenHandsAgentServerAdapter {
     /// Enable only after Docker execution and stable OH_SECRET_KEY storage have
     /// been configured on the Agent Server. Before advertising or starting a task,
     /// DREAD reads authoritative /server_info execution_runtime and usable_tools.
-    pub fn attest_docker_runtime(
+    pub(crate) fn attest_docker_runtime(
         mut self,
         docker_runtime_enabled: bool,
         secret_store_configured: bool,
@@ -477,6 +483,10 @@ impl OpenHandsAgentServerAdapter {
 impl AgentAdapter for OpenHandsAgentServerAdapter {
     fn descriptor(&self) -> &AgentDescriptor {
         &self.descriptor
+    }
+
+    fn runtime_isolation_attestation(&self) -> Option<RuntimeIsolationAttestationSummary> {
+        self.runtime_attestation.clone()
     }
 
     fn health<'a>(&'a self) -> AdapterFuture<'a, AgentHealth> {
