@@ -167,3 +167,32 @@ Checkpoint HEAD is now `756a3e712d2c74cba7c417a7eefdaee6064b83c9`.
 5. Update this checkpoint with each accepted milestone and exact commit/CI run. Do not ask the user to resend the PC/API/Kimi/GitHub source context.
 
 **Resume instruction:** Continue PROJECT DREAD UNIVERSAL from this checkpoint and the exact active GitHub branch. Preserve every earlier source delivery and correction. Do not restart from zero, do not merge PR #16 prematurely, and do not claim completion while the listed execution, verification and recovery work remains.
+
+
+## 8. Resumption update — 2026-11-22
+
+This section supersedes the earlier pending-verification note in Section 4 while preserving its historical CI chronology.
+
+### Current verified baseline
+
+- **Source commit:** `5f1999cfaeb5f1be35a17796ea207d745464be0e`
+- **Workflow:** DREAD Universal CI, run **#1434**, ID **44997828065**
+- **Result:** all three jobs passed on the exact source commit.
+  - Rust / Ubuntu 24.04: `cargo fmt --all -- --check`, strict Clippy, workspace tests, release build, installer/release verification, migration/rollback checks, Python bridge/importer tests and the single-owner GPU boundary.
+  - Web console / Ubuntu 24.04: locked dependency verification and production build.
+  - Ubuntu packages / smoke test: deb and portable bundle assembly, checksums/content validation, packaged API and production console smoke test.
+- **CI corrections applied after the prior checkpoint:**
+  1. Updated the isolation regression test to mutate `IsolationControl::EgressPolicy` in the granular evidence map, then re-sign the changed payload with the fixture's trusted Ed25519 key. This now exercises rejection of a trusted-but-unsafe evidence record rather than merely testing a signature mismatch.
+  2. Removed the unused `Phase6ExecutionAuthority::new` constructor. The production authority remains created only through the environment loader after the configured manifest and server public key are verified.
+- **Web console and packaging stayed green** during both correction cycles. No workstation service, file, model, database, or workflow was touched.
+
+### Active implementation boundary
+
+The API still does **not** start providers through the new durable lifecycle. The current queue path remains protected by the closed startup-dispatch barrier. The durable persistence layer exposes admission, atomic attempt preparation, provider acknowledgement/active/event/terminal persistence, independent-verification recording, cancellation, and per-boot recovery primitives; however:
+
+- the API's current approval-derived `policy_decision_id` remains a placeholder, not a production policy decision;
+- `AgentAdapter` still exposes legacy task/status/event structures rather than attempt-bound authenticated operation receipts;
+- actual startup provider-worker reconciliation/reattachment is not wired;
+- independent result verification remains fail-closed.
+
+Next implementation must establish trusted policy-decision provenance and a request/attempt/idempotency-key-bound adapter evidence contract before replacing the guarded legacy provider worker. Keep the startup dispatch barrier closed until durable provider reattachment and independent verification satisfy the release invariants. PR #16 remains draft and unmerged.
