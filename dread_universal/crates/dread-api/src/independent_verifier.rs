@@ -378,6 +378,17 @@ fn validate_distinct_verifier_uid(verifier_uid: u32) -> Result<(), String> {
     // The API must never share the verifier's effective Unix identity: doing
     // so would let the API process replace receipts or access verifier secrets.
     let api_uid = unsafe { libc::geteuid() };
+    validate_service_uid_separation(api_uid, verifier_uid)
+}
+
+#[cfg(unix)]
+fn validate_service_uid_separation(api_uid: u32, verifier_uid: u32) -> Result<(), String> {
+    if api_uid == 0 {
+        return Err(
+            "API must run as a non-root Unix identity when the independent verifier is configured"
+                .into(),
+        );
+    }
     if verifier_uid == api_uid {
         return Err(
             "independent verifier receipt owner UID must differ from the API effective UID".into(),
@@ -517,6 +528,13 @@ mod tests {
         let api_uid = unsafe { libc::geteuid() };
         assert!(validate_distinct_verifier_uid(api_uid).is_err());
         assert!(validate_distinct_verifier_uid(api_uid.saturating_add(1)).is_ok());
+    }
+
+    #[test]
+    fn verifier_identity_separation_rejects_root_and_shared_uid() {
+        assert!(validate_service_uid_separation(0, 1001).is_err());
+        assert!(validate_service_uid_separation(1000, 1000).is_err());
+        assert!(validate_service_uid_separation(1000, 1001).is_ok());
     }
 
     #[test]
