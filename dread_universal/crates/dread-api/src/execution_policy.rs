@@ -260,13 +260,18 @@ impl ExecutionPolicyAuthority {
             "execution policy manifest",
         )?;
         #[cfg(unix)]
-        if opened.metadata.permissions().mode() & 0o022 != 0 {
+        if !policy_file_mode_is_safe(opened.metadata.permissions().mode()) {
             return Err(
                 "execution policy manifest must not be group- or world-writable".into(),
             );
         }
         VerifiedExecutionPolicy::verify(&opened.bytes, &self.public_key_hex, now)
     }
+}
+
+#[cfg(unix)]
+fn policy_file_mode_is_safe(mode: u32) -> bool {
+    mode & 0o022 == 0
 }
 
 fn validate_policy_payload(manifest: &ExecutionPolicyManifest, now: i64) -> Result<(), String> {
@@ -556,10 +561,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn policy_manifest_mode_rejects_group_and_world_write_bits() {
-        assert_eq!(0o600 & 0o022, 0);
-        assert_eq!(0o640 & 0o022, 0);
-        assert_ne!(0o660 & 0o022, 0);
-        assert_ne!(0o622 & 0o022, 0);
+        assert!(policy_file_mode_is_safe(0o600));
+        assert!(policy_file_mode_is_safe(0o640));
+        assert!(!policy_file_mode_is_safe(0o660));
+        assert!(!policy_file_mode_is_safe(0o622));
     }
 
     #[cfg(unix)]
