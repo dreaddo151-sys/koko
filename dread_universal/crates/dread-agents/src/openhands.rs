@@ -1256,6 +1256,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconciles_lost_start_ack_by_reading_the_deterministic_conversation_id() {
+        let existing = Arc::new(AtomicBool::new(true));
+        let app = Router::new()
+            .route("/api/conversations/{id}", get(get_conversation))
+            .with_state(existing);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let signer = AgentReceiptSigner::from_seed_hex("openhands-test-key", &"1a".repeat(32))
+            .unwrap();
+        let trusted_public_key = signer.public_key_hex().unwrap();
+        let adapter = OpenHandsAgentServerAdapter::new(
+            &format!("http://{address}"),
+            "session-secret",
+            "test/model",
+            "llm-secret",
+            "http://host.docker.internal:11500/v1",
+            "OpenHands recovery test",
+        )
+        .unwrap()
+        .with_receipt_signer(signer)
+        .attest_docker_runtime(true, true)
+        .unwrap();
+
+        let task_id = "00000000-0000-4000-8000-000000000007";
+        let identity = AgentExecutionIdentity {
+            request_id: "request-lost-ack".into(),
+            attempt_id: "attempt-lost-ack".into(),
+            task_id: task_id.into(),
+            worker_id: "worker-recovery".into(),
+            provider_id: "openhands".into(),
+            capability_id: "openhands.run".into(),
+            adapter_id: "openhands".into(),
+            adapter_version: adapter.descriptor().version.clone().unwrap(),
+            provider_registration_revision: 4,
+            idempotency_key: format!("project-dread:{task_id}"),
+        };
+
+        // This router exposes only GET. Reconciliation therefore cannot
+        // create/replay a conversation and must resolve it by stable task ID.
+        let receipt = adapter
+            .reconcile_start_with_evidence(&identity)
+            .await
+            .unwrap();
+        assert_eq!(receipt.response.task_id, task_id);
+        assert_eq!(receipt.response.provider_task_id.as_deref(), Some(task_id));
+        assert_eq!(
+            receipt.evidence.payload.provider_execution_id.as_deref(),
+            Some(task_id)
+        );
+        assert_eq!(receipt.evidence.payload.identity, identity);
+        assert_eq!(
+            receipt.evidence.payload.response_sha256,
+            response_sha256(&receipt.response).unwrap()
+        );
+        assert_eq!(decode_receipt_hex(&trusted_public_key).unwrap().len(), 32);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn confirmation_response_requires_pending_state_and_uses_authenticated_endpoint() {
         let app = Router::new()
             .route("/api/conversations/{id}", get(waiting_conversation))
