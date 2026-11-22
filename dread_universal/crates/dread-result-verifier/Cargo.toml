@@ -10,6 +10,7 @@ name = "dread-result-verifier"
 path = "src/main.rs"
 
 [dependencies]
+libc.workspace = true
 ring.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
