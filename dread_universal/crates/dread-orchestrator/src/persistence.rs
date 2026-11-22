@@ -446,9 +446,9 @@ pub fn install(connection: &mut Connection, now: i64) -> Result<(), PersistenceE
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    if max_version > 4 || version_count != max_version {
+    if max_version > 5 || version_count != max_version {
         return Err(PersistenceError::Invalid(format!(
-            "unsupported or non-contiguous DREAD execution schema history (max={max_version}, count={version_count}, supported_through=4)"
+            "unsupported or non-contiguous DREAD execution schema history (max={max_version}, count={version_count}, supported_through=5)"
         )));
     }
 
@@ -464,6 +464,10 @@ pub fn install(connection: &mut Connection, now: i64) -> Result<(), PersistenceE
         (
             4_i64,
             include_str!("../migrations/0004_attempt_worker_identity.sql"),
+        ),
+        (
+            5_i64,
+            include_str!("../migrations/0005_startup_recovery_generation.sql"),
         ),
     ] {
         let applied: bool = tx.query_row(
@@ -549,6 +553,7 @@ pub fn install(connection: &mut Connection, now: i64) -> Result<(), PersistenceE
             "acknowledged_at",
             "terminal_at",
             "recovery_attached_at",
+            "recovery_generation",
         ],
     )?;
     require_columns(
@@ -1172,14 +1177,59 @@ pub fn record_provider_active(
 
 /// Return provider attempts whose remote status is known-active but whose
 /// polling/cancellation worker has not yet been registered in this process.
+/// Start a new recovery epoch on every API boot. An attachment timestamp
+/// from an earlier process is historical only and cannot satisfy this boot's
+/// startup dispatch barrier.
+pub fn begin_startup_recovery(
+    connection: &mut Connection,
+    now: i64,
+) -> Result<i64, PersistenceError> {
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current: Option<String> = tx
+        .query_row(
+            "SELECT state_value FROM dread_execution_runtime_state
+             WHERE state_key = 'startup_recovery_generation'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let generation = current
+        .as_deref()
+        .unwrap_or("0")
+        .parse::<i64>()
+        .map_err(|_| PersistenceError::Invalid("startup recovery generation is corrupt".into()))?
+        .checked_add(1)
+        .ok_or_else(|| PersistenceError::Invalid("startup recovery generation overflow".into()))?;
+    tx.execute(
+        "INSERT INTO dread_execution_runtime_state(state_key, state_value, updated_at)
+         VALUES ('startup_recovery_generation', ?1, ?2)
+         ON CONFLICT(state_key) DO UPDATE SET
+             state_value = excluded.state_value, updated_at = excluded.updated_at",
+        params![generation.to_string(), now],
+    )?;
+    tx.execute(
+        "INSERT INTO dread_execution_runtime_state(state_key, state_value, updated_at)
+         VALUES ('startup_dispatch_barrier', 'blocked', ?1)
+         ON CONFLICT(state_key) DO UPDATE SET
+             state_value = 'blocked', updated_at = excluded.updated_at",
+        [now],
+    )?;
+    tx.commit()?;
+    Ok(generation)
+}
+
 pub fn recovery_worker_attachment_candidates(
     connection: &Connection,
 ) -> Result<Vec<AttemptRecord>, PersistenceError> {
     let mut statement = connection.prepare(
         "SELECT request_id FROM dread_task_attempts
-         WHERE dispatch_state = 'running'
+         WHERE dispatch_state IN ('acknowledged', 'running', 'reconciliation_required')
            AND provider_execution_id IS NOT NULL
-           AND recovery_attached_at IS NULL
+           AND recovery_generation != COALESCE((
+               SELECT CAST(state_value AS INTEGER)
+               FROM dread_execution_runtime_state
+               WHERE state_key = 'startup_recovery_generation'
+           ), 0)
          ORDER BY dispatched_at, request_id",
     )?;
     let ids = statement
@@ -1215,16 +1265,26 @@ pub fn mark_recovery_worker_attached(
             "canonical task is not active while attaching its provider worker".into(),
         ));
     }
+    let generation: i64 = tx
+        .query_row(
+            "SELECT CAST(state_value AS INTEGER) FROM dread_execution_runtime_state
+             WHERE state_key = 'startup_recovery_generation'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
     let changed = tx.execute(
-        "UPDATE dread_task_attempts SET recovery_attached_at = ?2
+        "UPDATE dread_task_attempts SET recovery_attached_at = ?2, recovery_generation = ?3
          WHERE request_id = ?1 AND dispatch_state = 'running'
-           AND provider_execution_id IS NOT NULL AND recovery_attached_at IS NULL",
-        params![request_id, now],
+           AND provider_execution_id IS NOT NULL AND recovery_generation != ?3",
+        params![request_id, now, generation],
     )?;
     if changed != 1 {
         let already_attached = tx.query_row(
-            "SELECT recovery_attached_at IS NOT NULL FROM dread_task_attempts WHERE request_id = ?1",
-            [request_id], |row| row.get::<_, bool>(0),
+            "SELECT recovery_generation = ?2 FROM dread_task_attempts WHERE request_id = ?1",
+            params![request_id, generation],
+            |row| row.get::<_, bool>(0),
         )?;
         if !already_attached {
             return Err(PersistenceError::Conflict(
@@ -1258,13 +1318,23 @@ pub fn release_startup_dispatch_barrier(
     now: i64,
 ) -> Result<bool, PersistenceError> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let generation: i64 = tx
+        .query_row(
+            "SELECT CAST(state_value AS INTEGER) FROM dread_execution_runtime_state
+             WHERE state_key = 'startup_recovery_generation'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
     let unresolved: i64 = tx.query_row(
         "SELECT COUNT(*) FROM dread_task_attempts
          WHERE (
-             dispatch_state IN ('dispatching', 'acknowledged', 'running', 'reconciliation_required')
+             dispatch_state IN ('dispatching', 'acknowledged', 'running',
+                                'provider_succeeded', 'reconciliation_required')
              OR cancellation_state IN ('requested', 'request_sent', 'accepted', 'cancelling', 'unknown')
-         ) AND recovery_attached_at IS NULL",
-        [],
+         ) AND recovery_generation != ?1",
+        [generation],
         |row| row.get(0),
     )?;
     if unresolved != 0 {
@@ -3362,7 +3432,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(versions, 4);
+        assert_eq!(versions, 5);
     }
 
     #[test]
@@ -3370,7 +3440,7 @@ mod tests {
         let mut db = canonical_db();
         install(&mut db, 10).unwrap();
         db.execute(
-            "INSERT INTO dread_execution_schema_migrations(version, applied_at) VALUES (5, 12)",
+            "INSERT INTO dread_execution_schema_migrations(version, applied_at) VALUES (6, 12)",
             [],
         )
         .unwrap();
