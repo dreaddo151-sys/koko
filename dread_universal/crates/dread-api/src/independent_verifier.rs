@@ -304,6 +304,10 @@ impl IndependentResultVerifier {
     }
 }
 
+fn has_exact_unix_permission_mode(mode: u32, expected: u32) -> bool {
+    mode & 0o7777 == expected
+}
+
 fn validate_secure_directory(
     path: &Path,
     expected_uid: u32,
@@ -323,7 +327,7 @@ fn validate_secure_directory(
         let mode = metadata.permissions().mode();
         if metadata.uid() != expected_uid
             || metadata.gid() != expected_gid
-            || mode & 0o7777 != 0o2750
+            || !has_exact_unix_permission_mode(mode, 0o2750)
         {
             return Err(
                 "receipt directory must be verifier-owned, use the configured shared GID, and have mode 2750 (setgid, owner rwx, group r-x, no other access)"
@@ -360,7 +364,9 @@ fn validate_secure_receipt_file(
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let mode = metadata.permissions().mode();
-        if metadata.uid() != expected_uid || metadata.gid() != expected_gid || mode & 0o777 != 0o640
+        if metadata.uid() != expected_uid
+            || metadata.gid() != expected_gid
+            || !has_exact_unix_permission_mode(mode, 0o640)
         {
             return Err(
                 "receipt files must be verifier-owned, use the configured shared GID, and have mode 0640 (verifier read/write, API group read-only, no other access)"
@@ -473,6 +479,16 @@ mod tests {
     fn write_secure(path: &Path, content: &str) {
         fs::write(path, content).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o640)).unwrap();
+    }
+
+    #[test]
+    fn exact_receipt_permission_check_rejects_special_mode_bits() {
+        assert!(has_exact_unix_permission_mode(0o640, 0o640));
+        assert!(!has_exact_unix_permission_mode(0o4640, 0o640));
+        assert!(!has_exact_unix_permission_mode(0o2640, 0o640));
+        assert!(!has_exact_unix_permission_mode(0o1640, 0o640));
+        assert!(!has_exact_unix_permission_mode(0o660, 0o640));
+        assert!(!has_exact_unix_permission_mode(0o600, 0o640));
     }
 
     #[test]
