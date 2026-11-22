@@ -6458,6 +6458,7 @@ mod tests {
         .unwrap()
         .attest_runtime(test_runtime_attestation(
             "openhands",
+            "openhands",
             &format!("http://{address}"),
             "docker",
         ))
@@ -6785,7 +6786,7 @@ mod tests {
             attestor_id: "dread-runtime-attestor-test".into(),
             provider_id: provider_id.into(),
             provider_registration_revision: 1,
-            adapter_id: adapter_id.into()
+            adapter_id: adapter_id.into(),
             adapter_version: env!("CARGO_PKG_VERSION").into(),
             endpoint: endpoint.into(),
             runtime_identity: format!("{provider_id}-runtime-test"),
@@ -6858,7 +6859,12 @@ mod tests {
             hermes: Some(HermesAdapterConfig {
                 endpoint: endpoint.into(),
                 api_key: "test-api-key".into(),
-                runtime_attestation: test_runtime_attestation("hermes", endpoint, "local"),
+                runtime_attestation: test_runtime_attestation(
+                    "hermes",
+                    "hermes.api_server",
+                    endpoint,
+                    "local",
+                ),
             }),
             deerflow: None,
             openhands: None,
@@ -6874,7 +6880,8 @@ mod tests {
                 pat: "dfp_test-token".into(),
                 runtime_attestation: test_runtime_attestation(
                     "deerflow",
-                    endpoint,
+                    "deerflow.gateway",
+                    &format!("{endpoint}/api/langgraph"),
                     "LocalSandboxProvider",
                 ),
             }),
@@ -6892,7 +6899,12 @@ mod tests {
             hermes: Some(HermesAdapterConfig {
                 endpoint: hermes_endpoint.into(),
                 api_key: "test-api-key".into(),
-                runtime_attestation: test_runtime_attestation("hermes", hermes_endpoint, "modal"),
+                runtime_attestation: test_runtime_attestation(
+                    "hermes",
+                    "hermes.api_server",
+                    hermes_endpoint,
+                    "modal",
+                ),
             }),
             deerflow: Some(DeerFlowAdapterConfig {
                 endpoint: deerflow_endpoint.into(),
@@ -6900,7 +6912,8 @@ mod tests {
                 pat: "dfp_test-token".into(),
                 runtime_attestation: test_runtime_attestation(
                     "deerflow",
-                    deerflow_endpoint,
+                    "deerflow.gateway",
+                    &format!("{deerflow_endpoint}/api/langgraph"),
                     "deerflow.community.boxlite:BoxliteProvider",
                 ),
             }),
@@ -6911,6 +6924,7 @@ mod tests {
                 llm_api_key: "llm-test".into(),
                 llm_base_url: "http://host.docker.internal:11500/v1".into(),
                 runtime_attestation: test_runtime_attestation(
+                    "openhands",
                     "openhands",
                     openhands_endpoint,
                     "docker",
