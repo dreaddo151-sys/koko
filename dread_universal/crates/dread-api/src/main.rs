@@ -1987,9 +1987,7 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
 /// The task's executor is selected by task_type, never by a caller-supplied capability
 /// attached to an unrelated built-in task. This helper is shared by mission validation
 /// and final queue admission to prevent policy drift.
-fn ensure_durable_agent_dispatch_ready(
-    connection: &Connection,
-) -> Result<(), ApiError> {
+fn ensure_durable_agent_dispatch_ready(connection: &Connection) -> Result<(), ApiError> {
     let ready = dread_orchestrator::persistence::startup_dispatch_barrier_is_open(connection)
         .map_err(|error| ApiError::internal(error.to_string()))?;
     if !ready {
