@@ -11,6 +11,7 @@ pub mod hermes;
 pub mod openhands;
 
 use futures::future::BoxFuture;
+use ring::signature::KeyPair;
 use ring::{digest, signature};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
