@@ -670,3 +670,18 @@ Run #2000 passed:
 - Ubuntu packages / smoke test: portable/Debian package assembly, checksum/content validation, packaged API install and console smoke test.
 
 No verifier or API filesystem permissions were changed on the user's workstation. This is CI evidence only; the separate Unix account/ACL deployment and physical acceptance gates remain open. PR #16 remains draft and unmerged.
+
+
+## 24. Enforce distinct API/verifier Unix identities — 2026-11-22
+
+**Exact code head:** `296bbda496c9e7d23d42e6ce887eba4662ca4a63`  
+**CI run:** [#2006 — all three jobs passed](https://github.com/dreaddo151-sys/koko/actions/runs/45067539206)
+
+The API now rejects independent-verifier configuration when the configured receipt-owner UID equals the API process effective UID. This makes the two-identity boundary an enforced runtime precondition, not merely an operator convention in the service examples. The check uses the existing `libc` dependency and runs when the verifier receipt directory is validated. A regression test proves that the API's own effective UID is rejected and a distinct UID is accepted.
+
+The first code attempt in run #2004 stopped at one rustfmt-only layout difference; the formatting correction is a separate commit. Exact final code head #2006 passed:
+- Rust formatting, strict Clippy, all workspace tests, optimized release build, installer/release checks, verifier failure paths, portable migration/rollback, Python bridge/importer regressions and GPU single-owner boundary.
+- Web console production build.
+- Ubuntu portable/Debian package assembly, checksums/content validation, packaged API install and console smoke test.
+
+This guard proves only UID inequality. It does not deploy accounts/groups, prove the API process is non-root, validate real target ACLs/WAL/SHM access, or activate the verifier. Those remain deployment/physical acceptance gates. PR #16 remains draft/unmerged; provider dispatch remains blocked.
