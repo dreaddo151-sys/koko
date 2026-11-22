@@ -115,6 +115,8 @@ struct VerifierConfig {
     key_id: String,
     private_key_path: PathBuf,
     policy_path: PathBuf,
+    receipt_uid: u32,
+    receipt_gid: u32,
     poll_interval: Duration,
 }
 
@@ -266,7 +268,12 @@ fn secure_file_metadata(path: &Path, max_bytes: u64, name: &str) -> Result<fs::M
     Ok(metadata)
 }
 
-fn secure_directory(path: &Path, name: &str) -> Result<(), String> {
+fn secure_directory(
+    path: &Path,
+    name: &str,
+    expected_uid: u32,
+    expected_gid: u32,
+) -> Result<(), String> {
     let metadata =
         fs::symlink_metadata(path).map_err(|error| format!("cannot inspect {name}: {error}"))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -276,25 +283,41 @@ fn secure_directory(path: &Path, name: &str) -> Result<(), String> {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(format!("{name} must be owner-only (0700 or stricter)"));
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.uid() != expected_uid
+            || metadata.gid() != expected_gid
+            || metadata.permissions().mode() & 0o7777 != 0o2750
+        {
+            return Err(format!(
+                "{name} must be owned by the configured verifier UID/GID and use mode 2750"
+            ));
         }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (expected_uid, expected_gid);
+        return Err("separate verifier receipt ownership is supported only on Unix hosts".into());
     }
     Ok(())
 }
 
-fn open_secure_create_new(path: &Path) -> Result<File, String> {
+fn open_create_new(path: &Path, mode: u32) -> Result<File, String> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        options.mode(mode);
     }
+    #[cfg(not(unix))]
+    let _ = mode;
     options
         .open(path)
         .map_err(|error| format!("cannot create protected file {}: {error}", path.display()))
+}
+
+fn open_secure_create_new(path: &Path) -> Result<File, String> {
+    open_create_new(path, 0o600)
 }
 
 fn write_sync_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -303,6 +326,14 @@ fn write_sync_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|error| format!("cannot write protected file {}: {error}", path.display()))?;
     file.sync_all()
         .map_err(|error| format!("cannot sync protected file {}: {error}", path.display()))
+}
+
+fn write_sync_shared_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = open_create_new(path, 0o640)?;
+    file.write_all(bytes)
+        .map_err(|error| format!("cannot write verifier receipt {}: {error}", path.display()))?;
+    file.sync_all()
+        .map_err(|error| format!("cannot sync verifier receipt {}: {error}", path.display()))
 }
 
 fn sync_directory(path: &Path) -> Result<(), String> {
@@ -330,11 +361,41 @@ fn validate_safe_filename(filename: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_shared_output_file(
+    path: &Path,
+    expected_uid: u32,
+    expected_gid: u32,
+) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect verifier output {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("existing verifier output is not a regular file".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.uid() != expected_uid
+            || metadata.gid() != expected_gid
+            || metadata.permissions().mode() & 0o777 != 0o640
+        {
+            return Err("existing verifier output has an unexpected owner, group or mode".into());
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (expected_uid, expected_gid);
+        return Err("shared verifier receipts are supported only on Unix hosts".into());
+    }
+    Ok(())
+}
+
 fn atomic_publish(
     directory: &Path,
     filename: &str,
     bytes: &[u8],
     allow_replace: bool,
+    expected_uid: u32,
+    expected_gid: u32,
 ) -> Result<(), String> {
     validate_safe_filename(filename)?;
     let destination = directory.join(filename);
@@ -343,7 +404,7 @@ fn atomic_publish(
         std::process::id(),
         Uuid::new_v4()
     ));
-    write_sync_file(&temporary, bytes)?;
+    write_sync_shared_file(&temporary, bytes)?;
 
     let result = match fs::symlink_metadata(&destination) {
         Ok(metadata) => {
@@ -358,6 +419,7 @@ fn atomic_publish(
                     destination.display()
                 ))
             } else {
+                validate_shared_output_file(&destination, expected_uid, expected_gid)?;
                 fs::rename(&temporary, &destination)
                     .map_err(|error| format!("cannot atomically replace verifier output: {error}"))
             }
@@ -713,8 +775,13 @@ fn existing_receipt_is_current(
     public_key: &[u8],
     expected: &IndependentResultReceipt,
     now: i64,
+    expected_uid: u32,
+    expected_gid: u32,
 ) -> bool {
-    let Ok(metadata) = secure_file_metadata(path, 64 * 1024, "existing verifier receipt") else {
+    if validate_shared_output_file(path, expected_uid, expected_gid).is_err() {
+        return false;
+    }
+    let Ok(metadata) = fs::symlink_metadata(path) else {
         return false;
     };
     if metadata.len() == 0 {
@@ -748,6 +815,8 @@ fn publish_result_receipt(
     receipt: &IndependentResultReceipt,
     key_id: &str,
     keypair: &Ed25519KeyPair,
+    receipt_uid: u32,
+    receipt_gid: u32,
 ) -> Result<bool, String> {
     let filename = format!("{}.json", attempt.request_id);
     let destination = receipt_dir.join(&filename);
@@ -758,11 +827,13 @@ fn publish_result_receipt(
         keypair.public_key().as_ref(),
         receipt,
         now,
+        receipt_uid,
+        receipt_gid,
     ) {
         return Ok(false);
     }
     let bytes = sign_payload(keypair, key_id, receipt)?;
-    atomic_publish(receipt_dir, &filename, &bytes, true)?;
+    atomic_publish(receipt_dir, &filename, &bytes, true, receipt_uid, receipt_gid)?;
     Ok(true)
 }
 
@@ -772,6 +843,8 @@ fn write_heartbeat(
     key_id: &str,
     keypair: &Ed25519KeyPair,
     now: i64,
+    receipt_uid: u32,
+    receipt_gid: u32,
 ) -> Result<(), String> {
     let heartbeat = VerifierHeartbeat {
         schema_version: 1,
@@ -780,7 +853,14 @@ fn write_heartbeat(
         expires_at: now.saturating_add(HEARTBEAT_TTL_SECONDS),
     };
     let encoded = sign_payload(keypair, key_id, heartbeat)?;
-    atomic_publish(receipt_dir, ".dread-verifier-ready.json", &encoded, true)
+    atomic_publish(
+        receipt_dir,
+        ".dread-verifier-ready.json",
+        &encoded,
+        true,
+        receipt_uid,
+        receipt_gid,
+    )
 }
 
 fn run_cycle(
@@ -791,18 +871,36 @@ fn run_cycle(
     keypair: &Ed25519KeyPair,
     policy: &VerificationPolicy,
     policy_digest: &str,
+    receipt_uid: u32,
+    receipt_gid: u32,
 ) -> Result<(usize, usize), String> {
     let pending = load_pending_attempts(connection)?;
     let mut created_or_refreshed = 0usize;
     for attempt in &pending {
         let now = now_epoch_seconds()?;
         let receipt = build_result_receipt(attempt, policy, policy_digest, verifier_id, now)?;
-        if publish_result_receipt(receipt_dir, attempt, &receipt, key_id, keypair)? {
+        if publish_result_receipt(
+            receipt_dir,
+            attempt,
+            &receipt,
+            key_id,
+            keypair,
+            receipt_uid,
+            receipt_gid,
+        )? {
             created_or_refreshed = created_or_refreshed.saturating_add(1);
         }
     }
     let now = now_epoch_seconds()?;
-    write_heartbeat(receipt_dir, verifier_id, key_id, keypair, now)?;
+    write_heartbeat(
+        receipt_dir,
+        verifier_id,
+        key_id,
+        keypair,
+        now,
+        receipt_uid,
+        receipt_gid,
+    )?;
     Ok((pending.len(), created_or_refreshed))
 }
 
@@ -827,6 +925,14 @@ fn parse_config() -> Result<VerifierConfig, String> {
     let policy_path = env::var_os("DREAD_INDEPENDENT_RESULT_VERIFIER_POLICY_FILE")
         .map(PathBuf::from)
         .ok_or_else(|| "DREAD_INDEPENDENT_RESULT_VERIFIER_POLICY_FILE is required".to_string())?;
+    let receipt_uid = env::var("DREAD_INDEPENDENT_RESULT_VERIFIER_RECEIPT_UID")
+        .map_err(|_| "DREAD_INDEPENDENT_RESULT_VERIFIER_RECEIPT_UID is required".to_string())?
+        .parse::<u32>()
+        .map_err(|_| "receipt UID must be numeric".to_string())?;
+    let receipt_gid = env::var("DREAD_INDEPENDENT_RESULT_VERIFIER_RECEIPT_GID")
+        .map_err(|_| "DREAD_INDEPENDENT_RESULT_VERIFIER_RECEIPT_GID is required".to_string())?
+        .parse::<u32>()
+        .map_err(|_| "receipt GID must be numeric".to_string())?;
     let poll_seconds = env::var("DREAD_VERIFIER_POLL_INTERVAL_SECONDS")
         .ok()
         .map(|value| value.parse::<u64>())
@@ -839,7 +945,12 @@ fn parse_config() -> Result<VerifierConfig, String> {
     validate_text("independent verifier ID", &verifier_id, 160)?;
     validate_safe_label("independent verifier ID", &verifier_id, 160)?;
     validate_safe_label("independent verifier key ID", &key_id, 128)?;
-    secure_directory(&receipt_dir, "independent verifier receipt directory")?;
+    secure_directory(
+        &receipt_dir,
+        "independent verifier receipt directory",
+        receipt_uid,
+        receipt_gid,
+    )?;
     Ok(VerifierConfig {
         database_path,
         receipt_dir,
@@ -847,6 +958,8 @@ fn parse_config() -> Result<VerifierConfig, String> {
         key_id,
         private_key_path,
         policy_path,
+        receipt_uid,
+        receipt_gid,
         poll_interval: Duration::from_secs(poll_seconds),
     })
 }
@@ -883,6 +996,8 @@ fn run_daemon(config: VerifierConfig, once: bool) -> Result<(), String> {
             &keypair,
             &policy,
             &policy_digest,
+            config.receipt_uid,
+            config.receipt_gid,
         ) {
             Ok((pending, receipts)) => {
                 eprintln!(
