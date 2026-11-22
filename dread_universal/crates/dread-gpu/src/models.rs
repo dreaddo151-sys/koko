@@ -290,6 +290,20 @@ fn read_gguf_metadata(path: &Path) -> Result<GgufMetadata, String> {
             .read_string(MAX_GGUF_KEY_BYTES)?
             .ok_or_else(|| "GGUF metadata key exceeds the 4 KiB limit".to_string())?;
         let value_type = reader.read_u32()?;
+
+        // Stop before huge tokenizer arrays by name: they are the only
+        // arrays that can be big enough to bust the header budget. Small
+        // arrays like rope sections are cheap to skip and may still precede
+        // a late-ordered general.file_type.
+        if value_type == 9
+            && metadata.architecture.is_some()
+            && metadata.model_name.is_some()
+            && metadata.context_length.is_some()
+            && key.starts_with("tokenizer.")
+        {
+            break;
+        }
+
         match key.as_str() {
             "general.architecture" if value_type == 8 => {
                 metadata.architecture = reader.read_string(MAX_GGUF_STRING_BYTES)?;
@@ -313,11 +327,14 @@ fn read_gguf_metadata(path: &Path) -> Result<GgufMetadata, String> {
             _ => reader.skip_value(value_type)?,
         }
 
-        // These fields are enough for a useful inventory record. Stop before
-        // large tokenizer arrays, which can follow the architecture metadata.
+        // These fields are enough for a useful inventory record — including
+        // the quantization code, because some exporters write
+        // general.file_type after the architecture block, so a three-field
+        // stop used to miss it. Stop before large tokenizer arrays.
         if metadata.architecture.is_some()
             && metadata.model_name.is_some()
             && metadata.context_length.is_some()
+            && metadata.file_type_code.is_some()
         {
             break;
         }
@@ -479,9 +496,17 @@ pub fn discover_local_models_in(
             paths.sort();
 
             for path in paths.into_iter().rev() {
+                let is_symlink = path
+                    .symlink_metadata()
+                    .map(|meta| meta.file_type().is_symlink())
+                    .unwrap_or(false);
                 let canonical_path = match path.canonicalize() {
                     Ok(value) if value.starts_with(&root) => value,
-                    // Reject broken links, loops and any target outside the configured root.
+                    // Model files linked outside the scan root (Ollama keeps
+                    // blobs elsewhere and symlinks them in) are discovered as
+                    // themselves. Broken links, loops and directory links
+                    // pointing outside the root stay rejected.
+                    Ok(value) if is_symlink && !value.is_dir() => value,
                     _ => continue,
                 };
                 let metadata = match fs::metadata(&canonical_path) {
@@ -489,7 +514,10 @@ pub fn discover_local_models_in(
                     Err(_) => continue,
                 };
                 if metadata.is_dir() {
-                    if depth < max_depth && seen_directories.insert(canonical_path.clone()) {
+                    if !is_symlink
+                        && depth < max_depth
+                        && seen_directories.insert(canonical_path.clone())
+                    {
                         pending.push((canonical_path, depth + 1));
                     }
                     continue;
@@ -660,6 +688,89 @@ mod tests {
         bytes
     }
 
+    /// Exporters like the one used for the maintainer's Qwen2.5-72B shards
+    /// write general.file_type AFTER <arch>.context_length. A three-field
+    /// early stop used to miss it (quantization label was always None).
+    #[test]
+    fn parses_file_type_written_after_context_length() {
+        let mut bytes = b"GGUF".to_vec();
+        append_u32(&mut bytes, 3);
+        append_u64(&mut bytes, 92);
+        append_u64(&mut bytes, 6);
+        append_gguf_string(&mut bytes, "general.architecture");
+        append_u32(&mut bytes, 8);
+        append_gguf_string(&mut bytes, "qwen2");
+        append_gguf_string(&mut bytes, "general.name");
+        append_u32(&mut bytes, 8);
+        append_gguf_string(&mut bytes, "qwen2.5-72b-instruct");
+        append_gguf_string(&mut bytes, "qwen2.context_length");
+        append_u32(&mut bytes, 4);
+        append_u32(&mut bytes, 32_768);
+        append_gguf_string(&mut bytes, "qwen2.attention.layer_norm_rms_epsilon");
+        append_u32(&mut bytes, 6); // FLOAT32 — scalar skip path
+        bytes.extend_from_slice(&1e-6f32.to_le_bytes());
+        append_gguf_string(&mut bytes, "general.file_type");
+        append_u32(&mut bytes, 4);
+        append_u32(&mut bytes, 11); // MOSTLY_Q3_K_S region label
+        append_gguf_string(&mut bytes, "tokenizer.ggml.tokens");
+        append_u32(&mut bytes, 9);
+        append_u32(&mut bytes, 8);
+        append_u64(&mut bytes, 151_936); // declared huge vocab
+        // deliberately NOT written: the reader must
+        // stop at the tokenizer array, never skip into it.
+
+        let root = temporary_directory("late-file-type");
+        let path = root.join("shard-00001-of-00002.gguf");
+        fs::write(&path, &bytes).unwrap();
+
+        let metadata = read_gguf_metadata(&path).unwrap();
+        assert_eq!(metadata.architecture.as_deref(), Some("qwen2"));
+        assert_eq!(metadata.context_length, Some(32_768));
+        assert_eq!(metadata.file_type_code, Some(11));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovers_symlinked_model_files_outside_root_but_never_directory_links() {
+        use std::os::unix::fs::symlink;
+
+        let root = temporary_directory("symlink-root");
+        let outside = temporary_directory("symlink-outside");
+        let blob_dir = outside.join("blobs");
+        fs::create_dir_all(&blob_dir).unwrap();
+        fs::write(blob_dir.join("real.gguf"), synthetic_gguf()).unwrap();
+        fs::write(outside.join("hidden.gguf"), synthetic_gguf()).unwrap();
+        symlink(blob_dir.join("real.gguf"), root.join("dread-heretic.gguf")).unwrap();
+        symlink(&outside, root.join("sneaky-dir")).unwrap();
+
+        let inventory = discover_local_models_in(std::slice::from_ref(&root), 3, 64);
+        let names: Vec<&str> = inventory
+            .models
+            .iter()
+            .map(|model| model.relative_path.as_str())
+            .collect();
+        assert!(
+            names.contains(&"dread-heretic.gguf"),
+            "symlinked model file must be discovered: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("hidden")),
+            "directory symlinks outside the root must not be walked: {names:?}"
+        );
+        if let Some(model) = inventory
+            .models
+            .iter()
+            .find(|model| model.relative_path == "dread-heretic.gguf")
+        {
+            assert_eq!(model.metadata_status, "parsed");
+        }
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+
     #[test]
     fn parses_gguf_metadata_header_and_skips_string_arrays_without_loading_weights() {
         let root = temporary_directory("gguf-header");
@@ -804,16 +915,21 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Policy update: symlinked model files ARE followed even when the blob
+    /// target lives outside the scan root, because Ollama stores weights in
+    /// its own blob directory and symlinks them into model roots. Directory
+    /// links outside the root remain refused (see the directory test).
     #[cfg(unix)]
     #[test]
-    fn does_not_follow_symlinked_model_files() {
+    fn follows_symlinked_model_files_outside_root() {
         use std::os::unix::fs::symlink;
         let root = temporary_directory("symlink");
         let outside = temporary_directory("outside");
         fs::write(outside.join("external.gguf"), b"model").unwrap();
         symlink(outside.join("external.gguf"), root.join("linked.gguf")).unwrap();
         let inventory = discover_local_models_in(std::slice::from_ref(&root), 2, 100);
-        assert!(inventory.models.is_empty());
+        assert_eq!(inventory.models.len(), 1);
+        assert_eq!(inventory.models[0].relative_path, "linked.gguf");
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
     }

@@ -5379,6 +5379,125 @@ async fn local_model_inventory() -> Result<Json<dread_gpu::models::LocalModelInv
     Ok(Json(inventory))
 }
 
+/// Stable short hex digest for deterministic registry ids (idempotent upserts).
+fn sha256_hex_prefix(bytes: &[u8], len: usize) -> String {
+    ring::digest::digest(&ring::digest::SHA256, bytes)
+        .as_ref()
+        .iter()
+        .take(len)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Registers every launchable GGUF model from `inventory` in the registry
+/// (kind `model.gguf`) with a generated launch config, and returns a summary.
+/// Non-first split shards are skipped: only the entry-point shard is launchable.
+/// Idempotent: the id is derived from the model path, so rescanning updates.
+fn autoconfigure_inventory(
+    conn: &rusqlite::Connection,
+    inventory: &dread_gpu::models::LocalModelInventory,
+    vram_gib_per_gpu: &[f64],
+    now: i64,
+) -> Result<Value, String> {
+    let mut registered = 0usize;
+    let mut skipped_shards = 0usize;
+    let mut configs = Vec::new();
+    for model in &inventory.models {
+        if model.format != "gguf" {
+            continue;
+        }
+        let split = dread_gpu::launch::detect_split(&model.relative_path);
+        if split.is_some_and(|(no, _)| no != 1) {
+            skipped_shards += 1;
+            continue;
+        }
+        let config = dread_gpu::launch::suggest_launch_config(model, vram_gib_per_gpu);
+        let quantization = dread_gpu::launch::quantization_label(
+            model
+                .gguf_metadata
+                .as_ref()
+                .and_then(|meta| meta.file_type_code),
+        );
+        let id = format!(
+            "model-{}",
+            sha256_hex_prefix(config.model_path.as_bytes(), 12)
+        );
+        let metadata = json!({
+            "launch_config": config,
+            "quantization": quantization,
+            "architecture": model
+                .gguf_metadata
+                .as_ref()
+                .and_then(|meta| meta.architecture.clone()),
+            "size_bytes": model.size_bytes,
+            "split": split.map(|(no, total)| format!("{no}/{total}")),
+            "discovery_status": model.status,
+        });
+        conn.execute(
+            "INSERT INTO registry (id, name, kind, endpoint, metadata, created_at)
+             VALUES (?1, ?2, 'model.gguf', ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name, endpoint = excluded.endpoint, metadata = excluded.metadata",
+            params![id, model.name, config.model_path, metadata.to_string(), now],
+        )
+        .map_err(|error| error.to_string())?;
+        registered += 1;
+        configs.push(json!({
+            "id": id,
+            "name": model.name,
+            "quantization": quantization,
+            "launch": config,
+        }));
+    }
+    Ok(json!({
+        "roots_scanned": inventory.roots_scanned,
+        "scanned_entries": inventory.scanned_entries,
+        "truncated": inventory.truncated,
+        "gguf_models_registered": registered,
+        "split_shards_skipped": skipped_shards,
+        "vram_gib_per_gpu": vram_gib_per_gpu,
+        "warnings": inventory.warnings,
+        "configs": configs,
+    }))
+}
+
+async fn models_autoconfigure(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let inventory = tokio::task::spawn_blocking(dread_gpu::models::discover_local_models)
+        .await
+        .map_err(|error| {
+            ApiError::internal(format!("model autoconfigure worker failed: {error}"))
+        })?;
+    // VRAM is read from the Supervisor when configured; without it the
+    // generated configs honestly degrade to CPU-only with an explanatory note.
+    let vram_gib_per_gpu = match &state.supervisor {
+        Some(supervisor) => supervisor
+            .telemetry()
+            .await
+            .ok()
+            .and_then(|telemetry| {
+                telemetry.get("gpus").and_then(Value::as_array).map(|gpus| {
+                    gpus.iter()
+                        .filter_map(|gpu| {
+                            gpu.get("memory_total_mb")
+                                .and_then(Value::as_f64)
+                                .map(|mb| mb / 1024.0)
+                        })
+                        .collect::<Vec<f64>>()
+                })
+            })
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let conn = db_lock(&state)?;
+    let summary = autoconfigure_inventory(
+        &conn,
+        &inventory,
+        &vram_gib_per_gpu,
+        i64::try_from(now_epoch()).unwrap_or(i64::MAX),
+    )
+    .map_err(ApiError::internal)?;
+    Ok(Json(summary))
+}
+
 async fn comfyui_monitor() -> Result<Json<dread_media::ComfyUiMonitor>, ApiError> {
     let client = dread_media::ComfyUiClient::from_env()
         .map_err(|error| ApiError::internal(format!("Invalid ComfyUI configuration: {error}")))?;
@@ -5455,6 +5574,10 @@ fn app(state: AppState) -> Router {
         .route("/api/usage/tokens", get(token_usage))
         .route("/api/prompt/enhance", axum::routing::post(enhance_prompt))
         .route("/api/models/local", get(local_model_inventory))
+        .route(
+            "/api/models/autoconfigure",
+            axum::routing::post(models_autoconfigure),
+        )
         .route("/api/repair/plan", get(repair_plan))
         .route("/api/media/comfyui/monitor", get(comfyui_monitor))
         .route("/api/media/workflows/discover", get(workflow_discovery))
@@ -5774,6 +5897,59 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn autoconfigure_registers_launchable_models_and_is_idempotent() {
+        let conn = open_database(":memory:").expect("in-memory database should initialize");
+        let model = |rel: &str| dread_gpu::models::LocalModel {
+            id: rel.to_string(),
+            name: rel.to_string(),
+            model_kind: "language".into(),
+            format: "gguf".into(),
+            root: "/models".into(),
+            relative_path: rel.to_string(),
+            size_bytes: 4096,
+            status: "discovered_not_loaded".into(),
+            metadata_status: "parsed".into(),
+            metadata_error: None,
+            gguf_metadata: None,
+        };
+        let inventory = dread_gpu::models::LocalModelInventory {
+            roots_scanned: vec!["/models".into()],
+            scanned_entries: 3,
+            truncated: false,
+            models: vec![
+                model("plain.gguf"),
+                model("big-00001-of-00003.gguf"),
+                model("big-00002-of-00003.gguf"),
+            ],
+            warnings: vec![],
+        };
+        let summary = autoconfigure_inventory(&conn, &inventory, &[24.0], 1).unwrap();
+        assert_eq!(summary["gguf_models_registered"], 2);
+        assert_eq!(summary["split_shards_skipped"], 1);
+
+        let count = |conn: &rusqlite::Connection| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM registry WHERE kind = 'model.gguf'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(count(&conn), 2);
+        // Rescan must update in place, never duplicate.
+        autoconfigure_inventory(&conn, &inventory, &[24.0], 2).unwrap();
+        assert_eq!(count(&conn), 2);
+
+        let endpoint: String = conn
+            .query_row(
+                "SELECT endpoint FROM registry WHERE name = 'plain.gguf'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(endpoint, "/models/plain.gguf");
+    }
     use super::*;
     use axum::{
         body::{Body, to_bytes},
