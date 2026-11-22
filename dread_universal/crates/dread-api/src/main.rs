@@ -5753,6 +5753,7 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ring::signature::{Ed25519KeyPair, KeyPair};
     use axum::{
         body::{Body, to_bytes},
         http::{HeaderMap, Request},
@@ -6727,34 +6728,110 @@ mod tests {
         assert_eq!(builtin_resource_request("media_render"), None);
     }
 
+    fn test_runtime_attestation(
+        provider_id: &str,
+        endpoint: &str,
+        sandbox_backend: &str,
+    ) -> VerifiedRuntimeIsolationAttestation {
+        let key = Ed25519KeyPair::from_seed_unchecked(&[73_u8; 32]).unwrap();
+        let observed_at = i64::try_from(now_epoch()).unwrap();
+        let payload = dread_agents::runtime_attestation::RuntimeIsolationAttestationPayload {
+            schema_version: 1,
+            attestation_id: format!("runtime-isolation-{provider_id}-test"),
+            attestor_id: "dread-runtime-attestor-test".into(),
+            provider_id: provider_id.into(),
+            provider_registration_revision: 1,
+            adapter_id: provider_id.into(),
+            adapter_version: env!("CARGO_PKG_VERSION").into(),
+            endpoint: endpoint.into(),
+            runtime_identity: format!("{provider_id}-runtime-test"),
+            sandbox_backend: sandbox_backend.into(),
+            source_observation_id: format!("runtime-observation-{provider_id}-test"),
+            evidence_bundle_sha256: "bc".repeat(32),
+            observed_at,
+            expires_at: observed_at + 180,
+            checks: dread_agents::runtime_attestation::RuntimeIsolationControl::ALL
+                .into_iter()
+                .map(|control| {
+                    dread_agents::runtime_attestation::RuntimeIsolationCheck {
+                        control,
+                        verified: true,
+                        observation_id: format!(
+                            "{}-{provider_id}-observation",
+                            control.as_str()
+                        ),
+                        evidence_sha256: "de".repeat(32),
+                    }
+                })
+                .collect(),
+        };
+        let payload_bytes = serde_json::to_vec(&payload).unwrap();
+        let signature_hex = {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut output = String::with_capacity(128);
+            for byte in key.sign(&payload_bytes).as_ref() {
+                output.push(HEX[(byte >> 4) as usize] as char);
+                output.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+            output
+        };
+        let public_key_hex = {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut output = String::with_capacity(64);
+            for byte in key.public_key().as_ref() {
+                output.push(HEX[(byte >> 4) as usize] as char);
+                output.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+            output
+        };
+        let encoded = serde_json::to_vec(&json!({
+            "key_id": "runtime-attestor-test-key",
+            "payload": payload,
+            "signature_hex": signature_hex
+        }))
+        .unwrap();
+        VerifiedRuntimeIsolationAttestation::verify(
+            &encoded,
+            "runtime-attestor-test-key",
+            &public_key_hex,
+            provider_id,
+            provider_id,
+            env!("CARGO_PKG_VERSION"),
+            endpoint,
+            observed_at + 1,
+        )
+        .unwrap()
+    }
+
     #[test]
-    fn agent_adapter_registry_requires_explicit_isolation_attestation() {
+    fn agent_adapter_registry_requires_signed_provider_runtime_attestation() {
         let empty = build_agent_adapters(AgentAdapterConfig::default()).unwrap();
         assert!(empty.is_empty());
 
+        let endpoint = "http://127.0.0.1:8642";
         let hermes = AgentAdapterConfig {
             hermes: Some(HermesAdapterConfig {
-                endpoint: "http://127.0.0.1:8642".into(),
+                endpoint: endpoint.into(),
                 api_key: "test-api-key".into(),
-                terminal_backend: "modal".into(),
-                sandbox_policy_verified: true,
-                isolated_workspace_per_task: false,
+                runtime_attestation: test_runtime_attestation("hermes", endpoint, "local"),
             }),
             deerflow: None,
             openhands: None,
         };
         assert!(build_agent_adapters(hermes).is_err());
 
+        let endpoint = "http://127.0.0.1:2026";
         let deerflow = AgentAdapterConfig {
             hermes: None,
             deerflow: Some(DeerFlowAdapterConfig {
-                endpoint: "http://127.0.0.1:2026".into(),
+                endpoint: endpoint.into(),
                 api_prefix: "/api/langgraph".into(),
                 pat: "dfp_test-token".into(),
-                provider_class: "AioSandboxProvider".into(),
-                sandbox_policy_verified: true,
-                isolated_workspace_per_task: true,
-                provisioner_url: Some("http://provisioner:8002".into()),
+                runtime_attestation: test_runtime_attestation(
+                    "deerflow",
+                    endpoint,
+                    "LocalSandboxProvider",
+                ),
             }),
             openhands: None,
         };
@@ -6762,43 +6839,49 @@ mod tests {
     }
 
     #[test]
-    fn agent_adapter_registry_only_exposes_explicitly_attested_providers() {
+    fn agent_adapter_registry_only_exposes_providers_with_signed_runtime_reports() {
+        let hermes_endpoint = "http://127.0.0.1:8642";
+        let deerflow_endpoint = "http://127.0.0.1:2026";
+        let openhands_endpoint = "http://127.0.0.1:8000";
         let config = AgentAdapterConfig {
             hermes: Some(HermesAdapterConfig {
-                endpoint: "http://127.0.0.1:8642".into(),
+                endpoint: hermes_endpoint.into(),
                 api_key: "test-api-key".into(),
-                terminal_backend: "modal".into(),
-                isolated_workspace_per_task: true,
-                sandbox_policy_verified: true,
+                runtime_attestation: test_runtime_attestation(
+                    "hermes",
+                    hermes_endpoint,
+                    "modal",
+                ),
             }),
             deerflow: Some(DeerFlowAdapterConfig {
-                endpoint: "http://127.0.0.1:2026".into(),
+                endpoint: deerflow_endpoint.into(),
                 api_prefix: "/api/langgraph".into(),
                 pat: "dfp_test-token".into(),
-                provider_class: "deerflow.community.boxlite:BoxliteProvider".into(),
-                isolated_workspace_per_task: true,
-                sandbox_policy_verified: true,
-                provisioner_url: None,
+                runtime_attestation: test_runtime_attestation(
+                    "deerflow",
+                    deerflow_endpoint,
+                    "deerflow.community.boxlite:BoxliteProvider",
+                ),
             }),
             openhands: Some(OpenHandsAdapterConfig {
-                endpoint: "http://127.0.0.1:8000".into(),
+                endpoint: openhands_endpoint.into(),
                 session_api_key: "oh-session-test".into(),
                 llm_model: "llama.cpp/qwen-test".into(),
                 llm_api_key: "llm-test".into(),
                 llm_base_url: "http://host.docker.internal:11500/v1".into(),
-                docker_runtime_enabled: true,
-                secret_store_configured: true,
-                sandbox_policy_verified: true,
+                runtime_attestation: test_runtime_attestation(
+                    "openhands",
+                    openhands_endpoint,
+                    "docker",
+                ),
             }),
         };
         let adapters = build_agent_adapters(config).unwrap();
         assert_eq!(adapters.len(), 3);
         assert!(adapters.contains_key("openhands"));
-        assert!(
-            adapters
-                .values()
-                .all(|adapter| adapter.descriptor().enabled)
-        );
+        assert!(adapters.values().all(|adapter| {
+            adapter.descriptor().enabled && adapter.runtime_isolation_attestation().is_some()
+        }));
     }
 
     #[tokio::test]
