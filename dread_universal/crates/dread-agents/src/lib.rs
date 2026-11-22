@@ -15,7 +15,7 @@ use ring::signature::KeyPair;
 use ring::{digest, signature};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::fmt;
+use std::{fmt, time::{SystemTime, UNIX_EPOCH}};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -520,6 +520,7 @@ pub trait AgentAdapter: Send + Sync {
     fn cancel_task_with_evidence<'a>(
         &'a self,
         _identity: &'a AgentExecutionIdentity,
+        _provider_execution_id: &'a str,
     ) -> AdapterFuture<'a, AgentOperationReceipt<AgentTask>> {
         Box::pin(async {
             Err(AgentAdapterError {
@@ -533,6 +534,7 @@ pub trait AgentAdapter: Send + Sync {
     fn task_result_with_evidence<'a>(
         &'a self,
         _identity: &'a AgentExecutionIdentity,
+        _provider_execution_id: &'a str,
     ) -> AdapterFuture<'a, AgentOperationReceipt<AgentTask>> {
         Box::pin(async {
             Err(AgentAdapterError {
