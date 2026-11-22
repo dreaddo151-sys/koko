@@ -655,3 +655,18 @@ Run #1994 on the initial code commit stopped at rustfmt only. The formatting cor
 - Ubuntu packages / smoke test: package assembly, checksums/content validation, packaged API installation and production-console smoke test.
 
 This is repository CI verification only. It does not deploy the verifier, create a service account or signing key, open the startup dispatch barrier, or prove live host isolation. PR #16 remains draft/unmerged and physical acceptance gates remain open.
+
+
+## 23. Receipt filesystem permission regression — 2026-11-22
+
+**Exact code head:** `00ca7aa10c5dafe29ada98dac676523c68d36801`  
+**CI run:** [#2000 — all three jobs passed](https://github.com/dreaddo151-sys/koko/actions/runs/45067216796)
+
+Added a filesystem-backed API regression that creates a valid Ed25519-signed verifier heartbeat, changes its real file mode to group-writable `0660`, and confirms the API reports the verifier as unavailable. This exercises the actual `read_signed_payload` file-open/metadata validation path rather than testing only the permission-bit helper. It complements the existing no-follow heartbeat symlink test and exact-mode predicate tests.
+
+Run #2000 passed:
+- Rust / Ubuntu 24.04: formatting, strict Clippy, full workspace tests, release build, installer/release verification, signed-verifier failure-path checks, portable migration/rollback, Python bridge/importer regressions and GPU single-owner guard.
+- Web console / Ubuntu 24.04: production build.
+- Ubuntu packages / smoke test: portable/Debian package assembly, checksum/content validation, packaged API install and console smoke test.
+
+No verifier or API filesystem permissions were changed on the user's workstation. This is CI evidence only; the separate Unix account/ACL deployment and physical acceptance gates remain open. PR #16 remains draft and unmerged.
