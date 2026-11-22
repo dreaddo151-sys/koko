@@ -48,6 +48,17 @@ type StoredRetryContractEvidence = (
     bool,
 );
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct StoredProviderEventKey {
+    event_type: String,
+    payload_json: String,
+    task_event_sequence: i64,
+    receipt_key_id: Option<String>,
+    receipt_payload_json: Option<String>,
+    receipt_signature_hex: Option<String>,
+    receipt_response_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct StoredProviderEvidence {
     attempt_id: String,
     request_id: String,
@@ -1481,15 +1492,7 @@ pub fn append_provider_event_with_receipt(
             now,
         )
         .map_err(PersistenceError::Authority)?;
-    let prior: Option<(
-        String,
-        String,
-        i64,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    )> = tx
+    let prior: Option<StoredProviderEventKey> = tx
         .query_row(
             "SELECT event_type, payload_json, task_event_sequence, receipt_key_id,
                     receipt_payload_json, receipt_signature_hex, receipt_response_sha256
@@ -1497,49 +1500,45 @@ pub fn append_provider_event_with_receipt(
              WHERE provider_id = ?1 AND attempt_id = ?2 AND external_event_id = ?3",
             params![attempt.provider_id, attempt.attempt_id, external_event_id],
             |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                ))
+                Ok(StoredProviderEventKey {
+                    event_type: row.get(0)?,
+                    payload_json: row.get(1)?,
+                    task_event_sequence: row.get(2)?,
+                    receipt_key_id: row.get(3)?,
+                    receipt_payload_json: row.get(4)?,
+                    receipt_signature_hex: row.get(5)?,
+                    receipt_response_sha256: row.get(6)?,
+                })
             },
         )
         .optional()?;
-    if let Some((
-        prior_type,
-        prior_payload,
-        sequence,
-        prior_key,
-        prior_receipt,
-        prior_signature,
-        prior_hash,
-    )) = prior
-    {
+    if let Some(prior) = prior {
         let receipt_matches = match receipt {
             Some(receipt) => {
-                prior_key.as_deref() == Some(receipt.key_id.as_str())
-                    && prior_receipt.as_deref() == Some(receipt.payload_json.as_str())
-                    && prior_signature.as_deref() == Some(receipt.signature_hex.as_str())
-                    && prior_hash.as_deref() == Some(receipt.response_sha256.as_str())
+                prior.receipt_key_id.as_deref() == Some(receipt.key_id.as_str())
+                    && prior.receipt_payload_json.as_deref()
+                        == Some(receipt.payload_json.as_str())
+                    && prior.receipt_signature_hex.as_deref()
+                        == Some(receipt.signature_hex.as_str())
+                    && prior.receipt_response_sha256.as_deref()
+                        == Some(receipt.response_sha256.as_str())
             }
             None => {
-                prior_key.is_none()
-                    && prior_receipt.is_none()
-                    && prior_signature.is_none()
-                    && prior_hash.is_none()
+                prior.receipt_key_id.is_none()
+                    && prior.receipt_payload_json.is_none()
+                    && prior.receipt_signature_hex.is_none()
+                    && prior.receipt_response_sha256.is_none()
             }
         };
-        if prior_type != event_type || prior_payload != payload_json || !receipt_matches {
+        if prior.event_type != event_type || prior.payload_json != payload_json || !receipt_matches {
             return Err(PersistenceError::Conflict(
                 "provider reused an event identity with different type, payload, or receipt".into(),
             ));
         }
         tx.commit()?;
-        return Ok(EventAppendResult::Duplicate { sequence });
+        return Ok(EventAppendResult::Duplicate {
+            sequence: prior.task_event_sequence,
+        });
     }
     let sequence = append_task_event(
         &tx,
