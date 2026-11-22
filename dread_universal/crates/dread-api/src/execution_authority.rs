@@ -507,8 +507,7 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
             .ok_or_else(|| "agent capability has no provider adapter".to_string())?;
         let (registration, adapter_version) = self.registration(provider_id, now)?;
         let actual_revision = Self::capability_revision(connection, &capability_id, provider_id)?;
-        if capability_revision != actual_revision
-            || registration.capability_id != capability_id
+        if registration.capability_id != capability_id
             || registration.capability_revision != actual_revision
             || registration.operation != AGENT_OPERATION
         {
