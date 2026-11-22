@@ -9720,6 +9720,78 @@ mod tests {
         assert_eq!(event.event_type, "task_succeeded");
     }
 
+    #[tokio::test]
+    async fn durable_worker_does_not_start_provider_when_preparation_fails() {
+        let db = Arc::new(Mutex::new(open_database(":memory:").unwrap()));
+        let task_id = "durable-prestart-no-provider-call";
+        let now = now_epoch();
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO tasks (
+                    id, title, task_type, capability_id, payload_json, status,
+                    approval_required, approved_by, approval_reason, created_at, updated_at,
+                    agent_provider, provider_task_id
+                 ) VALUES (?1, 'Durable pre-start failure', 'agent_task', 'hermes.run', '{}',
+                           'queued', 1, 'test-operator', 'approved', ?2, ?2, 'hermes', NULL)",
+                params![task_id, now],
+            )
+            .unwrap();
+
+        let adapter = Arc::new(MockAgentAdapter::new());
+        let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
+        adapters.insert("hermes".into(), adapter.clone());
+        let (events, _) = broadcast::channel(8);
+        let state = AppState {
+            db: db.clone(),
+            gpu: GpuGatewayClient::new("http://127.0.0.1:1").unwrap(),
+            supervisor: None,
+            events,
+            execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
+            agent_adapters: Arc::new(adapters),
+            execution_authority: None,
+            cancellations: Arc::new(Mutex::new(HashMap::new())),
+            api_token: Some("test-token".into()),
+            operator_id: "test-operator".into(),
+            auth_required: true,
+        };
+        let (_cancel_sender, cancel_receiver) = watch::channel(false);
+
+        durable_agent::execute_durable_agent_task_inner(
+            state,
+            adapter.clone(),
+            AgentTaskExecution {
+                task_id: task_id.into(),
+                provider: "hermes".into(),
+                capability_id: "hermes.run".into(),
+                payload: json!({"objective": "must not run"}),
+                initial_event_cursor: 0,
+            },
+            cancel_receiver,
+        )
+        .await;
+
+        assert!(
+            adapter.starts.lock().unwrap().is_empty(),
+            "durable preparation failure must not reach provider start"
+        );
+        let connection = db.lock().unwrap();
+        let status: String = connection
+            .query_row("SELECT status FROM tasks WHERE id = ?1", [task_id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let error: String = connection
+            .query_row(
+                "SELECT error FROM task_results WHERE task_id = ?1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+        assert!(error.contains("failed before start"));
+    }
+
     #[test]
     fn legacy_agent_dispatch_is_blocked_while_durable_startup_barrier_is_closed() {
         let connection = open_database(":memory:").unwrap();
