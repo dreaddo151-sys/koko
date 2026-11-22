@@ -265,49 +265,55 @@ fn build_agent_adapters(
     Ok(adapters)
 }
 fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn AgentAdapter>>> {
+    reject_legacy_isolation_booleans().map_err(anyhow::Error::msg)?;
     let mut config = AgentAdapterConfig::default();
+
     let hermes_keys = [
         "DREAD_HERMES_API_URL",
         "DREAD_HERMES_API_KEY",
-        "DREAD_HERMES_SANDBOX_BACKEND",
-        "DREAD_HERMES_ISOLATED_WORKSPACE_PER_TASK",
-        "DREAD_HERMES_SANDBOX_POLICY_VERIFIED",
+        "DREAD_HERMES_RUNTIME_ATTESTATION_FILE",
         "DREAD_HERMES_RECEIPT_SIGNING_KEY_FILE",
     ];
     if hermes_keys.iter().any(|key| env::var_os(key).is_some()) {
+        let endpoint = env::var("DREAD_HERMES_API_URL")?;
+        let runtime_attestation = load_runtime_isolation_attestation(
+            "DREAD_HERMES_RUNTIME_ATTESTATION_FILE",
+            "hermes",
+            "hermes",
+            env!("CARGO_PKG_VERSION"),
+            &endpoint,
+        )
+        .map_err(anyhow::Error::msg)?;
         config.hermes = Some(HermesAdapterConfig {
-            endpoint: env::var("DREAD_HERMES_API_URL")?,
+            endpoint,
             api_key: env::var("DREAD_HERMES_API_KEY")?,
-            terminal_backend: env::var("DREAD_HERMES_SANDBOX_BACKEND")?,
-            isolated_workspace_per_task: env::var("DREAD_HERMES_ISOLATED_WORKSPACE_PER_TASK")
-                .is_ok_and(|value| value == "true"),
-            sandbox_policy_verified: env::var("DREAD_HERMES_SANDBOX_POLICY_VERIFIED")
-                .is_ok_and(|value| value == "true"),
+            runtime_attestation,
         });
     }
 
     let deerflow_keys = [
         "DREAD_DEERFLOW_API_URL",
         "DREAD_DEERFLOW_PAT",
-        "DREAD_DEERFLOW_SANDBOX_PROVIDER",
-        "DREAD_DEERFLOW_ISOLATED_WORKSPACE_PER_TASK",
-        "DREAD_DEERFLOW_SANDBOX_POLICY_VERIFIED",
         "DREAD_DEERFLOW_API_PREFIX",
-        "DREAD_DEERFLOW_PROVISIONER_URL",
+        "DREAD_DEERFLOW_RUNTIME_ATTESTATION_FILE",
         "DREAD_DEERFLOW_RECEIPT_SIGNING_KEY_FILE",
     ];
     if deerflow_keys.iter().any(|key| env::var_os(key).is_some()) {
+        let endpoint = env::var("DREAD_DEERFLOW_API_URL")?;
+        let runtime_attestation = load_runtime_isolation_attestation(
+            "DREAD_DEERFLOW_RUNTIME_ATTESTATION_FILE",
+            "deerflow",
+            "deerflow",
+            env!("CARGO_PKG_VERSION"),
+            &endpoint,
+        )
+        .map_err(anyhow::Error::msg)?;
         config.deerflow = Some(DeerFlowAdapterConfig {
-            endpoint: env::var("DREAD_DEERFLOW_API_URL")?,
+            endpoint,
             api_prefix: env::var("DREAD_DEERFLOW_API_PREFIX")
                 .unwrap_or_else(|_| "/api/langgraph".into()),
             pat: env::var("DREAD_DEERFLOW_PAT")?,
-            provider_class: env::var("DREAD_DEERFLOW_SANDBOX_PROVIDER")?,
-            isolated_workspace_per_task: env::var("DREAD_DEERFLOW_ISOLATED_WORKSPACE_PER_TASK")
-                .is_ok_and(|value| value == "true"),
-            sandbox_policy_verified: env::var("DREAD_DEERFLOW_SANDBOX_POLICY_VERIFIED")
-                .is_ok_and(|value| value == "true"),
-            provisioner_url: env::var("DREAD_DEERFLOW_PROVISIONER_URL").ok(),
+            runtime_attestation,
         });
     }
 
@@ -317,24 +323,26 @@ fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn Agen
         "DREAD_OPENHANDS_LLM_MODEL",
         "DREAD_OPENHANDS_LLM_API_KEY",
         "DREAD_OPENHANDS_LLM_BASE_URL",
-        "DREAD_OPENHANDS_DOCKER_RUNTIME_ENABLED",
-        "DREAD_OPENHANDS_SECRET_STORE_CONFIGURED",
-        "DREAD_OPENHANDS_SANDBOX_POLICY_VERIFIED",
+        "DREAD_OPENHANDS_RUNTIME_ATTESTATION_FILE",
         "DREAD_OPENHANDS_RECEIPT_SIGNING_KEY_FILE",
     ];
     if openhands_keys.iter().any(|key| env::var_os(key).is_some()) {
+        let endpoint = env::var("DREAD_OPENHANDS_API_URL")?;
+        let runtime_attestation = load_runtime_isolation_attestation(
+            "DREAD_OPENHANDS_RUNTIME_ATTESTATION_FILE",
+            "openhands",
+            "openhands",
+            env!("CARGO_PKG_VERSION"),
+            &endpoint,
+        )
+        .map_err(anyhow::Error::msg)?;
         config.openhands = Some(OpenHandsAdapterConfig {
-            endpoint: env::var("DREAD_OPENHANDS_API_URL")?,
+            endpoint,
             session_api_key: env::var("DREAD_OPENHANDS_SESSION_API_KEY")?,
             llm_model: env::var("DREAD_OPENHANDS_LLM_MODEL")?,
             llm_api_key: env::var("DREAD_OPENHANDS_LLM_API_KEY")?,
             llm_base_url: env::var("DREAD_OPENHANDS_LLM_BASE_URL")?,
-            docker_runtime_enabled: env::var("DREAD_OPENHANDS_DOCKER_RUNTIME_ENABLED")
-                .is_ok_and(|value| value == "true"),
-            secret_store_configured: env::var("DREAD_OPENHANDS_SECRET_STORE_CONFIGURED")
-                .is_ok_and(|value| value == "true"),
-            sandbox_policy_verified: env::var("DREAD_OPENHANDS_SANDBOX_POLICY_VERIFIED")
-                .is_ok_and(|value| value == "true"),
+            runtime_attestation,
         });
     }
 
