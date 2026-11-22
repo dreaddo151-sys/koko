@@ -763,21 +763,12 @@ fn read_and_verify_manifest(
     public_key_hex: &str,
     now: i64,
 ) -> Result<VerifiedExecutionTrustManifest, String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("cannot inspect execution trust manifest: {error}"))?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.len() == 0
-        || metadata.len() > MAX_MANIFEST_BYTES
-    {
-        return Err(
-            "execution trust manifest must be a regular non-symlink file no larger than 1 MiB"
-                .into(),
-        );
-    }
-    let encoded =
-        fs::read(path).map_err(|error| format!("cannot read execution trust manifest: {error}"))?;
-    VerifiedExecutionTrustManifest::verify(&encoded, public_key_hex, now)
+    let opened = crate::secure_file::read_regular_file_no_follow(
+        path,
+        MAX_MANIFEST_BYTES,
+        "execution trust manifest",
+    )?;
+    VerifiedExecutionTrustManifest::verify(&opened.bytes, public_key_hex, now)
 }
 
 pub fn load_from_env(
