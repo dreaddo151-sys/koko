@@ -14,7 +14,7 @@ use dread_agents::{
 };
 use dread_orchestrator::persistence::{
     AdmissionRecord, AttemptRecord, AuthorizationFacts, CurrentRetryContractFacts, DispatchRequest,
-    ExecutionAuthority, ProviderEvidence, ProviderEventReceiptContext, SignedProviderReceipt,
+    ExecutionAuthority, ProviderEventReceiptContext, ProviderEvidence, SignedProviderReceipt,
     VerificationFacts,
 };
 use ring::{digest, signature};
@@ -865,8 +865,7 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
         }
         let response_bytes = serde_json::to_vec(&provider_event)
             .map_err(|error| format!("cannot serialize provider event for receipt: {error}"))?;
-        let response_sha256 =
-            hex_encode(digest::digest(&digest::SHA256, &response_bytes).as_ref());
+        let response_sha256 = hex_encode(digest::digest(&digest::SHA256, &response_bytes).as_ref());
         let payload =
             verify_signed_adapter_receipt(receipt, &registration, &admission, attempt, event.now)?;
         if payload.evidence_kind != AgentOperationEvidenceKind::Event
@@ -983,12 +982,17 @@ fn verify_signed_adapter_receipt(
         .receipt_key_id
         .as_deref()
         .ok_or_else(|| "provider registration has no trusted adapter receipt key ID".to_string())?;
-    let trusted_public_key_hex = registration
-        .receipt_public_key_hex
-        .as_deref()
-        .ok_or_else(|| "provider registration has no trusted adapter receipt public key".to_string())?;
+    let trusted_public_key_hex =
+        registration
+            .receipt_public_key_hex
+            .as_deref()
+            .ok_or_else(|| {
+                "provider registration has no trusted adapter receipt public key".to_string()
+            })?;
     if receipt.key_id != trusted_key_id {
-        return Err("adapter receipt key ID does not match the signed provider registration".into());
+        return Err(
+            "adapter receipt key ID does not match the signed provider registration".into(),
+        );
     }
 
     let public_key = decode_hex(trusted_public_key_hex)?;
@@ -1024,7 +1028,9 @@ fn verify_signed_adapter_receipt(
         || identity.provider_registration_revision != registration.registration_revision
         || identity.idempotency_key != admission.idempotency_key
     {
-        return Err("adapter receipt identity does not match the durable admission and attempt".into());
+        return Err(
+            "adapter receipt identity does not match the durable admission and attempt".into(),
+        );
     }
 
     let observed_at = i64::try_from(payload.observed_at)
@@ -1042,7 +1048,9 @@ fn verify_signed_adapter_receipt(
         || expires_at > observed_at.saturating_add(MAX_PREFLIGHT_LIFETIME_SECONDS)
         || expires_at > registration.expires_at
     {
-        return Err("adapter receipt is future-dated, expired, or outside its lifetime bound".into());
+        return Err(
+            "adapter receipt is future-dated, expired, or outside its lifetime bound".into(),
+        );
     }
 
     let response_digest = decode_hex(&payload.response_sha256)?;
@@ -1055,7 +1063,9 @@ fn verify_signed_adapter_receipt(
     if payload.verifier_id != format!("dread-adapter-receipt:{}", registration.adapter_id)
         || payload.source_reference != registration.endpoint
     {
-        return Err("adapter receipt provenance does not match the signed adapter registration".into());
+        return Err(
+            "adapter receipt provenance does not match the signed adapter registration".into(),
+        );
     }
     Ok(payload)
 }
