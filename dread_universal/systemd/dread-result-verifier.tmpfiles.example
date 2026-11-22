@@ -1,6 +1,6 @@
 # Example tmpfiles rules; create the verifier user/groups before applying.
-# Parent permits path traversal only; the receipt directory is restricted to
-# the verifier owner and the dedicated read-only API group.
-d /var/lib/dread-verifier 0751 dread-verifier dread-verifier -
+# Root owns the parent so the verifier cannot rename or replace the
+# receipt directory. The verifier owns only the private config and receipt spool.
+d /var/lib/dread-verifier 0711 root root -
 d /var/lib/dread-verifier/config 0700 dread-verifier dread-verifier -
 d /var/lib/dread-verifier/receipts 2750 dread-verifier dread-api-verifier -
