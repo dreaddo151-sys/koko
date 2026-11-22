@@ -6856,7 +6856,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(running_agent_status, "running", "provider-backed running work must remain unresolved until durable reconciliation");
+        assert_eq!(
+            running_agent_status, "running",
+            "provider-backed running work must remain unresolved until durable reconciliation"
+        );
         let deferred_event_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM task_events WHERE task_id = 'running-agent-unavailable' AND event_type = 'task_recovery_deferred_durable_dispatch'",
@@ -6873,7 +6876,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(queued_agent_status, "queued", "queued provider work must remain queued rather than enter the legacy worker");
+        assert_eq!(
+            queued_agent_status, "queued",
+            "queued provider work must remain queued rather than enter the legacy worker"
+        );
         let queued_deferred_event_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM task_events WHERE task_id = 'queued-agent-deferred' AND event_type = 'task_recovery_deferred_durable_dispatch'",
