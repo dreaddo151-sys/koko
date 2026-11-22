@@ -2336,8 +2336,14 @@ mod tests {
             .is_ok()
         );
         assert!(
-            Phase6ExecutionAuthority::approved_task(&connection, "task-1", "test-operator", true, 99)
-                .is_err(),
+            Phase6ExecutionAuthority::approved_task(
+                &connection,
+                "task-1",
+                "test-operator",
+                true,
+                99
+            )
+            .is_err(),
             "future-dated task approval events must not authorize dispatch"
         );
 
