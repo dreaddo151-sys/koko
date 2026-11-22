@@ -738,6 +738,22 @@ fn open_database(path: &str) -> anyhow::Result<Connection> {
         i64::try_from(now_epoch()).unwrap_or(i64::MAX),
     )?;
 
+    // Self-repair executor: schema plus crash recovery. Runs that were
+    // mid-execution when the hub died become `interrupted` and are never
+    // auto-resumed; an operator reviews them explicitly.
+    dread_platform::repair_executor::init_repair_executor(&conn)
+        .map_err(|error| anyhow::anyhow!("repair executor schema: {error}"))?;
+    let recovered = dread_platform::repair_executor::recover_interrupted_runs(
+        &conn,
+        i64::try_from(now_epoch()).unwrap_or(i64::MAX),
+    )
+    .map_err(|error| anyhow::anyhow!("repair crash recovery: {error}"))?;
+    if recovered > 0 {
+        tracing::warn!(
+            "repair executor: marked {recovered} run(s) interrupted; never auto-resumed"
+        );
+    }
+
     Ok(conn)
 }
 
@@ -5265,9 +5281,11 @@ async fn gpu_inference(
     Ok(Json(result))
 }
 
-async fn repair_plan(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+async fn repair_observations(
+    state: &AppState,
+) -> Vec<dread_platform::repair::ComponentObservation> {
     use dread_agents::AgentHealthState;
-    use dread_platform::repair::{ComponentObservation, build_repair_plan};
+    use dread_platform::repair::ComponentObservation;
 
     let mut observations = Vec::new();
 
@@ -5365,12 +5383,189 @@ async fn repair_plan(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
         });
     }
 
+    observations
+}
+
+async fn repair_plan(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    use dread_platform::repair::build_repair_plan;
+
+    let observations = repair_observations(&state).await;
     let plan = build_repair_plan(&observations);
     serde_json::to_value(plan).map(Json).map_err(|error| {
         ApiError::internal(format!(
             "Could not serialize diagnostic repair plan: {error}"
         ))
     })
+}
+
+// ---------------------------------------------------------------------------
+// Self-repair executor routes. Safety posture: the permission policy comes
+// from env (default-deny: no allowlist entry => Ask/Deny), execution always
+// requires an explicit approved run, and the v1 hub runner executes NO
+// commands at all - remediation is simulated and every postcondition is a
+// fresh live re-observation collected when execution starts.
+// ---------------------------------------------------------------------------
+
+static REPAIR_POLICY: std::sync::OnceLock<dread_platform::repair_executor::PermissionPolicy> =
+    std::sync::OnceLock::new();
+
+fn repair_policy() -> &'static dread_platform::repair_executor::PermissionPolicy {
+    use dread_platform::repair_executor::PermissionPolicy;
+    REPAIR_POLICY.get_or_init(|| {
+        fn parse_ids(raw: Option<std::ffi::OsString>) -> std::collections::BTreeSet<String> {
+            raw.unwrap_or_default()
+                .to_string_lossy()
+                .split([',', ' ', '\t'])
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_owned)
+                .collect()
+        }
+        PermissionPolicy::new(
+            parse_ids(std::env::var_os("DREAD_REPAIR_ALLOWLIST")),
+            parse_ids(std::env::var_os("DREAD_REPAIR_DENYLIST")),
+        )
+    })
+}
+
+fn repair_now() -> i64 {
+    i64::try_from(now_epoch()).unwrap_or(i64::MAX)
+}
+
+fn executor_error(error: dread_platform::repair_executor::RepairExecutorError) -> ApiError {
+    use dread_platform::repair_executor::RepairExecutorError as E;
+    match &error {
+        E::EmptyPlan
+        | E::TooManyActions(_)
+        | E::EmptyActor
+        | E::EmptyActionId
+        | E::InvalidTransition { .. } => ApiError::bad_request(error.to_string()),
+        E::RunNotFound(_) => ApiError::not_found(error.to_string()),
+        E::Database(_) | E::CorruptData(_) => ApiError::internal(error.to_string()),
+    }
+}
+
+fn to_json<T: serde::Serialize>(value: T, what: &str) -> Result<Json<Value>, ApiError> {
+    serde_json::to_value(value)
+        .map(Json)
+        .map_err(|error| ApiError::internal(format!("could not serialize {what}: {error}")))
+}
+
+/// v1 safety: applies nothing. Real remediation must arrive behind an
+/// explicit operator-gated runner; until then every "repair" is simulated
+/// and honestly labelled in the audit trail.
+struct SimulatedRepairRunner;
+
+impl dread_platform::repair_executor::RepairActionRunner for SimulatedRepairRunner {
+    fn apply(
+        &self,
+        _action: &dread_platform::repair_executor::RepairAction,
+    ) -> Result<String, String> {
+        Ok("simulated: no command executed (v1 safety boundary)".to_owned())
+    }
+}
+
+/// Re-observation snapshot collected once when execution starts. The module
+/// itself stays sync/pure; richer per-action live re-observation is future
+/// work behind an async runner.
+struct SnapshotChecker {
+    observations: Vec<dread_platform::repair::ComponentObservation>,
+}
+
+impl dread_platform::repair_executor::PostConditionChecker for SnapshotChecker {
+    fn observe(
+        &self,
+        action: &dread_platform::repair_executor::RepairAction,
+    ) -> Result<dread_platform::repair::ComponentObservation, String> {
+        self.observations
+            .iter()
+            .find(|observation| observation.component_id == action.component_id)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "component {} is not currently observed; cannot verify",
+                    action.component_id
+                )
+            })
+    }
+}
+
+async fn repair_runs_list(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    let limit = q.get("limit").and_then(|v| v.parse::<i64>().ok());
+    let conn = db_lock(&state)?;
+    let runs = dread_platform::repair_executor::list_runs(&conn, limit).map_err(executor_error)?;
+    to_json(runs, "repair runs")
+}
+
+async fn repair_run_get(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let detail =
+        dread_platform::repair_executor::get_run_detail(&conn, id).map_err(executor_error)?;
+    to_json(detail, "repair run detail")
+}
+
+async fn repair_run_create(
+    State(state): State<AppState>,
+    Json(plan): Json<dread_platform::repair::RepairPlan>,
+) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let run = dread_platform::repair_executor::create_run_from_plan(
+        &conn,
+        &plan,
+        repair_policy(),
+        repair_now(),
+        &state.operator_id,
+    )
+    .map_err(executor_error)?;
+    to_json(run, "repair run")
+}
+
+async fn repair_run_approve(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let run =
+        dread_platform::repair_executor::approve_run(&conn, id, repair_now(), &state.operator_id)
+            .map_err(executor_error)?;
+    to_json(run, "repair run")
+}
+
+async fn repair_run_reject(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let run =
+        dread_platform::repair_executor::reject_run(&conn, id, repair_now(), &state.operator_id)
+            .map_err(executor_error)?;
+    to_json(run, "repair run")
+}
+
+async fn repair_run_execute(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    // Fresh live observations first (async), then the sync executor runs
+    // against that postcondition snapshot.
+    let observations = repair_observations(&state).await;
+    let conn = db_lock(&state)?;
+    let outcome = dread_platform::repair_executor::execute_approved_run(
+        &conn,
+        id,
+        repair_now(),
+        &state.operator_id,
+        &SimulatedRepairRunner,
+        &SnapshotChecker { observations },
+    )
+    .map_err(executor_error)?;
+    to_json(outcome, "repair run outcome")
 }
 
 async fn local_model_inventory() -> Result<Json<dread_gpu::models::LocalModelInventory>, ApiError> {
@@ -5821,6 +6016,23 @@ fn app(state: AppState) -> Router {
         .route("/api/skills", get(skills_list))
         .route("/api/skills/sync", axum::routing::post(skills_sync))
         .route("/api/repair/plan", get(repair_plan))
+        .route(
+            "/api/repair/runs",
+            axum::routing::get(repair_runs_list).post(repair_run_create),
+        )
+        .route("/api/repair/runs/{id}", get(repair_run_get))
+        .route(
+            "/api/repair/runs/{id}/approve",
+            axum::routing::post(repair_run_approve),
+        )
+        .route(
+            "/api/repair/runs/{id}/reject",
+            axum::routing::post(repair_run_reject),
+        )
+        .route(
+            "/api/repair/runs/{id}/execute",
+            axum::routing::post(repair_run_execute),
+        )
         .route("/api/media/comfyui/monitor", get(comfyui_monitor))
         .route("/api/media/comfyui/scan", axum::routing::post(comfyui_scan))
         .route("/api/media/comfyui/instances", get(comfyui_instances))

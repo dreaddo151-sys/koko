@@ -5,7 +5,7 @@
 //! successful. Applying a proposal requires a separate approved executor with
 //! backups, postcondition checks and rollback evidence.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ComponentObservation {
@@ -14,7 +14,7 @@ pub struct ComponentObservation {
     pub detail: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RepairFinding {
     pub component_id: String,
     pub severity: String,
@@ -27,7 +27,7 @@ pub struct RepairFinding {
     pub status: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RepairPlan {
     pub status: String,
     pub checked_components: usize,

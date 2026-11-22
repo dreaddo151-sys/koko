@@ -4,6 +4,7 @@
 //! shell, installs software, changes drivers, or starts an inference process.
 
 pub mod repair;
+pub mod repair_executor;
 
 use serde::Serialize;
 use serde_json::Value;
