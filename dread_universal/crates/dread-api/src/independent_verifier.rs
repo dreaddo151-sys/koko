@@ -351,12 +351,12 @@ fn sha256_hex(value: &str) -> String {
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
-    if value.is_empty() || value.len() % 2 != 0 {
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    if value.is_empty() || !remainder.is_empty() {
         return Err("hex value is empty or has an odd length".into());
     }
-    value
-        .as_bytes()
-        .chunks_exact(2)
+    pairs
+        .iter()
         .map(|pair| {
             let digit = |byte: u8| match byte {
                 b'0'..=b'9' => Some(byte - b'0'),
@@ -501,7 +501,7 @@ mod tests {
             &signed(&key, &verifier.key_id, &payload),
         );
 
-        let mut connection = Connection::open_in_memory().unwrap();
+        let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(
             "CREATE TABLE dread_dispatch_admissions(request_id TEXT, requester_id TEXT);
              INSERT INTO dread_dispatch_admissions VALUES ('request-1', 'operator-1');
