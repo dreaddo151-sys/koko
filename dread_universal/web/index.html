@@ -1,3 +1,54 @@
-<!doctype html>
-<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><meta name="theme-color" content="#070b12"/><meta name="description" content="PROJECT DREAD — local-first AI operations and dual GPU command environment."/><title>PROJECT DREAD // Universal Operations</title></head>
-<body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body></html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DREAD Universal — Work Monitor</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <div>
+      <h1>DRH FULL HUB</h1>
+      <span id="hub-status" class="badge">Connecting...</span>
+    </div>
+    <div class="header-actions">
+      <input id="api-token" type="password" placeholder="DRH_API_TOKEN (if set)" />
+      <button id="btn-discover">Refresh Discovery</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="card" id="telemetry-card">
+      <h2>Hardware Telemetry</h2>
+      <div id="cpu-ram">CPU: -- | RAM: --</div>
+      <div id="gpu-list" class="grid"></div>
+    </section>
+
+    <section class="card">
+      <h2>Durable Task Console</h2>
+      <div id="token-usage" class="muted">Token usage: --</div>
+      <form id="task-form" class="col">
+        <input id="task-title" type="text" placeholder="Task title (e.g. summarize downloads inventory)" required />
+        <div class="row">
+          <input id="task-type" type="text" value="chat.prompt" placeholder="task_type" />
+          <input id="task-payload" type="text" value="{}" placeholder='JSON payload e.g. {"prompt":"hi","model":"local"}' />
+          <button type="submit">Submit Task</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>Providers, Models & Plugins</h2>
+      <div id="inventory"></div>
+    </section>
+
+    <section class="card">
+      <h2>Task Monitor</h2>
+      <div id="job-list"></div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
