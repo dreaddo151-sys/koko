@@ -1208,4 +1208,3 @@ mod durable_activation_tests {
         assert!(!dispatch_activation_status_ready(&status));
     }
 }
-
