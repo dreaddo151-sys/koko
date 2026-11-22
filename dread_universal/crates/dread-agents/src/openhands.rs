@@ -821,10 +821,9 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
         Box::pin(async move {
             request.validate()?;
             let identity = request.identity;
-            let signer = self
-                .receipt_signer
-                .as_ref()
-                .ok_or_else(|| durable_evidence_error("OpenHands receipt signer is not configured"))?;
+            let signer = self.receipt_signer.as_ref().ok_or_else(|| {
+                durable_evidence_error("OpenHands receipt signer is not configured")
+            })?;
             let response = self.start_task(request.request).await?;
             signed_agent_operation_receipt(
                 signer,
@@ -881,9 +880,9 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
             let events = self
                 .events(&identity.task_id, provider_execution_id, after_sequence)
                 .await?;
-            let signer = self.receipt_signer
-                .as_ref()
-                .ok_or_else(|| durable_evidence_error("OpenHands receipt signer is not configured"))?;
+            let signer = self.receipt_signer.as_ref().ok_or_else(|| {
+                durable_evidence_error("OpenHands receipt signer is not configured")
+            })?;
             let mut receipts = Vec::with_capacity(events.len());
             for event in events {
                 let external_event_id = format!("{provider_execution_id}:{}", event.sequence);
