@@ -324,6 +324,11 @@ impl Phase6ExecutionAuthority {
             .ok_or_else(|| format!("provider adapter '{provider_id}' is not configured"))?;
         let descriptor = adapter.descriptor();
         let version = descriptor.version.as_deref().unwrap_or_default();
+        if record.isolation.expires_at <= now {
+            return Err(format!(
+                "provider '{provider_id}' isolation evidence has expired"
+            ));
+        }
         if !descriptor.enabled
             || descriptor.adapter != record.adapter_id
             || version != record.adapter_version
@@ -615,6 +620,7 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
             .saturating_add(ADMISSION_LIFETIME)
             .min(manifest.expires_at())
             .min(registration.expires_at)
+            .min(registration.isolation.expires_at)
             .min(registration.retry_contract.expires_at);
         if expiry <= now {
             return Err("provider trust or retry contract expires before admission".into());
@@ -857,6 +863,28 @@ fn validate_manifest_payload(manifest: &ExecutionTrustManifest, now: i64) -> Res
             ("operation", provider.operation.as_str(), 128),
             ("evidence_id", provider.evidence_id.as_str(), 160),
             ("source_reference", provider.source_reference.as_str(), 2048),
+            ("isolation_evidence_id", provider.isolation.evidence_id.as_str(), 160),
+            ("runtime_identity", provider.isolation.runtime_identity.as_str(), 512),
+            (
+                "isolation_source_observation_id",
+                provider.isolation.provenance.source_observation_id.as_str(),
+                1024,
+            ),
+            (
+                "isolation_adapter_id",
+                provider.isolation.provenance.recorded_by_adapter_id.as_str(),
+                128,
+            ),
+            (
+                "isolation_adapter_version",
+                provider.isolation.provenance.recorded_by_adapter_version.as_str(),
+                128,
+            ),
+            (
+                "isolation_evidence_sha256",
+                provider.isolation.provenance.evidence_sha256.as_str(),
+                64,
+            ),
             (
                 "retry_contract_id",
                 provider.retry_contract.contract_id.as_str(),
@@ -897,7 +925,31 @@ fn validate_manifest_payload(manifest: &ExecutionTrustManifest, now: i64) -> Res
             || provider.observed_at > now
             || provider.expires_at <= now
             || provider.expires_at > manifest.expires_at
-            || (provider.enabled && !provider.isolation.all_verified())
+            || provider.isolation.contract_version != PREFLIGHT_CONTRACT_VERSION
+            || provider.isolation.provider_id != provider.provider_id
+            || provider.isolation.provider_registration_revision != provider.registration_revision
+            || provider.isolation.adapter_id != provider.adapter_id
+            || provider.isolation.adapter_version != provider.adapter_version
+            || provider.isolation.provenance.recorded_by_adapter_id != provider.adapter_id
+            || provider.isolation.provenance.recorded_by_adapter_version != provider.adapter_version
+            || !provider.isolation.provenance.authenticated
+            || provider.isolation.provenance.recorded_at < provider.isolation.checked_at
+            || provider.isolation.provenance.recorded_at > now
+            || provider.isolation.provenance.evidence_sha256.len() != 64
+            || !provider
+                .isolation
+                .provenance
+                .evidence_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || provider.isolation.checked_at < 0
+            || provider.isolation.checked_at > now
+            || provider.isolation.expires_at <= now
+            || provider.isolation.expires_at <= provider.isolation.checked_at
+            || provider.isolation.expires_at > provider.expires_at
+            || provider.isolation.expires_at - provider.isolation.checked_at
+                > MAX_PREFLIGHT_LIFETIME_SECONDS
+            || !provider.isolation.all_verified()
         {
             return Err("provider registration scope or isolation evidence is invalid".into());
         }
@@ -1003,15 +1055,36 @@ mod tests {
                 source_reference: "provisioner://hermes/isolation/1".into(),
                 observed_at: now - 10,
                 expires_at: now + 3600,
-                isolation: IsolationControls {
-                    per_task_workspace: true,
-                    filesystem_scope: true,
-                    network_egress_restricted: true,
-                    secret_scoping: true,
-                    process_isolation: true,
-                    resource_limits: true,
-                    audit_logging: true,
-                    cleanup_verified: true,
+                isolation: IsolationEvidenceRecord {
+                    contract_version: PREFLIGHT_CONTRACT_VERSION.into(),
+                    evidence_id: "isolation-evidence-1".into(),
+                    provider_id: "hermes".into(),
+                    provider_registration_revision: 1,
+                    adapter_id: "hermes".into(),
+                    adapter_version: "1.0.0".into(),
+                    runtime_identity: "hermes-runtime-1".into(),
+                    provenance: EvidenceProvenance {
+                        source_observation_id: "hermes-observation-1".into(),
+                        recorded_by_adapter_id: "hermes".into(),
+                        recorded_by_adapter_version: "1.0.0".into(),
+                        evidence_sha256: "b".repeat(64),
+                        recorded_at: now - 9,
+                        authenticated: true,
+                    },
+                    checks: IsolationControl::ALL
+                        .into_iter()
+                        .map(|control| {
+                            (
+                                control,
+                                ControlEvidence {
+                                    verified: true,
+                                    durable_observation_id: format!("{control:?}-observation"),
+                                },
+                            )
+                        })
+                        .collect(),
+                    checked_at: now - 10,
+                    expires_at: now + 290,
                 },
                 retry_contract: RetryContractTrust {
                     contract_id: "retry-hermes-agent-execute".into(),
