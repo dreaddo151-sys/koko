@@ -144,7 +144,9 @@ impl VerifiedRuntimeIsolationAttestation {
         let public_key = decode_hex(public_key_hex)?;
         let signature = decode_hex(&envelope.signature_hex)?;
         if public_key.len() != 32 || signature.len() != 64 {
-            return Err("runtime attestation Ed25519 public key/signature length is invalid".into());
+            return Err(
+                "runtime attestation Ed25519 public key/signature length is invalid".into(),
+            );
         }
         let payload_bytes = serde_json::to_vec(&envelope.payload)
             .map_err(|error| format!("cannot canonicalize runtime attestation payload: {error}"))?;
