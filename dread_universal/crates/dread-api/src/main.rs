@@ -5786,7 +5786,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approved_agent_mission_node_dispatches_through_registered_adapter() {
+    async fn approved_agent_mission_node_remains_blocked_until_durable_dispatch_is_integrated() {
         let db = Arc::new(Mutex::new(open_database(":memory:").unwrap()));
         let now = now_epoch();
         let capability = CapabilityRecord {
@@ -5913,7 +5913,7 @@ mod tests {
             .unwrap();
         assert_eq!(approved.status(), StatusCode::OK);
 
-        let queued = router
+        let blocked = router
             .clone()
             .oneshot(
                 Request::builder()
@@ -5925,50 +5925,15 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(queued.status(), StatusCode::ACCEPTED);
+        assert_eq!(blocked.status(), StatusCode::CONFLICT);
 
-        let completed = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            loop {
-                let response = router
-                    .clone()
-                    .oneshot(
-                        Request::builder()
-                            .uri("/api/missions/agent-provider-mission")
-                            .header(AUTHORIZATION, "Bearer test-token")
-                            .body(Body::empty())
-                            .unwrap(),
-                    )
-                    .await
-                    .unwrap();
-                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-                let mission: Value = serde_json::from_slice(&body).unwrap();
-                if mission["item"]["status"] == "completed" {
-                    break mission;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("approved provider-backed mission node should complete");
-
-        assert_eq!(completed["item"]["tasks"][0]["status"], "completed");
-        assert_eq!(
-            completed["item"]["tasks"][0]["result"]["answer"],
-            "completed"
+        // The approved capability remains queued, but the legacy provider
+        // adapter must not be started until durable admission, attempts,
+        // reconciliation and worker reattachment are wired into this route.
+        assert!(
+            adapter.starts.lock().unwrap().is_empty(),
+            "provider must not start through the legacy path"
         );
-        {
-            let starts = adapter.starts.lock().unwrap();
-            assert_eq!(starts.len(), 1);
-            assert_eq!(starts[0].capability_id, "hermes.run");
-            assert_eq!(
-                starts[0].input,
-                json!({"objective": "Inspect the approved workspace"})
-            );
-            assert_eq!(
-                starts[0].idempotency_key,
-                format!("project-dread:{task_id}")
-            );
-        }
 
         // An agent capability must never override a built-in task's runner.
         let mismatched = router
