@@ -2064,6 +2064,17 @@ fn resolve_agent_provider(
             "Agent capability provider adapter is disabled or mismatched",
         ));
     }
+    let authority = state.execution_authority.as_ref().ok_or_else(|| {
+        ApiError::conflict("Signed provider trust manifest is not configured")
+    })?;
+    authority
+        .validate_provider_capability(
+            conn,
+            capability_id,
+            provider,
+            i64::try_from(now_epoch()).unwrap_or(i64::MAX),
+        )
+        .map_err(ApiError::conflict)?;
     Ok(provider.to_string())
 }
 
