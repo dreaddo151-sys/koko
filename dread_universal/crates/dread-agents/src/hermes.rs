@@ -96,7 +96,7 @@ impl HermesApiAdapter {
                 id: "hermes.api_server".into(),
                 display_name: display_name.into(),
                 adapter: "hermes.api_server".into(),
-                version: None,
+                version: Some(env!("CARGO_PKG_VERSION").to_owned()),
                 endpoint: Some(endpoint),
                 enabled: false,
             },
