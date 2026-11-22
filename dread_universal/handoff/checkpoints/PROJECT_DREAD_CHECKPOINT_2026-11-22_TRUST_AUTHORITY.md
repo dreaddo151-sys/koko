@@ -685,3 +685,17 @@ The first code attempt in run #2004 stopped at one rustfmt-only layout differenc
 - Ubuntu portable/Debian package assembly, checksums/content validation, packaged API install and console smoke test.
 
 This guard proves only UID inequality. It does not deploy accounts/groups, prove the API process is non-root, validate real target ACLs/WAL/SHM access, or activate the verifier. Those remain deployment/physical acceptance gates. PR #16 remains draft/unmerged; provider dispatch remains blocked.
+
+
+## 25. Require non-root API identity for independent verification — 2026-11-22
+
+**Exact code head:** `ee58abfe3c361790abf1c1768359c6c5e49e376a`  
+**CI run:** [#2009 — Rust and web jobs passed](https://github.com/dreaddo151-sys/koko/actions/runs/45067800653)
+
+The independent-verifier identity check now rejects both:
+- API process effective UID 0 (root), because root can bypass the receipt directory's Unix ownership/mode boundary.
+- API and verifier configured with the same effective/receipt-owner UID.
+
+A pure UID-separation validator has deterministic tests for root rejection, shared-UID rejection and distinct non-root UID acceptance. The existing environment loader invokes the guard before accepting the verifier receipt directory. The exact head passed rustfmt, strict Clippy, full workspace tests, optimized release build, installer/release checks, Python bridge/importer regressions and GPU ownership guard; web console build and Ubuntu package/smoke test also passed in the same workflow run.
+
+This is a startup guard, not a deployment. The user's existing service was not changed. The verifier still requires an actual separate service account, shared read-only group membership, protected key/policy files, real SQLite DB/WAL/SHM read-only access, signed live heartbeat, independent runtime observations and physical acceptance. PR #16 remains draft/unmerged.
