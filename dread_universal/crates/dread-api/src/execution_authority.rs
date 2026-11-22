@@ -8,10 +8,14 @@
 //! separately authenticated verifier integration is configured.
 
 use crate::execution_policy::{ExecutionPolicyAuthority, ExecutionPolicyInput};
-use dread_agents::{AgentAdapter, CapabilityKind, CapabilityRecord, CapabilityStatus};
+use dread_agents::{
+    AgentAdapter, AgentEvent, AgentOperationEvidenceKind, AgentOperationEvidencePayload,
+    CapabilityKind, CapabilityRecord, CapabilityStatus,
+};
 use dread_orchestrator::persistence::{
     AdmissionRecord, AttemptRecord, AuthorizationFacts, CurrentRetryContractFacts, DispatchRequest,
-    ExecutionAuthority, ProviderEvidence, VerificationFacts,
+    ExecutionAuthority, ProviderEvidence, ProviderEventReceiptContext, SignedProviderReceipt,
+    VerificationFacts,
 };
 use ring::{digest, signature};
 use rusqlite::{Connection, OptionalExtension};
@@ -736,17 +740,39 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
         let admission = load_admission_for_authority(connection, &attempt.request_id)?;
         self.verify_admission_scope(connection, &admission, now)?;
         let (_, registration, _) = self.registration(&attempt.provider_id, now)?;
-        if evidence.provider_id != attempt.provider_id
+        let receipt = evidence.receipt.as_ref().ok_or_else(|| {
+            "provider lifecycle evidence has no signed adapter receipt".to_string()
+        })?;
+        let payload =
+            verify_signed_adapter_receipt(receipt, &registration, &admission, attempt, now)?;
+        let expected_kind = evidence_kind_from_name(&evidence.evidence_kind)
+            .ok_or_else(|| "provider evidence has an unsupported operation kind".to_string())?;
+        let signed_observed_at = i64::try_from(payload.observed_at)
+            .map_err(|_| "adapter receipt observation timestamp is out of range".to_string())?;
+        let signed_expires_at = i64::try_from(
+            payload
+                .expires_at
+                .ok_or_else(|| "adapter receipt has no expiry".to_string())?,
+        )
+        .map_err(|_| "adapter receipt expiry timestamp is out of range".to_string())?;
+        if expected_kind == AgentOperationEvidenceKind::Event
+            || payload.evidence_kind != expected_kind
+            || payload.evidence_id != evidence.evidence_id
+            || payload.provider_execution_id != evidence.provider_execution_id
+            || payload.external_event_id.is_some()
+            || payload.event_type.is_some()
+            || evidence.provider_id != attempt.provider_id
             || evidence.adapter_id != registration.adapter_id
             || evidence.adapter_version != registration.adapter_version
             || evidence.provider_registration_revision != registration.registration_revision
-            || evidence.verifier_id != format!("adapter-transport:{}", registration.provider_id)
-            || evidence.source_reference != registration.endpoint
-            || evidence.observed_at > now
-            || evidence.expires_at.is_some_and(|expiry| expiry <= now)
+            || evidence.verifier_id != payload.verifier_id
+            || evidence.source_reference != payload.source_reference
+            || evidence.observed_at != signed_observed_at
+            || evidence.expires_at != Some(signed_expires_at)
         {
             return Err(
-                "provider evidence is not bound to the authenticated adapter registration".into(),
+                "provider evidence does not match its signed operation receipt and durable attempt"
+                    .into(),
             );
         }
         if let Some(execution_id) = evidence.provider_execution_id.as_deref()
@@ -797,6 +823,60 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
         // This method is internal to the authenticated AgentAdapter polling path.
         // It does not accept HTTP-supplied evidence; the adapter's configured
         // bearer-authenticated transport is the provenance boundary.
+        Ok(())
+    }
+
+    fn verify_provider_event_receipt(
+        &self,
+        connection: &Connection,
+        attempt: &AttemptRecord,
+        event: &ProviderEventReceiptContext<'_>,
+    ) -> Result<(), String> {
+        if event.request_id != attempt.request_id {
+            return Err("provider event request ID does not match the durable attempt".into());
+        }
+        self.verify_provider_event(
+            connection,
+            attempt,
+            event.external_event_id,
+            event.event_type,
+            event.payload_json,
+            event.now,
+        )?;
+        let receipt = event
+            .receipt
+            .ok_or_else(|| "provider event has no signed adapter receipt".to_string())?;
+        let admission = load_admission_for_authority(connection, &attempt.request_id)?;
+        let (_, registration, _) = self.registration(&attempt.provider_id, event.now)?;
+        let provider_event: AgentEvent = serde_json::from_str(event.payload_json)
+            .map_err(|error| format!("signed provider event payload is invalid: {error}"))?;
+        let provider_execution_id = attempt
+            .provider_execution_id
+            .as_deref()
+            .ok_or_else(|| "provider event has no acknowledged execution identity".to_string())?;
+        let expected_event_id = format!("{provider_execution_id}:{}", provider_event.sequence);
+        if provider_event.task_id != attempt.task_id
+            || provider_event.event_type != event.event_type
+            || provider_event.sequence == 0
+            || provider_event.occurred_at > u64::try_from(event.now).unwrap_or_default()
+            || event.external_event_id != expected_event_id
+        {
+            return Err("provider event body does not match its durable event identity".into());
+        }
+        let response_bytes = serde_json::to_vec(&provider_event)
+            .map_err(|error| format!("cannot serialize provider event for receipt: {error}"))?;
+        let response_sha256 =
+            hex_encode(digest::digest(&digest::SHA256, &response_bytes).as_ref());
+        let payload =
+            verify_signed_adapter_receipt(receipt, &registration, &admission, attempt, event.now)?;
+        if payload.evidence_kind != AgentOperationEvidenceKind::Event
+            || payload.provider_execution_id.as_deref() != Some(provider_execution_id)
+            || payload.external_event_id.as_deref() != Some(event.external_event_id)
+            || payload.event_type.as_deref() != Some(event.event_type)
+            || payload.response_sha256 != response_sha256
+        {
+            return Err("provider event does not match its signed adapter receipt".into());
+        }
         Ok(())
     }
 
@@ -888,6 +968,110 @@ fn load_admission_for_authority(
         .optional()
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("dispatch admission '{request_id}' does not exist"))
+}
+
+/// Verify a DREAD adapter observation receipt against the public key pinned in
+/// the currently signed provider registration and the exact durable attempt.
+fn verify_signed_adapter_receipt(
+    receipt: &SignedProviderReceipt,
+    registration: &ProviderTrustRecord,
+    admission: &AdmissionRecord,
+    attempt: &AttemptRecord,
+    now: i64,
+) -> Result<AgentOperationEvidencePayload, String> {
+    let trusted_key_id = registration
+        .receipt_key_id
+        .as_deref()
+        .ok_or_else(|| "provider registration has no trusted adapter receipt key ID".to_string())?;
+    let trusted_public_key_hex = registration
+        .receipt_public_key_hex
+        .as_deref()
+        .ok_or_else(|| "provider registration has no trusted adapter receipt public key".to_string())?;
+    if receipt.key_id != trusted_key_id {
+        return Err("adapter receipt key ID does not match the signed provider registration".into());
+    }
+
+    let public_key = decode_hex(trusted_public_key_hex)?;
+    let signature_bytes = decode_hex(&receipt.signature_hex)?;
+    if public_key.len() != 32 || signature_bytes.len() != 64 {
+        return Err("adapter receipt Ed25519 key or signature has an invalid length".into());
+    }
+    signature::UnparsedPublicKey::new(&signature::ED25519, &public_key)
+        .verify(receipt.payload_json.as_bytes(), &signature_bytes)
+        .map_err(|_| "adapter receipt signature is invalid".to_string())?;
+
+    let payload: AgentOperationEvidencePayload = serde_json::from_str(&receipt.payload_json)
+        .map_err(|error| format!("adapter receipt payload is invalid: {error}"))?;
+    let identity = &payload.identity;
+    if attempt.request_id != admission.request_id
+        || attempt.task_id != admission.task_id
+        || attempt.provider_id != admission.provider_id
+        || attempt.capability_id != admission.capability_id
+        || attempt.operation != admission.operation
+        || attempt.idempotency_key != admission.idempotency_key
+        || admission.provider_id != registration.provider_id
+        || admission.adapter_id != registration.adapter_id
+        || admission.adapter_version != registration.adapter_version
+        || admission.provider_registration_revision != registration.registration_revision
+        || identity.request_id != admission.request_id
+        || identity.attempt_id != attempt.attempt_id
+        || identity.task_id != attempt.task_id
+        || identity.worker_id != attempt.worker_id
+        || identity.provider_id != admission.provider_id
+        || identity.capability_id != admission.capability_id
+        || identity.adapter_id != registration.adapter_id
+        || identity.adapter_version != registration.adapter_version
+        || identity.provider_registration_revision != registration.registration_revision
+        || identity.idempotency_key != admission.idempotency_key
+    {
+        return Err("adapter receipt identity does not match the durable admission and attempt".into());
+    }
+
+    let observed_at = i64::try_from(payload.observed_at)
+        .map_err(|_| "adapter receipt observation timestamp is out of range".to_string())?;
+    let expires_at = i64::try_from(
+        payload
+            .expires_at
+            .ok_or_else(|| "adapter receipt has no expiry".to_string())?,
+    )
+    .map_err(|_| "adapter receipt expiry timestamp is out of range".to_string())?;
+    if observed_at <= 0
+        || observed_at > now
+        || expires_at <= now
+        || expires_at <= observed_at
+        || expires_at > observed_at.saturating_add(MAX_PREFLIGHT_LIFETIME_SECONDS)
+        || expires_at > registration.expires_at
+    {
+        return Err("adapter receipt is future-dated, expired, or outside its lifetime bound".into());
+    }
+
+    let response_digest = decode_hex(&payload.response_sha256)?;
+    if response_digest.len() != 32
+        || hex_encode(&response_digest) != payload.response_sha256
+        || receipt.response_sha256 != payload.response_sha256
+    {
+        return Err("adapter receipt response digest is invalid or inconsistent".into());
+    }
+    if payload.verifier_id != format!("dread-adapter-receipt:{}", registration.adapter_id)
+        || payload.source_reference != registration.endpoint
+    {
+        return Err("adapter receipt provenance does not match the signed adapter registration".into());
+    }
+    Ok(payload)
+}
+
+fn evidence_kind_from_name(value: &str) -> Option<AgentOperationEvidenceKind> {
+    match value {
+        "acknowledged" => Some(AgentOperationEvidenceKind::Acknowledged),
+        "active" => Some(AgentOperationEvidenceKind::Active),
+        "event" => Some(AgentOperationEvidenceKind::Event),
+        "succeeded" => Some(AgentOperationEvidenceKind::Succeeded),
+        "failed" => Some(AgentOperationEvidenceKind::Failed),
+        "cancelled" => Some(AgentOperationEvidenceKind::Cancelled),
+        "cancellation_accepted" => Some(AgentOperationEvidenceKind::CancellationAccepted),
+        "cancellation_unknown" => Some(AgentOperationEvidenceKind::CancellationUnknown),
+        _ => None,
+    }
 }
 
 fn validate_manifest_payload(manifest: &ExecutionTrustManifest, now: i64) -> Result<(), String> {
