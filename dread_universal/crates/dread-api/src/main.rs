@@ -5746,7 +5746,7 @@ mod tests {
         adapters.insert("hermes".into(), adapter.clone());
         let (events, _) = broadcast::channel(128);
         let state = AppState {
-            db,
+            db: Arc::clone(&db),
             gpu: GpuGatewayClient::new("http://127.0.0.1:1").unwrap(),
             supervisor: None,
             events,
@@ -5847,6 +5847,16 @@ mod tests {
             adapter.starts.lock().unwrap().is_empty(),
             "provider must not start through the legacy path"
         );
+        let persisted_status: String = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM tasks WHERE id = ?1",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(persisted_status, "queued");
 
         // An agent capability must never override a built-in task's runner.
         let mismatched = router
