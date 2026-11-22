@@ -633,3 +633,25 @@ This is repository/build/package verification only. The example policy still req
 - GitHub Actions run [#1986](https://github.com/dreaddo151-sys/koko/actions/runs/45059630454) passed all three jobs: Rust format, strict Clippy, full workspace tests, optimized release build, installer/release and Python bridge/importer checks, web production build, Debian/portable package assembly, checksum/content validation, and packaged API/console smoke tests.
 - Added a filesystem-level regression proving the signed execution-policy loader rejects an actual group-writable policy file (mode 0660), in addition to the existing symlink and mode-helper tests.
 - This is a source/CI security milestone only. The verifier's separate Unix account, receipt ACLs, policy/key deployment, heartbeat and physical host acceptance remain unperformed.
+
+
+## 22. Signed verifier freshness contract — 2026-11-22
+
+**Exact code head:** `0d4de3db66315c32f3e4e2fb1c8392bbab529009`  
+**CI run:** [#1996 — all three jobs passed](https://github.com/dreaddo151-sys/koko/actions/runs/45066984555)
+
+The API's independent result verifier now uses one shared `validate_signed_time_window` contract for both signed result receipts and verifier heartbeats. It enforces:
+
+- Observation timestamp is positive and not future-dated.
+- Expiry is strictly later than both observation and current read time.
+- Receipt/heartbeat lifetime cannot exceed its configured maximum from the signed observation time.
+- Exact maximum lifetime is accepted; expired-at-now, non-increasing expiry, future observation, non-positive observation and excessive lifetime are rejected.
+
+Five deterministic unit tests cover these boundary conditions. The refactor removes duplicated time-window logic without changing receipt identity, signature, exact-result-digest or persistence/replay semantics. Canonical persistence continues to allow an idempotent replay only when the same signed verification evidence and final state are already stored; a different proof conflicts.
+
+Run #1994 on the initial code commit stopped at rustfmt only. The formatting correction was committed separately; the exact final code head above passed:
+- Rust / Ubuntu 24.04: rustfmt, strict Clippy, full workspace tests, optimized release build, installer/release checks, signed-verifier failure paths, portable migration/rollback, Python bridge/importer regressions and single-owner GPU boundary.
+- Web console / Ubuntu 24.04: production build.
+- Ubuntu packages / smoke test: package assembly, checksums/content validation, packaged API installation and production-console smoke test.
+
+This is repository CI verification only. It does not deploy the verifier, create a service account or signing key, open the startup dispatch barrier, or prove live host isolation. PR #16 remains draft/unmerged and physical acceptance gates remain open.
