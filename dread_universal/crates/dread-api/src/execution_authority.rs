@@ -499,7 +499,9 @@ impl Phase6ExecutionAuthority {
             now,
         )?;
         if decision.decision_id != admission.policy_decision_id {
-            return Err("current signed policy decision differs from the persisted admission".into());
+            return Err(
+                "current signed policy decision differs from the persisted admission".into(),
+            );
         }
         Ok(())
     }
