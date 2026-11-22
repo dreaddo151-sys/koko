@@ -205,6 +205,7 @@ impl VerifiedRuntimeIsolationAttestation {
 
         let expected: BTreeSet<_> = RuntimeIsolationControl::ALL.into_iter().collect();
         let mut actual = BTreeSet::new();
+        let mut observation_ids = BTreeSet::new();
         for check in &payload.checks {
             if !actual.insert(check.control) {
                 return Err("runtime isolation attestation contains a duplicate control".into());
@@ -216,6 +217,11 @@ impl VerifiedRuntimeIsolationAttestation {
                 ));
             }
             validate_text("runtime control observation ID", &check.observation_id, 256)?;
+            if !observation_ids.insert(check.observation_id.as_str()) {
+                return Err(
+                    "runtime isolation controls must have distinct observation IDs".into(),
+                );
+            }
             validate_sha256("runtime control evidence digest", &check.evidence_sha256)?;
         }
         if actual != expected || payload.checks.len() != RuntimeIsolationControl::ALL.len() {
@@ -526,6 +532,27 @@ mod tests {
         assert!(
             VerifiedRuntimeIsolationAttestation::verify(
                 &signed_attestation(&key, duplicate),
+                RuntimeAttestationTrustAnchor {
+                    key_id: "runtime-attestor-key-1",
+                    public_key_hex: &public_key,
+                },
+                RuntimeAttestationAdapterBinding {
+                    provider_id: "hermes",
+                    adapter_id: "hermes",
+                    adapter_version: "0.4.0",
+                    endpoint: "http://127.0.0.1:8642",
+                },
+                1_800_000_010,
+            )
+            .is_err()
+        );
+
+        let mut reused_observation = payload();
+        reused_observation.checks[1].observation_id =
+            reused_observation.checks[0].observation_id.clone();
+        assert!(
+            VerifiedRuntimeIsolationAttestation::verify(
+                &signed_attestation(&key, reused_observation),
                 RuntimeAttestationTrustAnchor {
                     key_id: "runtime-attestor-key-1",
                     public_key_hex: &public_key,
