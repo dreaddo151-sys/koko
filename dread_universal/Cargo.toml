@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/dread-discovery", "crates/dread-api", "crates/dread-gpu", "crates/dread-agents", "crates/dread-orchestrator", "crates/dread-skills", "crates/dread-platform", "crates/dread-media"]
+members = ["crates/dread-discovery", "crates/dread-api", "crates/dread-gpu", "crates/dread-agents", "crates/dread-orchestrator", "crates/dread-skills", "crates/dread-platform", "crates/dread-media", "crates/dread-result-verifier"]
 
 [workspace.package]
 version = "0.4.0"
@@ -12,6 +12,7 @@ authors = ["PROJECT DREAD contributors"]
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "ws"] }
 futures = "0.3"
+libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled"] }

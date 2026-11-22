@@ -31,3 +31,31 @@ This commit does **not** install or wire an `ExecutionAuthority` into `dread-api
 - Candidate SQLite schema tests, executed before this branch commit: 14 passed.
 - Rust format, compile, unit tests, Clippy and release build: pending exact-head GitHub Actions for this branch.
 - Live provider, browser, GPU, ComfyUI/media and workstation acceptance: not performed by this candidate.
+
+
+## Phase 6 canonical integration follow-up — 2026-11-22
+
+The original candidate boundary above describes PR #15 at the time it was authored. The stacked PR #16 subsequently wired the adapted durable execution path into the canonical API:
+
+- `dread-api::durable_agent` performs single-use admission and attempt preparation before provider start; only a newly created attempt can call `start_task`.
+- `dread-api::execution_authority` supplies signed provider, capability, task-approval, policy, retry-contract, receipt and runtime-attestation checks.
+- API startup installs additive execution migrations on the existing Phase 6 SQLite connection, starts a new recovery generation and keeps the startup dispatch barrier closed pending reconciliation and worker attachment.
+- The read-only reconciliation source contract has no provider submission method. Unknown remote outcomes remain nonterminal; successful provider results remain `provider_succeeded` until an independent result receipt verifies the exact result/error bytes.
+- The standalone `dread-result-verifier` producer is packaged but is not installed or activated on the user's workstation. The API refuses new provider admission without a fresh independently signed verifier heartbeat.
+- The Python GPU Supervisor remains the sole hardware lease/process authority; no second GPU scheduler was introduced.
+
+Latest exact-head CI evidence is recorded in checkpoint section 19: PR #16 head `1d3c515133bf9b027e260657688f0b6e74dd9f6b`, run #1968, all Rust, web and package jobs successful. Subsequent checkpoint-only documentation commits do not change the verified code.
+
+The remaining non-CI acceptance gates remain open: independent live runtime-isolation observations, real per-capability domain semantics, separate service-account deployment/ACL tests, provider crash/race/replay tests, and physical workstation/ComfyUI/GPU acceptance. This follow-up does not authorize dispatch activation or merging.
+
+
+### Mission reconciliation hold follow-up
+
+- Mission dispatch now checks for sibling attempts in `reconciliation_required` before dispatching another task in that mission.
+- The check is inside the same SQLite dispatch transaction and therefore cannot race with the mission status update that follows it.
+- Exact-head regression and full CI passed in run #1980 on `e783e2e6b3758bc90c622a1062f12a73adce2952`. The test proves that an unresolved sibling prevents the mission from returning to `running`.
+
+
+### Execution-policy filesystem regression
+
+The policy loader now has a filesystem-level regression test that creates a valid signed policy, changes its actual file mode to group-writable (0660), and verifies that authorization fails closed. Exact-head CI run #1986 passed on code head `3fdeb621f7a2886f3e55db6fd7dfa23849a9b12d`.

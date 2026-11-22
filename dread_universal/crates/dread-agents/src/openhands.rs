@@ -5,9 +5,16 @@
 //! = "docker" and exposes the exact tools requested by DREAD. AlwaysConfirm is
 //! retained. These server claims still require live host/container validation.
 
+use crate::runtime_attestation::{
+    RuntimeIsolationAttestationSummary, RuntimeIsolationControl,
+    VerifiedRuntimeIsolationAttestation,
+};
 use crate::{
     AdapterFuture, AgentAdapter, AgentAdapterError, AgentCapability, AgentDescriptor, AgentEvent,
-    AgentHealth, AgentHealthState, AgentTask, AgentTaskState, StartTaskRequest,
+    AgentExecutionIdentity, AgentHealth, AgentHealthState, AgentOperationEvidenceKind,
+    AgentOperationReceipt, AgentOperationReceiptDetails, AgentReceiptSigner, AgentTask,
+    AgentTaskState, DurableAgentStartRequest, StartTaskRequest, durable_evidence_error,
+    signed_agent_operation_receipt,
 };
 use reqwest::{Client, Method, StatusCode, Url};
 use serde_json::{Value, json};
@@ -34,6 +41,8 @@ pub struct OpenHandsAgentServerAdapter {
     llm_base_url: String,
     sandbox_attested: bool,
     secret_store_attested: bool,
+    receipt_signer: Option<AgentReceiptSigner>,
+    runtime_attestation: Option<RuntimeIsolationAttestationSummary>,
 }
 
 impl OpenHandsAgentServerAdapter {
@@ -126,8 +135,8 @@ impl OpenHandsAgentServerAdapter {
             descriptor: AgentDescriptor {
                 id: "openhands.agent_server".into(),
                 display_name: display_name.into(),
-                adapter: "openhands.agent_server".into(),
-                version: None,
+                adapter: "openhands".into(),
+                version: Some(env!("CARGO_PKG_VERSION").to_owned()),
                 endpoint: Some(endpoint),
                 enabled: false,
             },
@@ -139,13 +148,23 @@ impl OpenHandsAgentServerAdapter {
             llm_base_url,
             sandbox_attested: false,
             secret_store_attested: false,
+            receipt_signer: None,
+            runtime_attestation: None,
         })
+    }
+
+    /// Attach the trusted local receipt signer. Durable lifecycle operations
+    /// remain unavailable until a key anchored by the signed provider registry
+    /// is configured by the caller.
+    pub fn with_receipt_signer(mut self, signer: AgentReceiptSigner) -> Self {
+        self.receipt_signer = Some(signer);
+        self
     }
 
     /// Enable only after Docker execution and stable OH_SECRET_KEY storage have
     /// been configured on the Agent Server. Before advertising or starting a task,
     /// DREAD reads authoritative /server_info execution_runtime and usable_tools.
-    pub fn attest_docker_runtime(
+    pub(crate) fn attest_docker_runtime(
         mut self,
         docker_runtime_enabled: bool,
         secret_store_configured: bool,
@@ -167,6 +186,32 @@ impl OpenHandsAgentServerAdapter {
         self.sandbox_attested = true;
         self.secret_store_attested = true;
         self.descriptor.enabled = true;
+        Ok(self)
+    }
+
+    /// Enable OpenHands only from an independently signed Docker-runtime report.
+    pub fn attest_runtime(
+        mut self,
+        attestation: VerifiedRuntimeIsolationAttestation,
+    ) -> Result<Self, AgentAdapterError> {
+        if attestation.provider_id() != "openhands"
+            || attestation.adapter_id() != self.descriptor.adapter
+            || attestation.adapter_version()
+                != self.descriptor.version.as_deref().unwrap_or_default()
+            || attestation.endpoint() != self.descriptor.endpoint.as_deref().unwrap_or_default()
+            || attestation.sandbox_backend() != "docker"
+        {
+            return Err(adapter_error(
+                "runtime_attestation_mismatch",
+                "OpenHands runtime attestation does not match the live Docker adapter identity"
+                    .into(),
+                false,
+            ));
+        }
+        let secret_store =
+            attestation.control_verified(RuntimeIsolationControl::StableSecretHandling);
+        self = self.attest_docker_runtime(true, secret_store)?;
+        self.runtime_attestation = Some(attestation.summary());
         Ok(self)
     }
 
@@ -464,6 +509,10 @@ impl OpenHandsAgentServerAdapter {
 impl AgentAdapter for OpenHandsAgentServerAdapter {
     fn descriptor(&self) -> &AgentDescriptor {
         &self.descriptor
+    }
+
+    fn runtime_isolation_attestation(&self) -> Option<RuntimeIsolationAttestationSummary> {
+        self.runtime_attestation.clone()
     }
 
     fn health<'a>(&'a self) -> AdapterFuture<'a, AgentHealth> {
@@ -801,6 +850,184 @@ impl AgentAdapter for OpenHandsAgentServerAdapter {
             Ok(task)
         })
     }
+
+    fn start_task_with_evidence<'a>(
+        &'a self,
+        request: DurableAgentStartRequest,
+    ) -> AdapterFuture<'a, AgentOperationReceipt<AgentTask>> {
+        Box::pin(async move {
+            request.validate()?;
+            let identity = request.identity;
+            let signer = self.receipt_signer.as_ref().ok_or_else(|| {
+                durable_evidence_error("OpenHands receipt signer is not configured")
+            })?;
+            let response = self.start_task(request.request).await?;
+            signed_agent_operation_receipt(
+                signer,
+                &self.descriptor,
+                "openhands",
+                &identity,
+                AgentOperationEvidenceKind::Acknowledged,
+                response.clone(),
+                AgentOperationReceiptDetails {
+                    provider_execution_id: response.provider_task_id.clone(),
+                    external_event_id: None,
+                    event_type: None,
+                },
+            )
+        })
+    }
+
+    fn reconcile_start_with_evidence<'a>(
+        &'a self,
+        identity: &'a AgentExecutionIdentity,
+    ) -> AdapterFuture<'a, AgentOperationReceipt<AgentTask>> {
+        Box::pin(async move {
+            // OpenHands conversation IDs are deterministically equal to the
+            // DREAD task ID. This is a read-only GET; it never creates or
+            // resumes a conversation and can safely resolve a lost ack.
+            let provider_execution_id = identity.task_id.clone();
+            self.task_status_with_evidence(identity, &provider_execution_id)
+                .await
+        })
+    }
+
+    fn task_status_with_evidence<'a>(
+        &'a self,
+        identity: &'a AgentExecutionIdentity,
+        provider_execution_id: &'a str,
+    ) -> AdapterFuture<'a, AgentOperationReceipt<AgentTask>> {
+        Box::pin(async move {
+            let response = self
+                .task_status(&identity.task_id, provider_execution_id)
+                .await?;
+            let kind = match response.state {
+                AgentTaskState::Succeeded => AgentOperationEvidenceKind::Succeeded,
+                AgentTaskState::Failed => AgentOperationEvidenceKind::Failed,
+                AgentTaskState::Cancelled => AgentOperationEvidenceKind::Cancelled,
+                _ => AgentOperationEvidenceKind::Active,
+            };
+            signed_agent_operation_receipt(
+                self.receipt_signer.as_ref().ok_or_else(|| {
+                    durable_evidence_error("OpenHands receipt signer is not configured")
+                })?,
+                &self.descriptor,
+                "openhands",
+                identity,
+                kind,
+                response,
+                AgentOperationReceiptDetails {
+                    provider_execution_id: Some(provider_execution_id.to_owned()),
+                    external_event_id: None,
+                    event_type: None,
+                },
+            )
+        })
+    }
+
+    fn events_with_evidence<'a>(
+        &'a self,
+        identity: &'a AgentExecutionIdentity,
+        provider_execution_id: &'a str,
+        after_sequence: u64,
+    ) -> AdapterFuture<'a, Vec<AgentOperationReceipt<AgentEvent>>> {
+        Box::pin(async move {
+            let events = self
+                .events(&identity.task_id, provider_execution_id, after_sequence)
+                .await?;
+            let signer = self.receipt_signer.as_ref().ok_or_else(|| {
+                durable_evidence_error("OpenHands receipt signer is not configured")
+            })?;
+            let mut receipts = Vec::with_capacity(events.len());
+            for event in events {
+                let external_event_id = format!("{provider_execution_id}:{}", event.sequence);
+                let event_type = event.event_type.clone();
+                receipts.push(signed_agent_operation_receipt(
+                    signer,
+                    &self.descriptor,
+                    "openhands",
+                    identity,
+                    AgentOperationEvidenceKind::Event,
+                    event,
+                    AgentOperationReceiptDetails {
+                        provider_execution_id: Some(provider_execution_id.to_owned()),
+                        external_event_id: Some(external_event_id),
+                        event_type: Some(event_type),
+                    },
+                )?);
+            }
+            Ok(receipts)
+        })
+    }
+
+    fn cancel_task_with_evidence<'a>(
+        &'a self,
+        identity: &'a AgentExecutionIdentity,
+        provider_execution_id: &'a str,
+    ) -> AdapterFuture<'a, AgentOperationReceipt<AgentTask>> {
+        Box::pin(async move {
+            let response = self
+                .cancel_task(&identity.task_id, provider_execution_id)
+                .await?;
+            let kind = match response.state {
+                AgentTaskState::Cancelled => AgentOperationEvidenceKind::Cancelled,
+                AgentTaskState::Queued
+                | AgentTaskState::Running
+                | AgentTaskState::WaitingForConfirmation => {
+                    AgentOperationEvidenceKind::CancellationAccepted
+                }
+                _ => AgentOperationEvidenceKind::CancellationUnknown,
+            };
+            signed_agent_operation_receipt(
+                self.receipt_signer.as_ref().ok_or_else(|| {
+                    durable_evidence_error("OpenHands receipt signer is not configured")
+                })?,
+                &self.descriptor,
+                "openhands",
+                identity,
+                kind,
+                response,
+                AgentOperationReceiptDetails {
+                    provider_execution_id: Some(provider_execution_id.to_owned()),
+                    external_event_id: None,
+                    event_type: None,
+                },
+            )
+        })
+    }
+
+    fn task_result_with_evidence<'a>(
+        &'a self,
+        identity: &'a AgentExecutionIdentity,
+        provider_execution_id: &'a str,
+    ) -> AdapterFuture<'a, AgentOperationReceipt<AgentTask>> {
+        Box::pin(async move {
+            let response = self
+                .task_result(&identity.task_id, provider_execution_id)
+                .await?;
+            let kind = match response.state {
+                AgentTaskState::Succeeded => AgentOperationEvidenceKind::Succeeded,
+                AgentTaskState::Failed => AgentOperationEvidenceKind::Failed,
+                AgentTaskState::Cancelled => AgentOperationEvidenceKind::Cancelled,
+                _ => AgentOperationEvidenceKind::Active,
+            };
+            signed_agent_operation_receipt(
+                self.receipt_signer.as_ref().ok_or_else(|| {
+                    durable_evidence_error("OpenHands receipt signer is not configured")
+                })?,
+                &self.descriptor,
+                "openhands",
+                identity,
+                kind,
+                response,
+                AgentOperationReceiptDetails {
+                    provider_execution_id: Some(provider_execution_id.to_owned()),
+                    external_event_id: None,
+                    event_type: None,
+                },
+            )
+        })
+    }
 }
 
 fn server_supports_docker_runtime(server_info: &Value) -> bool {
@@ -1062,6 +1289,72 @@ mod tests {
         assert_eq!(body["accept"], true);
         assert_eq!(body["reason"], "Reviewed in DREAD");
         Json(json!({"success": true}))
+    }
+
+    #[tokio::test]
+    async fn reconciles_lost_start_ack_by_reading_the_deterministic_conversation_id() {
+        let existing = Arc::new(AtomicBool::new(true));
+        let app = Router::new()
+            .route("/api/conversations/{id}", get(get_conversation))
+            .with_state(existing);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let signer =
+            AgentReceiptSigner::from_seed_hex("openhands-test-key", &"1a".repeat(32)).unwrap();
+        let trusted_public_key = signer.public_key_hex().unwrap();
+        let adapter = OpenHandsAgentServerAdapter::new(
+            &format!("http://{address}"),
+            "session-secret",
+            "test/model",
+            "llm-secret",
+            "http://host.docker.internal:11500/v1",
+            "OpenHands recovery test",
+        )
+        .unwrap()
+        .with_receipt_signer(signer)
+        .attest_docker_runtime(true, true)
+        .unwrap();
+
+        assert_eq!(adapter.descriptor().adapter, "openhands");
+        assert_eq!(
+            adapter.descriptor().version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        let task_id = "00000000-0000-4000-8000-000000000007";
+        let identity = AgentExecutionIdentity {
+            request_id: "request-lost-ack".into(),
+            attempt_id: "attempt-lost-ack".into(),
+            task_id: task_id.into(),
+            worker_id: "worker-recovery".into(),
+            provider_id: "openhands".into(),
+            capability_id: "openhands.run".into(),
+            adapter_id: "openhands".into(),
+            adapter_version: adapter.descriptor().version.clone().unwrap(),
+            provider_registration_revision: 4,
+            idempotency_key: format!("project-dread:{task_id}"),
+        };
+
+        // This router exposes only GET. Reconciliation therefore cannot
+        // create/replay a conversation and must resolve it by stable task ID.
+        let receipt = adapter
+            .reconcile_start_with_evidence(&identity)
+            .await
+            .unwrap();
+        assert_eq!(receipt.response.task_id, task_id);
+        assert_eq!(receipt.response.provider_task_id.as_deref(), Some(task_id));
+        assert_eq!(
+            receipt.evidence.payload.provider_execution_id.as_deref(),
+            Some(task_id)
+        );
+        assert_eq!(receipt.evidence.payload.identity, identity);
+        assert_eq!(
+            receipt.evidence.payload.response_sha256,
+            crate::response_sha256(&receipt.response).unwrap()
+        );
+        assert_eq!(trusted_public_key.len(), 64);
+        server.abort();
     }
 
     #[tokio::test]

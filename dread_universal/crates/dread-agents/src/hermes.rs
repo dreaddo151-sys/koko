@@ -4,9 +4,16 @@
 //! access to Hermes' configured toolset, so callers must keep it on loopback,
 //! require a bearer key, and apply DREAD approval before invoking start_task.
 
+use crate::runtime_attestation::{
+    RuntimeIsolationAttestationSummary, RuntimeIsolationControl,
+    VerifiedRuntimeIsolationAttestation,
+};
 use crate::{
     AdapterFuture, AgentAdapter, AgentAdapterError, AgentCapability, AgentDescriptor, AgentEvent,
-    AgentHealth, AgentHealthState, AgentTask, AgentTaskState, StartTaskRequest,
+    AgentExecutionIdentity, AgentHealth, AgentHealthState, AgentOperationEvidenceKind,
+    AgentOperationReceipt, AgentOperationReceiptDetails, AgentReceiptSigner, AgentTask,
+    AgentTaskState, DurableAgentStartRequest, StartTaskRequest, durable_evidence_error,
+    signed_agent_operation_receipt,
 };
 use reqwest::{Client, StatusCode, Url};
 use serde_json::{Value, json};
@@ -26,6 +33,8 @@ pub struct HermesApiAdapter {
     base_url: Url,
     api_key: String,
     sandbox_attested: bool,
+    receipt_signer: Option<AgentReceiptSigner>,
+    runtime_attestation: Option<RuntimeIsolationAttestationSummary>,
 }
 
 impl HermesApiAdapter {
@@ -92,7 +101,7 @@ impl HermesApiAdapter {
                 id: "hermes.api_server".into(),
                 display_name: display_name.into(),
                 adapter: "hermes.api_server".into(),
-                version: None,
+                version: Some(env!("CARGO_PKG_VERSION").to_owned()),
                 endpoint: Some(endpoint),
                 enabled: false,
             },
@@ -100,7 +109,17 @@ impl HermesApiAdapter {
             base_url: url,
             api_key,
             sandbox_attested: false,
+            receipt_signer: None,
+            runtime_attestation: None,
         })
+    }
+
+    /// Attach the trusted local receipt signer. Durable lifecycle operations
+    /// remain unavailable until a key anchored by the signed provider registry
+    /// is configured by the caller.
+    pub fn with_receipt_signer(mut self, signer: AgentReceiptSigner) -> Self {
+        self.receipt_signer = Some(signer);
+        self
     }
 
     /// Enable execution only after the operator verifies a per-task sandbox.
@@ -108,7 +127,7 @@ impl HermesApiAdapter {
     /// Supported backends are isolated execution environments. For Docker,
     /// verify container_persistent is false, no host workspace mount, and no
     /// extra arguments that weaken the provider's container security.
-    pub fn attest_sandbox(
+    pub(crate) fn attest_sandbox(
         mut self,
         terminal_backend: &str,
         isolated_workspace_per_task: bool,
@@ -132,6 +151,31 @@ impl HermesApiAdapter {
         }
         self.sandbox_attested = true;
         self.descriptor.enabled = true;
+        Ok(self)
+    }
+
+    /// Enable Hermes only from an independently signed runtime report.
+    pub fn attest_runtime(
+        mut self,
+        attestation: VerifiedRuntimeIsolationAttestation,
+    ) -> Result<Self, AgentAdapterError> {
+        if attestation.provider_id() != "hermes"
+            || attestation.adapter_id() != self.descriptor.adapter
+            || attestation.adapter_version()
+                != self.descriptor.version.as_deref().unwrap_or_default()
+            || attestation.endpoint() != self.descriptor.endpoint.as_deref().unwrap_or_default()
+        {
+            return Err(adapter_error(
+                "runtime_attestation_mismatch",
+                "Hermes runtime attestation does not match the live adapter identity".into(),
+                false,
+            ));
+        }
+        let backend = attestation.sandbox_backend().to_owned();
+        let workspace =
+            attestation.control_verified(RuntimeIsolationControl::TaskWorkspaceBoundary);
+        self = self.attest_sandbox(&backend, workspace)?;
+        self.runtime_attestation = Some(attestation.summary());
         Ok(self)
     }
 
@@ -231,6 +275,10 @@ impl HermesApiAdapter {
 impl AgentAdapter for HermesApiAdapter {
     fn descriptor(&self) -> &AgentDescriptor {
         &self.descriptor
+    }
+
+    fn runtime_isolation_attestation(&self) -> Option<RuntimeIsolationAttestationSummary> {
+        self.runtime_attestation.clone()
     }
 
     fn health<'a>(&'a self) -> AdapterFuture<'a, AgentHealth> {
@@ -526,6 +574,172 @@ impl AgentAdapter for HermesApiAdapter {
         Box::pin(async move {
             let run = self.read_run(provider_task_id).await?;
             Ok(self.to_task(task_id, &run))
+        })
+    }
+
+    fn start_task_with_evidence<'a>(
+        &'a self,
+        request: DurableAgentStartRequest,
+    ) -> AdapterFuture<'a, AgentOperationReceipt<AgentTask>> {
+        Box::pin(async move {
+            request.validate()?;
+            let identity = request.identity;
+            let signer = self
+                .receipt_signer
+                .as_ref()
+                .ok_or_else(|| durable_evidence_error("Hermes receipt signer is not configured"))?;
+            let response = self.start_task(request.request).await?;
+            signed_agent_operation_receipt(
+                signer,
+                &self.descriptor,
+                "hermes",
+                &identity,
+                AgentOperationEvidenceKind::Acknowledged,
+                response.clone(),
+                AgentOperationReceiptDetails {
+                    provider_execution_id: response.provider_task_id.clone(),
+                    external_event_id: None,
+                    event_type: None,
+                },
+            )
+        })
+    }
+
+    fn task_status_with_evidence<'a>(
+        &'a self,
+        identity: &'a AgentExecutionIdentity,
+        provider_execution_id: &'a str,
+    ) -> AdapterFuture<'a, AgentOperationReceipt<AgentTask>> {
+        Box::pin(async move {
+            let response = self
+                .task_status(&identity.task_id, provider_execution_id)
+                .await?;
+            let kind = match response.state {
+                AgentTaskState::Succeeded => AgentOperationEvidenceKind::Succeeded,
+                AgentTaskState::Failed => AgentOperationEvidenceKind::Failed,
+                AgentTaskState::Cancelled => AgentOperationEvidenceKind::Cancelled,
+                _ => AgentOperationEvidenceKind::Active,
+            };
+            signed_agent_operation_receipt(
+                self.receipt_signer.as_ref().ok_or_else(|| {
+                    durable_evidence_error("Hermes receipt signer is not configured")
+                })?,
+                &self.descriptor,
+                "hermes",
+                identity,
+                kind,
+                response,
+                AgentOperationReceiptDetails {
+                    provider_execution_id: Some(provider_execution_id.to_owned()),
+                    external_event_id: None,
+                    event_type: None,
+                },
+            )
+        })
+    }
+
+    fn events_with_evidence<'a>(
+        &'a self,
+        identity: &'a AgentExecutionIdentity,
+        provider_execution_id: &'a str,
+        after_sequence: u64,
+    ) -> AdapterFuture<'a, Vec<AgentOperationReceipt<AgentEvent>>> {
+        Box::pin(async move {
+            let events = self
+                .events(&identity.task_id, provider_execution_id, after_sequence)
+                .await?;
+            let signer = self
+                .receipt_signer
+                .as_ref()
+                .ok_or_else(|| durable_evidence_error("Hermes receipt signer is not configured"))?;
+            let mut receipts = Vec::with_capacity(events.len());
+            for event in events {
+                let external_event_id = format!("{provider_execution_id}:{}", event.sequence);
+                let event_type = event.event_type.clone();
+                receipts.push(signed_agent_operation_receipt(
+                    signer,
+                    &self.descriptor,
+                    "hermes",
+                    identity,
+                    AgentOperationEvidenceKind::Event,
+                    event,
+                    AgentOperationReceiptDetails {
+                        provider_execution_id: Some(provider_execution_id.to_owned()),
+                        external_event_id: Some(external_event_id),
+                        event_type: Some(event_type),
+                    },
+                )?);
+            }
+            Ok(receipts)
+        })
+    }
+
+    fn cancel_task_with_evidence<'a>(
+        &'a self,
+        identity: &'a AgentExecutionIdentity,
+        provider_execution_id: &'a str,
+    ) -> AdapterFuture<'a, AgentOperationReceipt<AgentTask>> {
+        Box::pin(async move {
+            let response = self
+                .cancel_task(&identity.task_id, provider_execution_id)
+                .await?;
+            let kind = match response.state {
+                AgentTaskState::Cancelled => AgentOperationEvidenceKind::Cancelled,
+                AgentTaskState::Queued
+                | AgentTaskState::Running
+                | AgentTaskState::WaitingForConfirmation => {
+                    AgentOperationEvidenceKind::CancellationAccepted
+                }
+                _ => AgentOperationEvidenceKind::CancellationUnknown,
+            };
+            signed_agent_operation_receipt(
+                self.receipt_signer.as_ref().ok_or_else(|| {
+                    durable_evidence_error("Hermes receipt signer is not configured")
+                })?,
+                &self.descriptor,
+                "hermes",
+                identity,
+                kind,
+                response,
+                AgentOperationReceiptDetails {
+                    provider_execution_id: Some(provider_execution_id.to_owned()),
+                    external_event_id: None,
+                    event_type: None,
+                },
+            )
+        })
+    }
+
+    fn task_result_with_evidence<'a>(
+        &'a self,
+        identity: &'a AgentExecutionIdentity,
+        provider_execution_id: &'a str,
+    ) -> AdapterFuture<'a, AgentOperationReceipt<AgentTask>> {
+        Box::pin(async move {
+            let response = self
+                .task_result(&identity.task_id, provider_execution_id)
+                .await?;
+            let kind = match response.state {
+                AgentTaskState::Succeeded => AgentOperationEvidenceKind::Succeeded,
+                AgentTaskState::Failed => AgentOperationEvidenceKind::Failed,
+                AgentTaskState::Cancelled => AgentOperationEvidenceKind::Cancelled,
+                _ => AgentOperationEvidenceKind::Active,
+            };
+            signed_agent_operation_receipt(
+                self.receipt_signer.as_ref().ok_or_else(|| {
+                    durable_evidence_error("Hermes receipt signer is not configured")
+                })?,
+                &self.descriptor,
+                "hermes",
+                identity,
+                kind,
+                response,
+                AgentOperationReceiptDetails {
+                    provider_execution_id: Some(provider_execution_id.to_owned()),
+                    external_event_id: None,
+                    event_type: None,
+                },
+            )
         })
     }
 }

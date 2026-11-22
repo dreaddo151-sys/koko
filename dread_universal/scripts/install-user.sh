@@ -49,7 +49,7 @@ case "$PREFIX" in
   *[[:space:]]*) printf 'Install directory cannot contain whitespace.\n' >&2; exit 1 ;;
 esac
 
-for required in bin/dread-universal web/dist/index.html config/services.toml config/agents.toml scripts/dread_watchdog.py systemd/dread-watchdog.service systemd/dread-watchdog.timer; do
+for required in bin/dread-universal bin/dread-result-verifier web/dist/index.html config/services.toml config/agents.toml config/independent-result-verifier.policy.example.json config/independent-result-verifier.env.example scripts/dread_watchdog.py systemd/dread-watchdog.service systemd/dread-watchdog.timer systemd/dread-result-verifier.service.example systemd/dread-result-verifier.tmpfiles.example; do
   [[ -e "$BUNDLE_DIR/$required" ]] || {
     printf 'Bundle is incomplete: missing %s\n' "$required" >&2
     exit 1

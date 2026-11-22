@@ -47,20 +47,57 @@ type StoredRetryContractEvidence = (
     i64,
     bool,
 );
-type StoredProviderEvidence = (
-    String,
-    String,
-    String,
-    String,
-    String,
-    i64,
-    Option<String>,
-    String,
-    String,
-    String,
-    i64,
-    Option<i64>,
-);
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoredProviderEventKey {
+    event_type: String,
+    payload_json: String,
+    task_event_sequence: i64,
+    receipt_key_id: Option<String>,
+    receipt_payload_json: Option<String>,
+    receipt_signature_hex: Option<String>,
+    receipt_response_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoredProviderEvidence {
+    attempt_id: String,
+    request_id: String,
+    provider_id: String,
+    adapter_id: String,
+    adapter_version: String,
+    provider_registration_revision: i64,
+    provider_execution_id: Option<String>,
+    evidence_kind: String,
+    verifier_id: String,
+    source_reference: String,
+    observed_at: i64,
+    expires_at: Option<i64>,
+    receipt_key_id: Option<String>,
+    receipt_payload_json: Option<String>,
+    receipt_signature_hex: Option<String>,
+    receipt_response_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedProviderReceipt {
+    pub key_id: String,
+    /// Exact compact JSON payload bytes over which the adapter signed.
+    pub payload_json: String,
+    pub signature_hex: String,
+    pub response_sha256: String,
+}
+
+/// Borrowed event identity and receipt passed unchanged across the persistence
+/// and trust-authority boundary.
+#[derive(Debug, Clone, Copy)]
+pub struct ProviderEventReceiptContext<'a> {
+    pub request_id: &'a str,
+    pub external_event_id: &'a str,
+    pub event_type: &'a str,
+    pub payload_json: &'a str,
+    pub receipt: Option<&'a SignedProviderReceipt>,
+    pub now: i64,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderTerminalPayload<'a> {
@@ -233,6 +270,9 @@ pub struct ProviderEvidence {
     pub source_reference: String,
     pub observed_at: i64,
     pub expires_at: Option<i64>,
+    /// Optional for mock/non-production authorities; the production Phase 6
+    /// authority rejects provider evidence without a trusted signed receipt.
+    pub receipt: Option<SignedProviderReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,6 +363,24 @@ pub trait ExecutionAuthority: Send + Sync {
         now: i64,
     ) -> Result<(), String>;
 
+    /// New signed-event path. Legacy authorities retain their old behavior;
+    /// the production Phase 6 authority requires and verifies the receipt.
+    fn verify_provider_event_receipt(
+        &self,
+        connection: &Connection,
+        attempt: &AttemptRecord,
+        event: &ProviderEventReceiptContext<'_>,
+    ) -> Result<(), String> {
+        self.verify_provider_event(
+            connection,
+            attempt,
+            event.external_event_id,
+            event.event_type,
+            event.payload_json,
+            event.now,
+        )
+    }
+
     /// Independently verify the provider's claimed result. The verifier must
     /// be a separate trusted component/identity from the original requester.
     fn verify_independent_result(
@@ -346,7 +404,94 @@ pub trait ExecutionAuthority: Send + Sync {
 
 /// Validate that we are attached to the Phase 6 schema. The adapter does not
 /// create or rename any canonical task/mission tables.
-pub fn validate_canonical_schema(connection: &Connection) -> Result<(), PersistenceError> {
+fn require_primary_key(
+    connection: &Connection,
+    table: &str,
+    expected: &[&str],
+) -> Result<(), PersistenceError> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut keys = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(5)?, row.get::<_, String>(1)?))
+        })?
+        .filter_map(|row| match row {
+            Ok((position, name)) if position > 0 => Some(Ok((position, name))),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    keys.sort_by_key(|(position, _)| *position);
+    let actual = keys.into_iter().map(|(_, name)| name).collect::<Vec<_>>();
+    if actual.iter().map(String::as_str).collect::<Vec<_>>() != expected {
+        return Err(PersistenceError::Invalid(format!(
+            "canonical table {table} primary key does not match expected columns {expected:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn require_foreign_key(
+    connection: &Connection,
+    table: &str,
+    expected_table: &str,
+    expected_from: &str,
+    expected_to: &str,
+) -> Result<(), PersistenceError> {
+    let mut statement = connection.prepare(&format!("PRAGMA foreign_key_list({table})"))?;
+    let found = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .any(|(target, from, to)| {
+            target == expected_table && from == expected_from && to == expected_to
+        });
+    if !found {
+        return Err(PersistenceError::Invalid(format!(
+            "canonical table {table} is missing foreign key {expected_from} -> {expected_table}.{expected_to}"
+        )));
+    }
+    Ok(())
+}
+
+fn require_unique_index(
+    connection: &Connection,
+    table: &str,
+    expected: &[&str],
+) -> Result<(), PersistenceError> {
+    let mut statement = connection.prepare(&format!("PRAGMA index_list({table})"))?;
+    let indexes = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)? != 0))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (index, unique) in indexes {
+        if !unique {
+            continue;
+        }
+        let escaped = index.replace('\'', "''");
+        let mut info = connection.prepare(&format!("PRAGMA index_info('{escaped}')"))?;
+        let columns = info
+            .query_map([], |row| row.get::<_, Option<String>>(2))?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        if columns.iter().map(String::as_str).collect::<Vec<_>>() == expected {
+            return Ok(());
+        }
+    }
+    Err(PersistenceError::Invalid(format!(
+        "canonical table {table} is missing unique index on {expected:?}"
+    )))
+}
+
+fn validate_canonical_schema(connection: &Connection) -> Result<(), PersistenceError> {
     require_columns(
         connection,
         "tasks",
@@ -408,6 +553,25 @@ pub fn validate_canonical_schema(connection: &Connection) -> Result<(), Persiste
         "mission_tasks",
         &["mission_id", "node_id", "task_id", "depends_on_json"],
     )?;
+
+    let foreign_keys_enabled: i64 =
+        connection.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
+    if foreign_keys_enabled != 1 {
+        return Err(PersistenceError::Invalid(
+            "canonical SQLite connection must enable foreign-key enforcement".into(),
+        ));
+    }
+    require_primary_key(connection, "tasks", &["id"])?;
+    require_primary_key(connection, "task_events", &["id"])?;
+    require_primary_key(connection, "task_results", &["task_id"])?;
+    require_primary_key(connection, "missions", &["id"])?;
+    require_primary_key(connection, "mission_tasks", &["mission_id", "node_id"])?;
+    require_foreign_key(connection, "task_events", "tasks", "task_id", "id")?;
+    require_foreign_key(connection, "task_results", "tasks", "task_id", "id")?;
+    require_foreign_key(connection, "mission_tasks", "missions", "mission_id", "id")?;
+    require_foreign_key(connection, "mission_tasks", "tasks", "task_id", "id")?;
+    require_unique_index(connection, "task_events", &["task_id", "sequence"])?;
+    require_unique_index(connection, "mission_tasks", &["task_id"])?;
     Ok(())
 }
 
@@ -446,9 +610,9 @@ pub fn install(connection: &mut Connection, now: i64) -> Result<(), PersistenceE
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    if max_version > 4 || version_count != max_version {
+    if max_version > 7 || version_count != max_version {
         return Err(PersistenceError::Invalid(format!(
-            "unsupported or non-contiguous DREAD execution schema history (max={max_version}, count={version_count}, supported_through=4)"
+            "unsupported or non-contiguous DREAD execution schema history (max={max_version}, count={version_count}, supported_through=7)"
         )));
     }
 
@@ -465,6 +629,18 @@ pub fn install(connection: &mut Connection, now: i64) -> Result<(), PersistenceE
             4_i64,
             include_str!("../migrations/0004_attempt_worker_identity.sql"),
         ),
+        (
+            5_i64,
+            include_str!("../migrations/0005_startup_recovery_generation.sql"),
+        ),
+        (
+            6_i64,
+            include_str!("../migrations/0006_signed_adapter_receipts.sql"),
+        ),
+        (
+            7_i64,
+            include_str!("../migrations/0007_extended_cancellation_evidence.sql"),
+        ),
     ] {
         let applied: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM dread_execution_schema_migrations WHERE version = ?1)",
@@ -479,6 +655,28 @@ pub fn install(connection: &mut Connection, now: i64) -> Result<(), PersistenceE
             )?;
         }
     }
+    require_columns(
+        &tx,
+        "dread_execution_evidence",
+        &[
+            "evidence_id",
+            "receipt_key_id",
+            "receipt_payload_json",
+            "receipt_signature_hex",
+            "receipt_response_sha256",
+        ],
+    )?;
+    require_columns(
+        &tx,
+        "dread_provider_event_keys",
+        &[
+            "external_event_id",
+            "receipt_key_id",
+            "receipt_payload_json",
+            "receipt_signature_hex",
+            "receipt_response_sha256",
+        ],
+    )?;
     require_columns(
         &tx,
         "dread_task_execution_contracts",
@@ -549,6 +747,7 @@ pub fn install(connection: &mut Connection, now: i64) -> Result<(), PersistenceE
             "acknowledged_at",
             "terminal_at",
             "recovery_attached_at",
+            "recovery_generation",
         ],
     )?;
     require_columns(
@@ -1172,14 +1371,59 @@ pub fn record_provider_active(
 
 /// Return provider attempts whose remote status is known-active but whose
 /// polling/cancellation worker has not yet been registered in this process.
+/// Start a new recovery epoch on every API boot. An attachment timestamp
+/// from an earlier process is historical only and cannot satisfy this boot's
+/// startup dispatch barrier.
+pub fn begin_startup_recovery(
+    connection: &mut Connection,
+    now: i64,
+) -> Result<i64, PersistenceError> {
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current: Option<String> = tx
+        .query_row(
+            "SELECT state_value FROM dread_execution_runtime_state
+             WHERE state_key = 'startup_recovery_generation'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let generation = current
+        .as_deref()
+        .unwrap_or("0")
+        .parse::<i64>()
+        .map_err(|_| PersistenceError::Invalid("startup recovery generation is corrupt".into()))?
+        .checked_add(1)
+        .ok_or_else(|| PersistenceError::Invalid("startup recovery generation overflow".into()))?;
+    tx.execute(
+        "INSERT INTO dread_execution_runtime_state(state_key, state_value, updated_at)
+         VALUES ('startup_recovery_generation', ?1, ?2)
+         ON CONFLICT(state_key) DO UPDATE SET
+             state_value = excluded.state_value, updated_at = excluded.updated_at",
+        params![generation.to_string(), now],
+    )?;
+    tx.execute(
+        "INSERT INTO dread_execution_runtime_state(state_key, state_value, updated_at)
+         VALUES ('startup_dispatch_barrier', 'blocked', ?1)
+         ON CONFLICT(state_key) DO UPDATE SET
+             state_value = 'blocked', updated_at = excluded.updated_at",
+        [now],
+    )?;
+    tx.commit()?;
+    Ok(generation)
+}
+
 pub fn recovery_worker_attachment_candidates(
     connection: &Connection,
 ) -> Result<Vec<AttemptRecord>, PersistenceError> {
     let mut statement = connection.prepare(
         "SELECT request_id FROM dread_task_attempts
-         WHERE dispatch_state = 'running'
+         WHERE dispatch_state IN ('acknowledged', 'running', 'reconciliation_required')
            AND provider_execution_id IS NOT NULL
-           AND recovery_attached_at IS NULL
+           AND recovery_generation != COALESCE((
+               SELECT CAST(state_value AS INTEGER)
+               FROM dread_execution_runtime_state
+               WHERE state_key = 'startup_recovery_generation'
+           ), 0)
          ORDER BY dispatched_at, request_id",
     )?;
     let ids = statement
@@ -1215,16 +1459,28 @@ pub fn mark_recovery_worker_attached(
             "canonical task is not active while attaching its provider worker".into(),
         ));
     }
+    let generation: i64 = tx
+        .query_row(
+            "SELECT CAST(state_value AS INTEGER) FROM dread_execution_runtime_state
+             WHERE state_key = 'startup_recovery_generation'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
     let changed = tx.execute(
-        "UPDATE dread_task_attempts SET recovery_attached_at = ?2
+        "UPDATE dread_task_attempts SET recovery_attached_at = ?2, recovery_generation = ?3
          WHERE request_id = ?1 AND dispatch_state = 'running'
-           AND provider_execution_id IS NOT NULL AND recovery_attached_at IS NULL",
-        params![request_id, now],
+           AND provider_execution_id IS NOT NULL
+           AND (recovery_generation != ?3 OR recovery_attached_at IS NULL)",
+        params![request_id, now, generation],
     )?;
     if changed != 1 {
         let already_attached = tx.query_row(
-            "SELECT recovery_attached_at IS NOT NULL FROM dread_task_attempts WHERE request_id = ?1",
-            [request_id], |row| row.get::<_, bool>(0),
+            "SELECT recovery_generation = ?2 AND recovery_attached_at IS NOT NULL
+             FROM dread_task_attempts WHERE request_id = ?1",
+            params![request_id, generation],
+            |row| row.get::<_, bool>(0),
         )?;
         if !already_attached {
             return Err(PersistenceError::Conflict(
@@ -1258,13 +1514,23 @@ pub fn release_startup_dispatch_barrier(
     now: i64,
 ) -> Result<bool, PersistenceError> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let generation: i64 = tx
+        .query_row(
+            "SELECT CAST(state_value AS INTEGER) FROM dread_execution_runtime_state
+             WHERE state_key = 'startup_recovery_generation'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
     let unresolved: i64 = tx.query_row(
         "SELECT COUNT(*) FROM dread_task_attempts
          WHERE (
-             dispatch_state IN ('dispatching', 'acknowledged', 'running', 'reconciliation_required')
+             dispatch_state IN ('dispatching', 'acknowledged', 'running',
+                                'provider_succeeded', 'reconciliation_required')
              OR cancellation_state IN ('requested', 'request_sent', 'accepted', 'cancelling', 'unknown')
-         ) AND recovery_attached_at IS NULL",
-        [],
+         ) AND recovery_generation != ?1",
+        [generation],
         |row| row.get(0),
     )?;
     if unresolved != 0 {
@@ -1301,60 +1567,117 @@ pub fn append_provider_event(
     authority: &dyn ExecutionAuthority,
     now: i64,
 ) -> Result<EventAppendResult, PersistenceError> {
-    validate_text("external_event_id", external_event_id, 1024)?;
-    validate_text("event_type", event_type, 256)?;
-    validate_json_text(payload_json)?;
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let attempt = load_attempt_by_request(&tx, request_id)?
-        .ok_or_else(|| PersistenceError::NotFound(request_id.to_owned()))?;
-    authority
-        .verify_provider_event(
-            &tx,
-            &attempt,
+    append_provider_event_with_receipt(
+        connection,
+        ProviderEventReceiptContext {
+            request_id,
             external_event_id,
             event_type,
             payload_json,
+            receipt: None,
             now,
-        )
+        },
+        authority,
+    )
+}
+
+/// Record a provider event with its signed operation receipt. Production
+/// authorities validate the signature and exact attempt/event/response scope
+/// before the event enters the canonical task event stream.
+pub fn append_provider_event_with_receipt(
+    connection: &mut Connection,
+    event: ProviderEventReceiptContext<'_>,
+    authority: &dyn ExecutionAuthority,
+) -> Result<EventAppendResult, PersistenceError> {
+    validate_text("external_event_id", event.external_event_id, 1024)?;
+    validate_text("event_type", event.event_type, 256)?;
+    validate_json_text(event.payload_json)?;
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let attempt = load_attempt_by_request(&tx, event.request_id)?
+        .ok_or_else(|| PersistenceError::NotFound(event.request_id.to_owned()))?;
+    authority
+        .verify_provider_event_receipt(&tx, &attempt, &event)
         .map_err(PersistenceError::Authority)?;
-    let prior: Option<(String, String, i64)> = tx
+    let prior: Option<StoredProviderEventKey> = tx
         .query_row(
-            "SELECT event_type, payload_json, task_event_sequence FROM dread_provider_event_keys
-         WHERE provider_id = ?1 AND attempt_id = ?2 AND external_event_id = ?3",
-            params![attempt.provider_id, attempt.attempt_id, external_event_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            "SELECT event_type, payload_json, task_event_sequence, receipt_key_id,
+                    receipt_payload_json, receipt_signature_hex, receipt_response_sha256
+             FROM dread_provider_event_keys
+             WHERE provider_id = ?1 AND attempt_id = ?2 AND external_event_id = ?3",
+            params![
+                attempt.provider_id,
+                attempt.attempt_id,
+                event.external_event_id
+            ],
+            |row| {
+                Ok(StoredProviderEventKey {
+                    event_type: row.get(0)?,
+                    payload_json: row.get(1)?,
+                    task_event_sequence: row.get(2)?,
+                    receipt_key_id: row.get(3)?,
+                    receipt_payload_json: row.get(4)?,
+                    receipt_signature_hex: row.get(5)?,
+                    receipt_response_sha256: row.get(6)?,
+                })
+            },
         )
         .optional()?;
-    if let Some((prior_type, prior_payload, sequence)) = prior {
-        if prior_type != event_type || prior_payload != payload_json {
+    if let Some(prior) = prior {
+        let receipt_matches = match event.receipt {
+            Some(receipt) => {
+                prior.receipt_key_id.as_deref() == Some(receipt.key_id.as_str())
+                    && prior.receipt_payload_json.as_deref() == Some(receipt.payload_json.as_str())
+                    && prior.receipt_signature_hex.as_deref()
+                        == Some(receipt.signature_hex.as_str())
+                    && prior.receipt_response_sha256.as_deref()
+                        == Some(receipt.response_sha256.as_str())
+            }
+            None => {
+                prior.receipt_key_id.is_none()
+                    && prior.receipt_payload_json.is_none()
+                    && prior.receipt_signature_hex.is_none()
+                    && prior.receipt_response_sha256.is_none()
+            }
+        };
+        if prior.event_type != event.event_type
+            || prior.payload_json != event.payload_json
+            || !receipt_matches
+        {
             return Err(PersistenceError::Conflict(
-                "provider reused an event identity with different type or payload".into(),
+                "provider reused an event identity with different type, payload, or receipt".into(),
             ));
         }
         tx.commit()?;
-        return Ok(EventAppendResult::Duplicate { sequence });
+        return Ok(EventAppendResult::Duplicate {
+            sequence: prior.task_event_sequence,
+        });
     }
     let sequence = append_task_event(
         &tx,
         &attempt.task_id,
-        event_type,
-        payload_json,
+        event.event_type,
+        event.payload_json,
         "provider-adapter",
-        now,
+        event.now,
     )?;
     tx.execute(
         "INSERT INTO dread_provider_event_keys (
             provider_id, attempt_id, external_event_id, event_type, payload_json,
-            task_event_sequence, recorded_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            task_event_sequence, recorded_at, receipt_key_id, receipt_payload_json,
+            receipt_signature_hex, receipt_response_sha256
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             attempt.provider_id,
             attempt.attempt_id,
-            external_event_id,
-            event_type,
-            payload_json,
+            event.external_event_id,
+            event.event_type,
+            event.payload_json,
             sequence,
-            now
+            event.now,
+            event.receipt.map(|value| value.key_id.as_str()),
+            event.receipt.map(|value| value.payload_json.as_str()),
+            event.receipt.map(|value| value.signature_hex.as_str()),
+            event.receipt.map(|value| value.response_sha256.as_str())
         ],
     )?;
     tx.commit()?;
@@ -1605,6 +1928,61 @@ pub fn mark_reconciliation_required(
 
 /// Return all attempts that startup must inspect. Acknowledged/running provider
 /// work is included, not just requests that were never acknowledged.
+/// Read a previously authorized admission by its immutable request ID.
+/// This is used by recovery/reattachment code; callers cannot create or alter
+/// authorization facts through this accessor.
+pub fn admission_for_request(
+    connection: &Connection,
+    request_id: &str,
+) -> Result<AdmissionRecord, PersistenceError> {
+    validate_text("request_id", request_id, 160)?;
+    connection
+        .query_row(
+            "SELECT admission_id, request_id, task_id, mission_id, attempt_number,
+                    requester_id, provider_id, capability_id, operation, permission_scope,
+                    idempotency_key, evidence_id, policy_decision_id, adapter_id,
+                    adapter_version, provider_registration_revision, capability_revision,
+                    expires_at, consumed_at
+             FROM dread_dispatch_admissions WHERE request_id = ?1",
+            [request_id],
+            |row| {
+                Ok(AdmissionRecord {
+                    admission_id: row.get(0)?,
+                    request_id: row.get(1)?,
+                    task_id: row.get(2)?,
+                    mission_id: row.get(3)?,
+                    attempt_number: row.get(4)?,
+                    requester_id: row.get(5)?,
+                    provider_id: row.get(6)?,
+                    capability_id: row.get(7)?,
+                    operation: row.get(8)?,
+                    permission_scope: row.get(9)?,
+                    idempotency_key: row.get(10)?,
+                    evidence_id: row.get(11)?,
+                    policy_decision_id: row.get(12)?,
+                    adapter_id: row.get(13)?,
+                    adapter_version: row.get(14)?,
+                    provider_registration_revision: row.get(15)?,
+                    capability_revision: row.get(16)?,
+                    expires_at: row.get(17)?,
+                    consumed_at: row.get(18)?,
+                })
+            },
+        )
+        .optional()?
+        .ok_or_else(|| PersistenceError::NotFound(format!("admission for {request_id}")))
+}
+
+/// Read the durable attempt bound to a request. The returned record is
+/// observational only; it does not authorize dispatch or worker attachment.
+pub fn attempt_for_request(
+    connection: &Connection,
+    request_id: &str,
+) -> Result<Option<AttemptRecord>, PersistenceError> {
+    validate_text("request_id", request_id, 160)?;
+    load_attempt_by_request(connection, request_id)
+}
+
 pub fn unresolved_attempts(
     connection: &Connection,
 ) -> Result<Vec<AttemptRecord>, PersistenceError> {
@@ -2190,8 +2568,9 @@ pub fn record_cancellation_progress(
     };
     let expected_evidence = match next_state {
         "request_sent" => "cancel_request_sent",
-        "accepted" => "cancel_accepted",
+        "accepted" => "cancellation_accepted",
         "cancelling" => "cancellation_in_progress",
+        "unknown" => "cancellation_unknown",
         "confirmed_cancelled" => "cancelled",
         _ => {
             return Err(PersistenceError::Invalid(
@@ -2768,6 +3147,22 @@ fn ensure_mission_task_dispatchable(
         ));
     }
 
+    let unresolved_siblings: i64 = tx.query_row(
+        "SELECT COUNT(*)
+         FROM mission_tasks mt
+         JOIN dread_task_attempts attempt ON attempt.task_id = mt.task_id
+         WHERE mt.mission_id = ?1
+           AND mt.task_id != ?2
+           AND attempt.dispatch_state = 'reconciliation_required'",
+        params![mission_id, task_id],
+        |row| row.get(0),
+    )?;
+    if unresolved_siblings != 0 {
+        return Err(PersistenceError::Conflict(format!(
+            "mission {mission_id} has another task requiring provider reconciliation"
+        )));
+    }
+
     for dependency_node_id in dependencies {
         let dependency_status: Option<String> = tx
             .query_row(
@@ -3019,42 +3414,63 @@ fn persist_evidence(
         .query_row(
             "SELECT attempt_id, request_id, provider_id, adapter_id, adapter_version,
                 provider_registration_revision, provider_execution_id, evidence_kind,
-                verifier_id, source_reference, observed_at, expires_at
+                verifier_id, source_reference, observed_at, expires_at, receipt_key_id,
+                receipt_payload_json, receipt_signature_hex, receipt_response_sha256
          FROM dread_execution_evidence WHERE evidence_id = ?1",
             [&evidence.evidence_id],
             |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                    row.get(8)?,
-                    row.get(9)?,
-                    row.get(10)?,
-                    row.get(11)?,
-                ))
+                Ok(StoredProviderEvidence {
+                    attempt_id: row.get(0)?,
+                    request_id: row.get(1)?,
+                    provider_id: row.get(2)?,
+                    adapter_id: row.get(3)?,
+                    adapter_version: row.get(4)?,
+                    provider_registration_revision: row.get(5)?,
+                    provider_execution_id: row.get(6)?,
+                    evidence_kind: row.get(7)?,
+                    verifier_id: row.get(8)?,
+                    source_reference: row.get(9)?,
+                    observed_at: row.get(10)?,
+                    expires_at: row.get(11)?,
+                    receipt_key_id: row.get(12)?,
+                    receipt_payload_json: row.get(13)?,
+                    receipt_signature_hex: row.get(14)?,
+                    receipt_response_sha256: row.get(15)?,
+                })
             },
         )
         .optional()?;
     if let Some(existing) = existing {
-        let expected = (
-            attempt.attempt_id.clone(),
-            attempt.request_id.clone(),
-            evidence.provider_id.clone(),
-            evidence.adapter_id.clone(),
-            evidence.adapter_version.clone(),
-            evidence.provider_registration_revision,
-            evidence.provider_execution_id.clone(),
-            evidence.evidence_kind.clone(),
-            evidence.verifier_id.clone(),
-            evidence.source_reference.clone(),
-            evidence.observed_at,
-            evidence.expires_at,
-        );
+        let expected = StoredProviderEvidence {
+            attempt_id: attempt.attempt_id.clone(),
+            request_id: attempt.request_id.clone(),
+            provider_id: evidence.provider_id.clone(),
+            adapter_id: evidence.adapter_id.clone(),
+            adapter_version: evidence.adapter_version.clone(),
+            provider_registration_revision: evidence.provider_registration_revision,
+            provider_execution_id: evidence.provider_execution_id.clone(),
+            evidence_kind: evidence.evidence_kind.clone(),
+            verifier_id: evidence.verifier_id.clone(),
+            source_reference: evidence.source_reference.clone(),
+            observed_at: evidence.observed_at,
+            expires_at: evidence.expires_at,
+            receipt_key_id: evidence
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.key_id.clone()),
+            receipt_payload_json: evidence
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.payload_json.clone()),
+            receipt_signature_hex: evidence
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.signature_hex.clone()),
+            receipt_response_sha256: evidence
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.response_sha256.clone()),
+        };
         if existing == expected {
             return Ok(());
         }
@@ -3066,8 +3482,9 @@ fn persist_evidence(
         "INSERT INTO dread_execution_evidence(
             evidence_id, attempt_id, request_id, provider_id, adapter_id, adapter_version,
             provider_registration_revision, provider_execution_id, evidence_kind,
-            verifier_id, source_reference, observed_at, expires_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            verifier_id, source_reference, observed_at, expires_at, receipt_key_id,
+            receipt_payload_json, receipt_signature_hex, receipt_response_sha256
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             evidence.evidence_id,
             attempt.attempt_id,
@@ -3081,7 +3498,23 @@ fn persist_evidence(
             evidence.verifier_id,
             evidence.source_reference,
             evidence.observed_at,
-            evidence.expires_at
+            evidence.expires_at,
+            evidence
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.key_id.as_str()),
+            evidence
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.payload_json.as_str()),
+            evidence
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.signature_hex.as_str()),
+            evidence
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.response_sha256.as_str())
         ],
     )?;
     Ok(())
@@ -3333,7 +3766,31 @@ mod tests {
             source_reference: format!("provider://receipts/{evidence_id}"),
             observed_at,
             expires_at: None,
+            receipt: None,
         }
+    }
+
+    #[test]
+    fn canonical_schema_validation_requires_keys_foreign_keys_and_uniqueness() {
+        let db = canonical_db();
+        validate_canonical_schema(&db).unwrap();
+
+        db.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        assert!(validate_canonical_schema(&db).is_err());
+
+        let missing_unique = Connection::open_in_memory().unwrap();
+        missing_unique
+            .execute_batch("CREATE TABLE sample_events(task_id TEXT, sequence INTEGER);")
+            .unwrap();
+        assert!(
+            require_unique_index(&missing_unique, "sample_events", &["task_id", "sequence"])
+                .is_err()
+        );
+        assert!(require_primary_key(&missing_unique, "sample_events", &["task_id"]).is_err());
+        assert!(
+            require_foreign_key(&missing_unique, "sample_events", "tasks", "task_id", "id")
+                .is_err()
+        );
     }
 
     #[test]
@@ -3362,7 +3819,23 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(versions, 4);
+        assert_eq!(versions, 7);
+    }
+
+    #[test]
+    fn startup_recovery_generation_invalidates_previous_boot_attachment() {
+        let mut db = canonical_db();
+        install(&mut db, 10).unwrap();
+        assert!(release_startup_dispatch_barrier(&mut db, 11).unwrap());
+        assert!(startup_dispatch_barrier_is_open(&db).unwrap());
+
+        let first_generation = begin_startup_recovery(&mut db, 12).unwrap();
+        assert_eq!(first_generation, 2);
+        assert!(!startup_dispatch_barrier_is_open(&db).unwrap());
+
+        let second_generation = begin_startup_recovery(&mut db, 13).unwrap();
+        assert_eq!(second_generation, 3);
+        assert!(!startup_dispatch_barrier_is_open(&db).unwrap());
     }
 
     #[test]
@@ -3370,11 +3843,67 @@ mod tests {
         let mut db = canonical_db();
         install(&mut db, 10).unwrap();
         db.execute(
-            "INSERT INTO dread_execution_schema_migrations(version, applied_at) VALUES (5, 12)",
+            "INSERT INTO dread_execution_schema_migrations(version, applied_at) VALUES (8, 12)",
             [],
         )
         .unwrap();
         assert!(install(&mut db, 13).is_err());
+    }
+
+    #[test]
+    fn mission_cannot_resume_dispatch_while_sibling_requires_reconciliation() {
+        let mut db = canonical_db();
+        install(&mut db, 100).unwrap();
+        begin_startup_recovery(&mut db, 100).unwrap();
+        assert!(release_startup_dispatch_barrier(&mut db, 100).unwrap());
+
+        let first = dispatch_request("request-1", 1);
+        authorize_and_persist(&mut db, &first, &TestAuthority, 100).unwrap();
+        prepare_dispatch(&mut db, &first, &TestAuthority, 101).unwrap();
+        mark_reconciliation_required(
+            &mut db,
+            "request-1",
+            r#"{"reason":"provider outcome unknown"}"#,
+            102,
+        )
+        .unwrap();
+
+        db.execute(
+            "UPDATE missions SET status = 'queued' WHERE id = 'mission-1'",
+            [],
+        )
+        .unwrap();
+        db.execute_batch(
+            "INSERT INTO tasks(
+                id,title,task_type,capability_id,payload_json,status,approval_required,
+                created_at,updated_at,provider_event_cursor
+             ) VALUES('task-2','Second','agent_task','cap-1','{}','queued',1,1,1,0);
+             INSERT INTO mission_tasks(mission_id,node_id,task_id,depends_on_json)
+             VALUES('mission-1','node-2','task-2','[]');",
+        )
+        .unwrap();
+
+        let second = DispatchRequest {
+            request_id: "request-2".into(),
+            task_id: "task-2".into(),
+            requester_id: "operator-1".into(),
+            worker_id: "dread-worker-2".into(),
+            attempt_number: 1,
+            permission_scope: "workspace:mission-1".into(),
+        };
+        authorize_and_persist(&mut db, &second, &TestAuthority, 103).unwrap();
+        assert!(
+            prepare_dispatch(&mut db, &second, &TestAuthority, 104).is_err(),
+            "a sibling reconciliation hold must block mission dispatch"
+        );
+        let mission_status: String = db
+            .query_row(
+                "SELECT status FROM missions WHERE id = 'mission-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mission_status, "queued");
     }
 
     #[test]
@@ -3442,10 +3971,16 @@ mod tests {
 
         let request = dispatch_request("request-1", 1);
         authorize_and_persist(&mut db, &request, &authority, 100).unwrap();
+        let admission = admission_for_request(&db, "request-1").unwrap();
+        assert_eq!(admission.request_id, "request-1");
         let attempt = match prepare_dispatch(&mut db, &request, &authority, 101).unwrap() {
             DispatchPreparation::Created(attempt) => attempt,
             DispatchPreparation::Existing(_) => panic!("first preparation must create the attempt"),
         };
+        assert_eq!(
+            attempt_for_request(&db, "request-1").unwrap(),
+            Some(attempt.clone())
+        );
         assert_eq!(attempt.dispatch_state, "dispatching");
         assert_eq!(attempt.idempotency_key, "logical-key-1");
 
@@ -3563,6 +4098,94 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_acceptance_and_unknown_states_match_signed_adapter_receipts() {
+        let mut db = canonical_db();
+        let authority = TestAuthority;
+        install(&mut db, 100).unwrap();
+        assert!(release_startup_dispatch_barrier(&mut db, 100).unwrap());
+
+        let request = dispatch_request("request-cancel-evidence", 1);
+        authorize_and_persist(&mut db, &request, &authority, 100).unwrap();
+        prepare_dispatch(&mut db, &request, &authority, 101).unwrap();
+
+        let ack = provider_evidence(
+            "cancel-ack-1",
+            "acknowledged",
+            Some("remote-cancel-1"),
+            "provider-attestor",
+            102,
+        );
+        record_provider_ack(
+            &mut db,
+            "request-cancel-evidence",
+            "remote-cancel-1",
+            &ack,
+            &authority,
+            102,
+        )
+        .unwrap();
+
+        request_cancellation(&mut db, "request-cancel-evidence", 103).unwrap();
+        let accepted = provider_evidence(
+            "cancel-accepted-1",
+            "cancellation_accepted",
+            Some("remote-cancel-1"),
+            "provider-attestor",
+            104,
+        );
+        record_cancellation_progress(
+            &mut db,
+            "request-cancel-evidence",
+            "accepted",
+            &accepted,
+            &authority,
+            104,
+        )
+        .unwrap();
+        let state: String = db
+            .query_row(
+                "SELECT cancellation_state FROM dread_task_attempts WHERE request_id = ?1",
+                ["request-cancel-evidence"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "accepted");
+
+        let unknown = provider_evidence(
+            "cancel-unknown-1",
+            "cancellation_unknown",
+            Some("remote-cancel-1"),
+            "provider-attestor",
+            105,
+        );
+        record_cancellation_progress(
+            &mut db,
+            "request-cancel-evidence",
+            "unknown",
+            &unknown,
+            &authority,
+            105,
+        )
+        .unwrap();
+        let state: String = db
+            .query_row(
+                "SELECT cancellation_state FROM dread_task_attempts WHERE request_id = ?1",
+                ["request-cancel-evidence"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "unknown");
+        let task_status: String = db
+            .query_row(
+                "SELECT status FROM tasks WHERE id = ?1",
+                ["task-1"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(task_status, "cancelling");
+    }
+
+    #[test]
     fn active_status_evidence_can_recover_execution_id_without_ack_receipt() {
         let mut db = canonical_db();
         let authority = TestAuthority;
@@ -3603,6 +4226,45 @@ mod tests {
             )
             .unwrap();
         assert_eq!(task_provider_id.as_deref(), Some("remote-recovered"));
+    }
+
+    #[test]
+    fn startup_barrier_stays_closed_for_dispatch_with_lost_acknowledgement() {
+        let mut db = canonical_db();
+        let authority = TestAuthority;
+        install(&mut db, 100).unwrap();
+        assert!(release_startup_dispatch_barrier(&mut db, 100).unwrap());
+
+        let request = dispatch_request("request-lost-ack", 1);
+        authorize_and_persist(&mut db, &request, &authority, 100).unwrap();
+        let attempt = match prepare_dispatch(&mut db, &request, &authority, 101).unwrap() {
+            DispatchPreparation::Created(attempt) => attempt,
+            DispatchPreparation::Existing(_) => panic!("first preparation must create the attempt"),
+        };
+        assert_eq!(attempt.dispatch_state, "dispatching");
+        assert!(attempt.provider_execution_id.is_none());
+
+        // Crash after the durable local dispatch reservation but before the
+        // acknowledgement was persisted. The next boot must reconcile this
+        // exact request/idempotency identity; it cannot treat the missing
+        // provider ID as proof that no remote side effect occurred.
+        begin_startup_recovery(&mut db, 102).unwrap();
+
+        let unresolved = unresolved_attempts(&db).unwrap();
+        assert_eq!(unresolved.len(), 1);
+        assert_eq!(unresolved[0].request_id, "request-lost-ack");
+        assert!(unresolved[0].provider_execution_id.is_none());
+        assert!(
+            recovery_worker_attachment_candidates(&db)
+                .unwrap()
+                .is_empty()
+        );
+
+        // An unacknowledged dispatch is not attachable yet, and must keep the
+        // global dispatch barrier closed until provider reconciliation proves
+        // a safe outcome.
+        assert!(!release_startup_dispatch_barrier(&mut db, 103).unwrap());
+        assert!(!startup_dispatch_barrier_is_open(&db).unwrap());
     }
 
     #[test]

@@ -1,0 +1,46 @@
+# Example only. Do not enable before separate-user permissions and database ACLs are verified.
+[Unit]
+Description=PROJECT DREAD independent result verifier
+Documentation=https://github.com/dreaddo151-sys/koko
+After=local-fs.target
+ConditionPathIsExecutable=/usr/bin/dread-result-verifier
+
+[Service]
+Type=simple
+User=dread-verifier
+Group=dread-verifier
+SupplementaryGroups=dread-api-verifier
+EnvironmentFile=/etc/dread-result-verifier.env
+ExecStart=/usr/bin/dread-result-verifier run
+Restart=on-failure
+RestartSec=5
+UMask=0027
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX
+
+# Replace the database path with the actual canonical Phase 6 database parent.
+# Keep its SQLite database/WAL/SHM files read-only to this service account.
+ReadOnlyPaths=/path/to/canonical-phase6-database-parent
+ReadOnlyPaths=/var/lib/dread-verifier/config
+ReadWritePaths=/var/lib/dread-verifier/receipts
+
+[Install]
+WantedBy=multi-user.target

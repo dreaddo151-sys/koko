@@ -30,13 +30,14 @@ case "$ARCH" in
 esac
 
 API_BIN="$ROOT/target/release/dread-universal"
+VERIFIER_BIN="$ROOT/target/release/dread-result-verifier"
 WEB_ROOT="$ROOT/web/dist"
-if [[ ! -f "$API_BIN" || ! -s "$WEB_ROOT/index.html" ]]; then
-  printf 'Build prerequisites missing. Run cargo build --release --locked and npm run build first.\n' >&2
+if [[ ! -f "$API_BIN" || ! -f "$VERIFIER_BIN" || ! -s "$WEB_ROOT/index.html" ]]; then
+  printf 'Build prerequisites missing. Run cargo build --workspace --release --locked and npm run build first.\n' >&2
   exit 1
 fi
 # GitHub Actions artifact restore may not preserve executable mode; restore it explicitly.
-chmod 0755 "$API_BIN"
+chmod 0755 "$API_BIN" "$VERIFIER_BIN"
 
 OUT_DIR="${DREAD_RELEASE_DIR:-$ROOT/dist/release}"
 mkdir -p "$OUT_DIR"
@@ -46,15 +47,16 @@ trap 'rm -rf -- "$TMP"' EXIT
 BUNDLE="$TMP/bundle"
 mkdir -p "$BUNDLE/bin" "$BUNDLE/web/dist" "$BUNDLE/config" "$BUNDLE/scripts" "$BUNDLE/docs" "$BUNDLE/systemd"
 install -m 0755 "$API_BIN" "$BUNDLE/bin/dread-universal"
+install -m 0755 "$VERIFIER_BIN" "$BUNDLE/bin/dread-result-verifier"
 cp -a "$WEB_ROOT/." "$BUNDLE/web/dist/"
-install -m 0644 config/services.toml config/agents.toml "$BUNDLE/config/"
+install -m 0644 config/services.toml config/agents.toml config/independent-result-verifier.policy.example.json config/independent-result-verifier.env.example "$BUNDLE/config/"
 install -m 0644 .env.example "$BUNDLE/.env.example"
 install -m 0755 scripts/install-user.sh "$BUNDLE/install-user.sh"
 install -m 0644 scripts/dread_gpu_supervisor_bridge.py "$BUNDLE/scripts/"
 install -m 0755 scripts/capture-workstation-baseline.sh "$BUNDLE/scripts/"
 install -m 0755 scripts/verify-release.sh "$BUNDLE/scripts/"
 install -m 0755 scripts/dread_watchdog.py "$BUNDLE/scripts/"
-install -m 0644 systemd/dread-watchdog.service systemd/dread-watchdog.timer "$BUNDLE/systemd/"
+install -m 0644 systemd/dread-watchdog.service systemd/dread-watchdog.timer systemd/dread-result-verifier.service.example systemd/dread-result-verifier.tmpfiles.example "$BUNDLE/systemd/"
 install -m 0644 README.md "$BUNDLE/README.md"
 install -m 0644 docs/MASTER-PLAN.md docs/VERIFICATION.md docs/GPU_OWNERSHIP_BOUNDARY.md "$BUNDLE/docs/"
 
@@ -68,13 +70,14 @@ mkdir -p "$DEB/DEBIAN" "$DEB/usr/bin" "$DEB/usr/share/dread-universal/web/dist" 
   "$DEB/usr/share/dread-universal/config" "$DEB/usr/share/dread-universal/scripts" \
   "$DEB/usr/share/doc/dread-universal" "$DEB/usr/lib/systemd/user" "$DEB/usr/share/dread-universal/systemd"
 install -m 0755 "$API_BIN" "$DEB/usr/bin/dread-universal"
+install -m 0755 "$VERIFIER_BIN" "$DEB/usr/bin/dread-result-verifier"
 cp -a "$WEB_ROOT/." "$DEB/usr/share/dread-universal/web/dist/"
-install -m 0644 config/services.toml config/agents.toml "$DEB/usr/share/dread-universal/config/"
+install -m 0644 config/services.toml config/agents.toml config/independent-result-verifier.policy.example.json config/independent-result-verifier.env.example "$DEB/usr/share/dread-universal/config/"
 install -m 0644 scripts/dread_gpu_supervisor_bridge.py "$DEB/usr/share/dread-universal/scripts/"
 install -m 0755 scripts/capture-workstation-baseline.sh "$DEB/usr/share/dread-universal/scripts/"
 install -m 0755 scripts/verify-release.sh "$DEB/usr/share/dread-universal/scripts/"
 install -m 0755 scripts/dread_watchdog.py "$DEB/usr/share/dread-universal/scripts/"
-install -m 0644 systemd/dread-watchdog.service systemd/dread-watchdog.timer "$DEB/usr/share/dread-universal/systemd/"
+install -m 0644 systemd/dread-watchdog.service systemd/dread-watchdog.timer systemd/dread-result-verifier.service.example systemd/dread-result-verifier.tmpfiles.example "$DEB/usr/share/dread-universal/systemd/"
 install -m 0755 scripts/configure-user.sh "$DEB/usr/share/dread-universal/configure-user.sh"
 install -m 0644 systemd/dread-universal.service "$DEB/usr/lib/systemd/user/"
 install -m 0644 README.md "$DEB/usr/share/doc/dread-universal/"

@@ -1,3 +1,9 @@
+mod durable_agent;
+mod execution_authority;
+mod execution_policy;
+mod independent_verifier;
+mod secure_file;
+
 use axum::{
     Json, Router,
     body::Body,
@@ -14,9 +20,10 @@ use axum::{
     routing::get,
 };
 use dread_agents::{
-    AgentAdapter, AgentTaskState, CapabilityKind, CapabilityProvenance, CapabilityRecord,
-    CapabilityStatus, StartTaskRequest, deerflow::DeerFlowApiAdapter, hermes::HermesApiAdapter,
-    openhands::OpenHandsAgentServerAdapter,
+    AgentAdapter, AgentReceiptSigner, AgentTaskState, CapabilityKind, CapabilityProvenance,
+    CapabilityRecord, CapabilityStatus, StartTaskRequest, deerflow::DeerFlowApiAdapter,
+    hermes::HermesApiAdapter, openhands::OpenHandsAgentServerAdapter,
+    runtime_attestation::VerifiedRuntimeIsolationAttestation,
 };
 use dread_discovery::{
     discover, discover_agent_manifests, discover_agents, known_agent_endpoints, load_agents,
@@ -55,6 +62,7 @@ struct AppState {
     events: broadcast::Sender<TaskEvent>,
     execution: ExecutionGate,
     agent_adapters: Arc<HashMap<String, Arc<dyn AgentAdapter>>>,
+    execution_authority: Option<Arc<execution_authority::Phase6ExecutionAuthority>>,
     cancellations: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     api_token: Option<String>,
     operator_id: String,
@@ -71,19 +79,14 @@ struct AgentAdapterConfig {
 struct HermesAdapterConfig {
     endpoint: String,
     api_key: String,
-    terminal_backend: String,
-    isolated_workspace_per_task: bool,
-    sandbox_policy_verified: bool,
+    runtime_attestation: VerifiedRuntimeIsolationAttestation,
 }
 
 struct DeerFlowAdapterConfig {
     endpoint: String,
     api_prefix: String,
     pat: String,
-    provider_class: String,
-    isolated_workspace_per_task: bool,
-    sandbox_policy_verified: bool,
-    provisioner_url: Option<String>,
+    runtime_attestation: VerifiedRuntimeIsolationAttestation,
 }
 struct OpenHandsAdapterConfig {
     endpoint: String,
@@ -91,9 +94,123 @@ struct OpenHandsAdapterConfig {
     llm_model: String,
     llm_api_key: String,
     llm_base_url: String,
-    docker_runtime_enabled: bool,
-    secret_store_configured: bool,
-    sandbox_policy_verified: bool,
+    runtime_attestation: VerifiedRuntimeIsolationAttestation,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentReceiptSigningKeyFile {
+    key_id: String,
+    seed_hex: String,
+}
+
+fn normalize_hermes_runtime_endpoint(endpoint: &str) -> Result<String, String> {
+    let mut url = reqwest::Url::parse(endpoint)
+        .map_err(|error| format!("Hermes endpoint URL is invalid: {error}"))?;
+    let normalized_path = url.path().trim_end_matches('/').to_string();
+    url.set_path(&normalized_path);
+    Ok(url.as_str().trim_end_matches('/').to_string())
+}
+
+fn normalize_origin_runtime_endpoint(endpoint: &str) -> Result<String, String> {
+    let mut url = reqwest::Url::parse(endpoint)
+        .map_err(|error| format!("provider origin URL is invalid: {error}"))?;
+    if !url.path().trim_matches('/').is_empty() {
+        return Err(
+            "provider runtime attestation endpoint must use an origin without a path".into(),
+        );
+    }
+    url.set_path("");
+    Ok(url.as_str().trim_end_matches('/').to_string())
+}
+
+fn load_runtime_isolation_attestation(
+    environment_path_key: &str,
+    provider_id: &str,
+    adapter_id: &str,
+    adapter_version: &str,
+    endpoint: &str,
+) -> Result<VerifiedRuntimeIsolationAttestation, String> {
+    let path = env::var_os(environment_path_key)
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            format!("{environment_path_key} is required when configuring {provider_id}")
+        })?;
+    let opened = secure_file::read_regular_file_no_follow(&path, 64 * 1024, environment_path_key)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Runtime attestations may be readable by the API service, but must
+        // not be writable by another group/user or carry special mode bits.
+        if opened.metadata.permissions().mode() & 0o7022 != 0 {
+            return Err(format!(
+                "{environment_path_key} must not be group/world-writable or carry special permission bits"
+            ));
+        }
+    }
+
+    let key_id = env::var("DREAD_RUNTIME_ISOLATION_ATTESTATION_KEY_ID")
+        .map_err(|_| "DREAD_RUNTIME_ISOLATION_ATTESTATION_KEY_ID is required".to_string())?;
+    let public_key_hex =
+        env::var("DREAD_RUNTIME_ISOLATION_ATTESTATION_PUBLIC_KEY_HEX").map_err(|_| {
+            "DREAD_RUNTIME_ISOLATION_ATTESTATION_PUBLIC_KEY_HEX is required".to_string()
+        })?;
+    let encoded = opened.bytes;
+    VerifiedRuntimeIsolationAttestation::verify(
+        &encoded,
+        dread_agents::runtime_attestation::RuntimeAttestationTrustAnchor {
+            key_id: &key_id,
+            public_key_hex: &public_key_hex,
+        },
+        dread_agents::runtime_attestation::RuntimeAttestationAdapterBinding {
+            provider_id,
+            adapter_id,
+            adapter_version,
+            endpoint,
+        },
+        i64::try_from(now_epoch()).unwrap_or(i64::MAX),
+    )
+    .map_err(|error| format!("invalid runtime isolation attestation for {provider_id}: {error}"))
+}
+
+fn reject_legacy_isolation_booleans() -> Result<(), String> {
+    const LEGACY_FLAGS: &[&str] = &[
+        "DREAD_HERMES_ISOLATED_WORKSPACE_PER_TASK",
+        "DREAD_HERMES_SANDBOX_POLICY_VERIFIED",
+        "DREAD_DEERFLOW_ISOLATED_WORKSPACE_PER_TASK",
+        "DREAD_DEERFLOW_SANDBOX_POLICY_VERIFIED",
+        "DREAD_OPENHANDS_DOCKER_RUNTIME_ENABLED",
+        "DREAD_OPENHANDS_SECRET_STORE_CONFIGURED",
+        "DREAD_OPENHANDS_SANDBOX_POLICY_VERIFIED",
+    ];
+    if let Some(name) = LEGACY_FLAGS.iter().find(|name| env::var_os(name).is_some()) {
+        return Err(format!(
+            "{name} is an obsolete unsigned isolation flag; use a signed runtime attestation file"
+        ));
+    }
+    Ok(())
+}
+
+fn load_agent_receipt_signer(environment_key: &str) -> Result<Option<AgentReceiptSigner>, String> {
+    let Some(path) = env::var_os(environment_key) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(path);
+    let opened = secure_file::read_regular_file_no_follow(&path, 4096, environment_key)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if opened.metadata.permissions().mode() & 0o7777 != 0o600 {
+            return Err(format!(
+                "{environment_key} must have exact owner-only permissions (0600)"
+            ));
+        }
+    }
+    let key: AgentReceiptSigningKeyFile = serde_json::from_slice(&opened.bytes)
+        .map_err(|error| format!("invalid receipt key file for {environment_key}: {error}"))?;
+    AgentReceiptSigner::from_seed_hex(&key.key_id, &key.seed_hex)
+        .map(Some)
+        .map_err(|error| format!("invalid receipt key for {environment_key}: {error}"))
 }
 
 fn build_agent_adapters(
@@ -101,55 +218,40 @@ fn build_agent_adapters(
 ) -> Result<HashMap<String, Arc<dyn AgentAdapter>>, String> {
     let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
     if let Some(hermes) = config.hermes {
-        if !hermes.sandbox_policy_verified {
-            return Err("Hermes requires explicit sandbox policy verification for per-task isolation, network egress, mounts and forwarded secrets".into());
+        let mut adapter = HermesApiAdapter::new(&hermes.endpoint, hermes.api_key, "Hermes")
+            .map_err(|error| error.to_string())?;
+        if let Some(signer) = load_agent_receipt_signer("DREAD_HERMES_RECEIPT_SIGNING_KEY_FILE")? {
+            adapter = adapter.with_receipt_signer(signer);
         }
-        if !hermes.isolated_workspace_per_task {
-            return Err("Hermes requires explicit per-task workspace isolation attestation".into());
-        }
-        let adapter = HermesApiAdapter::new(&hermes.endpoint, hermes.api_key, "Hermes")
-            .map_err(|error| error.to_string())?
-            .attest_sandbox(&hermes.terminal_backend, true)
+        let adapter = adapter
+            .attest_runtime(hermes.runtime_attestation)
             .map_err(|error| error.to_string())?;
         adapters.insert("hermes".into(), Arc::new(adapter));
     }
     if let Some(deerflow) = config.deerflow {
-        if !deerflow.sandbox_policy_verified {
-            return Err("DeerFlow requires explicit sandbox policy verification for per-task isolation, network mode and mounts".into());
-        }
-        if !deerflow.isolated_workspace_per_task {
-            return Err(
-                "DeerFlow requires explicit per-task workspace isolation attestation".into(),
-            );
-        }
-        let adapter = DeerFlowApiAdapter::new(
+        let mut adapter = DeerFlowApiAdapter::new(
             &deerflow.endpoint,
             &deerflow.api_prefix,
             deerflow.pat,
             "DeerFlow",
         )
-        .map_err(|error| error.to_string())?
-        .attest_container_sandbox(
-            &deerflow.provider_class,
-            true,
-            deerflow.provisioner_url.as_deref(),
-        )
         .map_err(|error| error.to_string())?;
+        if let Some(signer) = load_agent_receipt_signer("DREAD_DEERFLOW_RECEIPT_SIGNING_KEY_FILE")?
+        {
+            adapter = adapter.with_receipt_signer(signer);
+        }
+        let adapter = adapter
+            .attest_runtime(deerflow.runtime_attestation)
+            .map_err(|error| error.to_string())?;
         adapters.insert("deerflow".into(), Arc::new(adapter));
     }
     if let Some(openhands) = config.openhands {
-        if !openhands.docker_runtime_enabled || !openhands.secret_store_configured {
-            return Err("OpenHands requires Docker execution runtime selection and stable OH_SECRET_KEY storage".into());
-        }
-        if !openhands.sandbox_policy_verified {
-            return Err("OpenHands requires explicit sandbox policy verification for per-conversation workspace, mounts, network egress and tool permissions".into());
-        }
         if openhands.llm_base_url != "http://host.docker.internal:11500/v1" {
             return Err(
                 "OpenHands LLM traffic must use DREAD's Docker-reachable local GPU gateway".into(),
             );
         }
-        let adapter = OpenHandsAgentServerAdapter::new(
+        let mut adapter = OpenHandsAgentServerAdapter::new(
             &openhands.endpoint,
             openhands.session_api_key,
             openhands.llm_model,
@@ -157,56 +259,80 @@ fn build_agent_adapters(
             openhands.llm_base_url,
             "OpenHands",
         )
-        .map_err(|error| error.to_string())?
-        .attest_docker_runtime(true, true)
         .map_err(|error| error.to_string())?;
+        if let Some(signer) = load_agent_receipt_signer("DREAD_OPENHANDS_RECEIPT_SIGNING_KEY_FILE")?
+        {
+            adapter = adapter.with_receipt_signer(signer);
+        }
+        let adapter = adapter
+            .attest_runtime(openhands.runtime_attestation)
+            .map_err(|error| error.to_string())?;
         adapters.insert("openhands".into(), Arc::new(adapter));
     }
     Ok(adapters)
 }
-
 fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn AgentAdapter>>> {
+    reject_legacy_isolation_booleans().map_err(anyhow::Error::msg)?;
     let mut config = AgentAdapterConfig::default();
+
     let hermes_keys = [
         "DREAD_HERMES_API_URL",
         "DREAD_HERMES_API_KEY",
-        "DREAD_HERMES_SANDBOX_BACKEND",
-        "DREAD_HERMES_ISOLATED_WORKSPACE_PER_TASK",
-        "DREAD_HERMES_SANDBOX_POLICY_VERIFIED",
+        "DREAD_HERMES_RUNTIME_ATTESTATION_FILE",
+        "DREAD_HERMES_RECEIPT_SIGNING_KEY_FILE",
     ];
     if hermes_keys.iter().any(|key| env::var_os(key).is_some()) {
+        let endpoint = env::var("DREAD_HERMES_API_URL")?;
+        let attestation_endpoint =
+            normalize_hermes_runtime_endpoint(&endpoint).map_err(anyhow::Error::msg)?;
+        let runtime_attestation = load_runtime_isolation_attestation(
+            "DREAD_HERMES_RUNTIME_ATTESTATION_FILE",
+            "hermes",
+            "hermes.api_server",
+            env!("CARGO_PKG_VERSION"),
+            &attestation_endpoint,
+        )
+        .map_err(anyhow::Error::msg)?;
         config.hermes = Some(HermesAdapterConfig {
-            endpoint: env::var("DREAD_HERMES_API_URL")?,
+            endpoint,
             api_key: env::var("DREAD_HERMES_API_KEY")?,
-            terminal_backend: env::var("DREAD_HERMES_SANDBOX_BACKEND")?,
-            isolated_workspace_per_task: env::var("DREAD_HERMES_ISOLATED_WORKSPACE_PER_TASK")
-                .is_ok_and(|value| value == "true"),
-            sandbox_policy_verified: env::var("DREAD_HERMES_SANDBOX_POLICY_VERIFIED")
-                .is_ok_and(|value| value == "true"),
+            runtime_attestation,
         });
     }
 
     let deerflow_keys = [
         "DREAD_DEERFLOW_API_URL",
         "DREAD_DEERFLOW_PAT",
-        "DREAD_DEERFLOW_SANDBOX_PROVIDER",
-        "DREAD_DEERFLOW_ISOLATED_WORKSPACE_PER_TASK",
-        "DREAD_DEERFLOW_SANDBOX_POLICY_VERIFIED",
         "DREAD_DEERFLOW_API_PREFIX",
-        "DREAD_DEERFLOW_PROVISIONER_URL",
+        "DREAD_DEERFLOW_RUNTIME_ATTESTATION_FILE",
+        "DREAD_DEERFLOW_RECEIPT_SIGNING_KEY_FILE",
     ];
     if deerflow_keys.iter().any(|key| env::var_os(key).is_some()) {
+        let endpoint = env::var("DREAD_DEERFLOW_API_URL")?;
+        let api_prefix =
+            env::var("DREAD_DEERFLOW_API_PREFIX").unwrap_or_else(|_| "/api/langgraph".into());
+        if !matches!(api_prefix.as_str(), "/api" | "/api/langgraph") {
+            return Err(anyhow::anyhow!(
+                "DREAD_DEERFLOW_API_PREFIX must be /api or /api/langgraph"
+            ));
+        }
+        let attestation_endpoint = format!(
+            "{}{api_prefix}",
+            normalize_origin_runtime_endpoint(&endpoint).map_err(anyhow::Error::msg)?
+        );
+        let runtime_attestation = load_runtime_isolation_attestation(
+            "DREAD_DEERFLOW_RUNTIME_ATTESTATION_FILE",
+            "deerflow",
+            "deerflow.gateway",
+            env!("CARGO_PKG_VERSION"),
+            &attestation_endpoint,
+        )
+        .map_err(anyhow::Error::msg)?;
         config.deerflow = Some(DeerFlowAdapterConfig {
-            endpoint: env::var("DREAD_DEERFLOW_API_URL")?,
-            api_prefix: env::var("DREAD_DEERFLOW_API_PREFIX")
-                .unwrap_or_else(|_| "/api/langgraph".into()),
+            endpoint,
+            api_prefix,
             pat: env::var("DREAD_DEERFLOW_PAT")?,
-            provider_class: env::var("DREAD_DEERFLOW_SANDBOX_PROVIDER")?,
-            isolated_workspace_per_task: env::var("DREAD_DEERFLOW_ISOLATED_WORKSPACE_PER_TASK")
-                .is_ok_and(|value| value == "true"),
-            sandbox_policy_verified: env::var("DREAD_DEERFLOW_SANDBOX_POLICY_VERIFIED")
-                .is_ok_and(|value| value == "true"),
-            provisioner_url: env::var("DREAD_DEERFLOW_PROVISIONER_URL").ok(),
+            runtime_attestation,
         });
     }
 
@@ -216,23 +342,28 @@ fn load_agent_adapters_from_env() -> anyhow::Result<HashMap<String, Arc<dyn Agen
         "DREAD_OPENHANDS_LLM_MODEL",
         "DREAD_OPENHANDS_LLM_API_KEY",
         "DREAD_OPENHANDS_LLM_BASE_URL",
-        "DREAD_OPENHANDS_DOCKER_RUNTIME_ENABLED",
-        "DREAD_OPENHANDS_SECRET_STORE_CONFIGURED",
-        "DREAD_OPENHANDS_SANDBOX_POLICY_VERIFIED",
+        "DREAD_OPENHANDS_RUNTIME_ATTESTATION_FILE",
+        "DREAD_OPENHANDS_RECEIPT_SIGNING_KEY_FILE",
     ];
     if openhands_keys.iter().any(|key| env::var_os(key).is_some()) {
+        let endpoint = env::var("DREAD_OPENHANDS_API_URL")?;
+        let attestation_endpoint =
+            normalize_origin_runtime_endpoint(&endpoint).map_err(anyhow::Error::msg)?;
+        let runtime_attestation = load_runtime_isolation_attestation(
+            "DREAD_OPENHANDS_RUNTIME_ATTESTATION_FILE",
+            "openhands",
+            "openhands",
+            env!("CARGO_PKG_VERSION"),
+            &attestation_endpoint,
+        )
+        .map_err(anyhow::Error::msg)?;
         config.openhands = Some(OpenHandsAdapterConfig {
-            endpoint: env::var("DREAD_OPENHANDS_API_URL")?,
+            endpoint,
             session_api_key: env::var("DREAD_OPENHANDS_SESSION_API_KEY")?,
             llm_model: env::var("DREAD_OPENHANDS_LLM_MODEL")?,
             llm_api_key: env::var("DREAD_OPENHANDS_LLM_API_KEY")?,
             llm_base_url: env::var("DREAD_OPENHANDS_LLM_BASE_URL")?,
-            docker_runtime_enabled: env::var("DREAD_OPENHANDS_DOCKER_RUNTIME_ENABLED")
-                .is_ok_and(|value| value == "true"),
-            secret_store_configured: env::var("DREAD_OPENHANDS_SECRET_STORE_CONFIGURED")
-                .is_ok_and(|value| value == "true"),
-            sandbox_policy_verified: env::var("DREAD_OPENHANDS_SANDBOX_POLICY_VERIFIED")
-                .is_ok_and(|value| value == "true"),
+            runtime_attestation,
         });
     }
 
@@ -485,7 +616,7 @@ fn open_database(path: &str) -> anyhow::Result<Connection> {
         fs::create_dir_all(parent)?;
     }
 
-    let conn = Connection::open(path)?;
+    let mut conn = Connection::open(path)?;
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA foreign_keys = ON;
@@ -594,6 +725,16 @@ fn open_database(path: &str) -> anyhow::Result<Connection> {
             ))?;
         }
     }
+    // Install the durable execution schema on the same canonical Phase 6
+    // connection used by the API. This is additive and validates the existing
+    // missions/tasks/events/results tables before applying its private migrations.
+    // The installer deliberately leaves the startup dispatch barrier closed;
+    // provider reconciliation must explicitly open it before durable dispatch.
+    dread_orchestrator::persistence::install(
+        &mut conn,
+        i64::try_from(now_epoch()).unwrap_or(i64::MAX),
+    )?;
+
     Ok(conn)
 }
 
@@ -1977,6 +2118,17 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
 /// The task's executor is selected by task_type, never by a caller-supplied capability
 /// attached to an unrelated built-in task. This helper is shared by mission validation
 /// and final queue admission to prevent policy drift.
+fn ensure_durable_agent_dispatch_ready(connection: &Connection) -> Result<(), ApiError> {
+    let ready = dread_orchestrator::persistence::startup_dispatch_barrier_is_open(connection)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if !ready {
+        return Err(ApiError::conflict(
+            "Agent dispatch remains blocked until current-boot reconciliation, worker reattachment, and signed provider activation requirements are satisfied",
+        ));
+    }
+    Ok(())
+}
+
 fn resolve_agent_provider(
     state: &AppState,
     conn: &Connection,
@@ -3283,6 +3435,32 @@ fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), 
         .map_err(|error| ApiError::internal(error.to_string()))?;
     }
 
+    // Planning and instantiation may validate an enabled adapter without
+    // granting execution. Dispatch additionally requires a signed provider
+    // registration and matching capability revision.
+    if let Some(provider) = agent_provider.as_deref() {
+        let capability_id = task
+            .capability_id
+            .as_deref()
+            .ok_or_else(|| ApiError::conflict("Agent task capability is missing"))?;
+        let authority = state.execution_authority.as_ref().ok_or_else(|| {
+            ApiError::conflict("Signed provider trust manifest is not configured")
+        })?;
+        authority
+            .validate_provider_capability(
+                &tx,
+                capability_id,
+                provider,
+                i64::try_from(now_epoch()).unwrap_or(i64::MAX),
+            )
+            .map_err(ApiError::conflict)?;
+        // Durable admission and attempt preparation run inside the provider
+        // worker after it acquires the shared ExecutionGate. This transaction-
+        // level guard rejects queueing until current-boot recovery, worker
+        // attachment and signed provider activation requirements are satisfied.
+        ensure_durable_agent_dispatch_ready(&tx)?;
+    }
+
     let runner_name = if let Some(provider) = agent_provider.as_deref() {
         provider
     } else {
@@ -3391,6 +3569,7 @@ async fn execute_agent_task(
 ) {
     let task_id = execution.task_id.clone();
     let worker_state = state.clone();
+    let durable_execution = state.execution_authority.is_some();
     let result = state
         .execution
         .run_managed_for_resources(
@@ -3398,7 +3577,17 @@ async fn execute_agent_task(
             task_id.clone(),
             cancellation,
             move |cancellation| async move {
-                execute_agent_task_inner(worker_state, adapter, execution, cancellation).await;
+                if durable_execution {
+                    durable_agent::execute_durable_agent_task_inner(
+                        worker_state,
+                        adapter,
+                        execution,
+                        cancellation,
+                    )
+                    .await;
+                } else {
+                    execute_agent_task_inner(worker_state, adapter, execution, cancellation).await;
+                }
                 Ok(())
             },
         )
@@ -4514,6 +4703,28 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     for (task_id, provider, provider_task_id) in cancelling_rows {
+        let has_durable_attempt: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM dread_task_attempts WHERE task_id = ?1)",
+            params![task_id],
+            |row| row.get(0),
+        )?;
+        if has_durable_attempt {
+            emitted.push(
+                append_task_event(
+                    &tx,
+                    &task_id,
+                    "task_cancellation_recovery_deferred_durable",
+                    &json!({
+                        "status": "cancelling",
+                        "reason": "Durable signed-evidence recovery owns this attempt; legacy cancellation is not replayed"
+                    }),
+                    "recovery",
+                    now,
+                )
+                .map_err(|error| anyhow::anyhow!(error.message))?,
+            );
+            continue;
+        }
         let Some(provider) = provider else {
             emitted.push(append_task_event(
                 &tx,
@@ -4602,74 +4813,25 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
     };
 
     for task in running_agents {
-        let provider = task.agent_provider.as_deref().unwrap_or_default();
-        let capability_enabled = if let Some(capability_id) = task.capability_id.as_deref() {
-            let encoded: Option<String> = tx
-                .query_row(
-                    "SELECT record_json FROM capabilities WHERE id = ?1",
-                    params![capability_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            encoded
-                .and_then(|value| serde_json::from_str::<CapabilityRecord>(&value).ok())
-                .is_some_and(|capability| {
-                    capability.status == CapabilityStatus::Enabled
-                        && capability.adapter.as_deref() == Some(provider)
-                })
-        } else {
-            false
-        };
-        let adapter_enabled = state
-            .agent_adapters
-            .get(provider)
-            .is_some_and(|adapter| adapter.descriptor().enabled);
-        if task.approval_required
-            && task.approved_by.is_some()
-            && capability_enabled
-            && adapter_enabled
-        {
-            tx.execute(
-                "UPDATE tasks SET status = 'queued', updated_at = ?2 WHERE id = ?1 AND status = 'running'",
-                params![task.id, now],
-            )?;
-            emitted.push(append_task_event(
+        // A provider-backed task may already have executed remotely. Keep it
+        // out of the legacy worker path; the durable reconciler below performs
+        // authenticated status lookup and reattachment without another start.
+        emitted.push(
+            append_task_event(
                 &tx,
                 &task.id,
-                "task_recovery_resumed",
-                &json!({"status": "queued", "provider": provider, "provider_event_cursor": task.provider_event_cursor}),
+                "task_recovery_deferred_durable_dispatch",
+                &json!({
+                    "status": "running",
+                    "provider": task.agent_provider,
+                    "provider_event_cursor": task.provider_event_cursor,
+                    "reason": "Durable startup reconciliation will use the persisted provider identity; no legacy start is replayed"
+                }),
                 "recovery",
                 now,
-            ).map_err(|error| anyhow::anyhow!(error.message))?);
-            resumable.push(task);
-        } else {
-            tx.execute(
-                "UPDATE tasks SET status = 'failed', updated_at = ?2 WHERE id = ?1 AND status = 'running'",
-                params![task.id, now],
-            )?;
-            tx.execute(
-                "UPDATE missions SET status = 'blocked'
-                 WHERE id IN (SELECT mission_id FROM mission_tasks WHERE task_id = ?1)",
-                params![task.id],
-            )?;
-            let reason = "Interrupted agent task cannot be resumed: provider, capability approval, or adapter configuration is no longer valid";
-            tx.execute(
-                "INSERT OR REPLACE INTO task_results (task_id, result_json, error, attempts, elapsed_ms, completed_at)
-                 VALUES (?1, NULL, ?2, 0, 0, ?3)",
-                params![task.id, reason, now],
-            )?;
-            emitted.push(
-                append_task_event(
-                    &tx,
-                    &task.id,
-                    "task_recovery_rejected",
-                    &json!({"status": "failed", "reason": reason}),
-                    "recovery",
-                    now,
-                )
-                .map_err(|error| anyhow::anyhow!(error.message))?,
-            );
-        }
+            )
+            .map_err(|error| anyhow::anyhow!(error.message))?,
+        );
     }
 
     let queued: Vec<QueuedTaskRecovery> = {
@@ -4694,54 +4856,35 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
     };
 
     for task in queued {
+        if task.agent_provider.is_some() {
+            // Queued provider work must wait for the same durable admission
+            // path as new work; startup recovery must not bypass the dispatch
+            // barrier by spawning the legacy provider worker.
+            emitted.push(
+                append_task_event(
+                    &tx,
+                    &task.id,
+                    "task_recovery_deferred_durable_dispatch",
+                    &json!({
+                        "status": "queued",
+                        "provider": task.agent_provider,
+                        "reason": "Durable admission and dispatch are not yet integrated"
+                    }),
+                    "recovery",
+                    now,
+                )
+                .map_err(|error| anyhow::anyhow!(error.message))?,
+            );
+            continue;
+        }
+
         let builtin_eligible = task.task_type == "service_discovery"
             && task.capability_id.is_none()
             && task.agent_provider.is_none()
             && task.approval_required
             && task.approved_by.is_some();
-        let agent_eligible = if let (Some(provider), Some(capability_id)) = (
-            task.agent_provider.as_deref(),
-            task.capability_id.as_deref(),
-        ) {
-            let encoded: Option<String> = tx
-                .query_row(
-                    "SELECT record_json FROM capabilities WHERE id = ?1",
-                    params![capability_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let capability_enabled = encoded
-                .and_then(|value| serde_json::from_str::<CapabilityRecord>(&value).ok())
-                .is_some_and(|capability| {
-                    capability.status == CapabilityStatus::Enabled
-                        && capability.adapter.as_deref() == Some(provider)
-                });
-            let adapter_enabled = state
-                .agent_adapters
-                .get(provider)
-                .is_some_and(|adapter| adapter.descriptor().enabled);
-            task.approval_required
-                && task.approved_by.is_some()
-                && capability_enabled
-                && adapter_enabled
-        } else {
-            false
-        };
 
-        if builtin_eligible || agent_eligible {
-            if task.agent_provider.is_some() {
-                emitted.push(
-                    append_task_event(
-                        &tx,
-                        &task.id,
-                        "task_recovery_resumed",
-                        &json!({"status": "queued", "provider": task.agent_provider}),
-                        "recovery",
-                        now,
-                    )
-                    .map_err(|error| anyhow::anyhow!(error.message))?,
-                );
-            }
+        if builtin_eligible {
             resumable.push(task);
             continue;
         }
@@ -4799,35 +4942,16 @@ fn recover_task_queue(state: &AppState) -> anyhow::Result<usize> {
             .lock()
             .map_err(|_| anyhow::anyhow!("Task cancellation registry is unavailable"))?
             .insert(task.id.clone(), cancel_sender);
-        if let Some(provider) = task.agent_provider {
-            let adapter = state
-                .agent_adapters
-                .get(&provider)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("Recovered provider adapter disappeared"))?;
-            tokio::spawn(execute_agent_task(
-                state.clone(),
-                adapter,
-                AgentTaskExecution {
-                    task_id: task.id,
-                    provider,
-                    capability_id: task.capability_id.unwrap_or_default(),
-                    payload: task.payload,
-                    initial_event_cursor: task.provider_event_cursor,
-                },
-                cancel_receiver,
-            ));
-        } else {
-            tokio::spawn(execute_approved_task(
-                state.clone(),
-                task.id,
-                task.task_type,
-                task.payload,
-                cancel_receiver,
-            ));
-        }
+        // Only built-in work enters this list. Provider-backed work is always
+        // deferred above until durable dispatch and recovery are integrated.
+        tokio::spawn(execute_approved_task(
+            state.clone(),
+            task.id,
+            task.task_type,
+            task.payload,
+            cancel_receiver,
+        ));
     }
-
     Ok(recovered_count)
 }
 
@@ -5361,6 +5485,7 @@ fn app(state: AppState) -> Router {
             get(discover_agent_manifest_inventory),
         )
         .route("/api/agent-adapters", get(agent_adapter_registry))
+        .route("/api/execution/trust", get(execution_trust_status))
         .route(
             "/api/capabilities",
             get(list_capabilities).post(create_capability),
@@ -5408,6 +5533,24 @@ fn app(state: AppState) -> Router {
         .merge(protected)
         .fallback(static_asset)
         .with_state(state)
+}
+
+async fn execution_trust_status(State(state): State<AppState>) -> Json<Value> {
+    let now = i64::try_from(now_epoch()).unwrap_or(i64::MAX);
+    match state.execution_authority.as_ref() {
+        Some(authority) => Json(authority.status(now)),
+        None => Json(json!({
+            "status": "not_configured",
+            "dispatch": "blocked",
+            "required_environment": [
+                "DREAD_EXECUTION_TRUST_MANIFEST",
+                "DREAD_EXECUTION_TRUST_PUBLIC_KEY_HEX",
+                "DREAD_EXECUTION_POLICY_MANIFEST",
+                "DREAD_EXECUTION_POLICY_PUBLIC_KEY_HEX"
+            ],
+            "independent_result_verification": "not_configured_fail_closed"
+        })),
+    }
 }
 
 fn validate_bind_address(addr: SocketAddr) -> anyhow::Result<()> {
@@ -5545,6 +5688,16 @@ async fn main() -> anyhow::Result<()> {
     }
     let db = open_database(&db_path)?;
     let agent_adapters = Arc::new(load_agent_adapters_from_env()?);
+    let execution_authority = execution_authority::load_from_env(
+        agent_adapters.clone(),
+        i64::try_from(now_epoch()).unwrap_or(i64::MAX),
+    )
+    .map_err(|error| anyhow::anyhow!("Invalid DREAD execution trust configuration: {error}"))?;
+    if execution_authority.is_none() {
+        warn!(
+            "Signed provider trust manifest is not configured; durable provider dispatch remains unavailable"
+        );
+    }
     let (events, _) = broadcast::channel(256);
     let (execution_config, resource_limits) = execution_settings_from_env()?;
     let state = AppState {
@@ -5555,6 +5708,7 @@ async fn main() -> anyhow::Result<()> {
         execution: ExecutionGate::new_with_resource_limits(execution_config, resource_limits)
             .map_err(|error| anyhow::anyhow!("Invalid execution configuration: {error:?}"))?,
         agent_adapters,
+        execution_authority,
         cancellations: Arc::new(Mutex::new(HashMap::new())),
         api_token,
         operator_id,
@@ -5562,11 +5716,47 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    let startup_now = i64::try_from(now_epoch()).unwrap_or(i64::MAX);
+    let startup_generation = {
+        let mut connection = state
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Database lock is unavailable during startup recovery"))?;
+        dread_orchestrator::persistence::begin_startup_recovery(&mut connection, startup_now)?
+    };
     let recovered_tasks = recover_task_queue(&state)?;
+    let recovered_durable_workers = durable_agent::recover_startup_durable_attempts(&state)
+        .await
+        .map_err(|error| anyhow::anyhow!("Durable provider startup recovery failed: {error}"))?;
+    let startup_dispatch_barrier_open = {
+        let connection = state.db.lock().map_err(|_| {
+            anyhow::anyhow!("Database lock is unavailable during dispatch gate evaluation")
+        })?;
+        dread_orchestrator::persistence::startup_dispatch_barrier_is_open(&connection)?
+    };
+    if !startup_dispatch_barrier_open {
+        warn!(
+            startup_generation,
+            recovered_durable_workers,
+            "Startup dispatch barrier remains closed: a current-boot recovery, signed policy, pinned receipt key, or independent verifier condition is not satisfied"
+        );
+    }
+    let resumed_durable_tasks = if startup_dispatch_barrier_open {
+        durable_agent::resume_queued_durable_agents(&state).map_err(|error| {
+            anyhow::anyhow!("Could not resume queued durable provider tasks: {error}")
+        })?
+    } else {
+        0
+    };
     info!(
         recovered_tasks,
-        "Recovered eligible queued tasks and resumed provider cancellation reconciliation; interrupted built-in tasks were marked failed"
+        recovered_durable_workers,
+        resumed_durable_tasks,
+        startup_generation,
+        startup_dispatch_barrier_open,
+        "Completed startup recovery gate evaluation"
     );
+    durable_agent::spawn_independent_verification_reconciler(state.clone());
     info!(address = %addr, database = %db_path, "PROJECT DREAD Universal API listening");
     axum::serve(listener, app(state))
         .with_graceful_shutdown(async {
@@ -5596,6 +5786,7 @@ mod tests {
     };
     #[cfg(test)]
     use futures::StreamExt;
+    use ring::signature::{Ed25519KeyPair, KeyPair};
     use serde_json::json;
     use tokio::net::TcpListener;
     use tower::ServiceExt;
@@ -5757,7 +5948,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approved_agent_mission_node_dispatches_through_registered_adapter() {
+    async fn approved_agent_mission_node_remains_blocked_until_startup_activation_is_verified() {
         let db = Arc::new(Mutex::new(open_database(":memory:").unwrap()));
         let now = now_epoch();
         let capability = CapabilityRecord {
@@ -5804,12 +5995,14 @@ mod tests {
         adapters.insert("hermes".into(), adapter.clone());
         let (events, _) = broadcast::channel(128);
         let state = AppState {
-            db,
+            db: Arc::clone(&db),
             gpu: GpuGatewayClient::new("http://127.0.0.1:1").unwrap(),
             supervisor: None,
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
             agent_adapters: Arc::new(adapters),
+
+            execution_authority: None,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             api_token: Some("test-token".into()),
             operator_id: "test-operator".into(),
@@ -5884,7 +6077,7 @@ mod tests {
             .unwrap();
         assert_eq!(approved.status(), StatusCode::OK);
 
-        let queued = router
+        let blocked = router
             .clone()
             .oneshot(
                 Request::builder()
@@ -5896,50 +6089,25 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(queued.status(), StatusCode::ACCEPTED);
+        assert_eq!(blocked.status(), StatusCode::CONFLICT);
 
-        let completed = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            loop {
-                let response = router
-                    .clone()
-                    .oneshot(
-                        Request::builder()
-                            .uri("/api/missions/agent-provider-mission")
-                            .header(AUTHORIZATION, "Bearer test-token")
-                            .body(Body::empty())
-                            .unwrap(),
-                    )
-                    .await
-                    .unwrap();
-                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-                let mission: Value = serde_json::from_slice(&body).unwrap();
-                if mission["item"]["status"] == "completed" {
-                    break mission;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("approved provider-backed mission node should complete");
-
-        assert_eq!(completed["item"]["tasks"][0]["status"], "completed");
-        assert_eq!(
-            completed["item"]["tasks"][0]["result"]["answer"],
-            "completed"
+        // The approved capability remains unqueued, and the legacy provider
+        // adapter must not be started until durable admission, attempts,
+        // reconciliation and worker reattachment are wired into this route.
+        assert!(
+            adapter.starts.lock().unwrap().is_empty(),
+            "provider must not start through the legacy path"
         );
-        {
-            let starts = adapter.starts.lock().unwrap();
-            assert_eq!(starts.len(), 1);
-            assert_eq!(starts[0].capability_id, "hermes.run");
-            assert_eq!(
-                starts[0].input,
-                json!({"objective": "Inspect the approved workspace"})
-            );
-            assert_eq!(
-                starts[0].idempotency_key,
-                format!("project-dread:{task_id}")
-            );
-        }
+        let persisted_status: String = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM tasks WHERE id = ?1",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(persisted_status, "approved");
 
         // An agent capability must never override a built-in task's runner.
         let mismatched = router
@@ -5997,7 +6165,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(denied.status(), StatusCode::CONFLICT);
-        assert_eq!(adapter.starts.lock().unwrap().len(), 1);
+        assert!(adapter.starts.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -6024,6 +6192,8 @@ mod tests {
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
             agent_adapters: Arc::new(adapters),
+
+            execution_authority: None,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             api_token: Some("test-token".into()),
             operator_id: "test-operator".into(),
@@ -6116,6 +6286,8 @@ mod tests {
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
             agent_adapters: Arc::new(adapters),
+
+            execution_authority: None,
             cancellations,
             api_token: Some("test-token".into()),
             operator_id: "test-operator".into(),
@@ -6267,7 +6439,12 @@ mod tests {
             "OpenHands confirmation test",
         )
         .unwrap()
-        .attest_docker_runtime(true, true)
+        .attest_runtime(test_runtime_attestation(
+            "openhands",
+            "openhands",
+            &format!("http://{address}"),
+            "docker",
+        ))
         .unwrap();
         let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
         adapters.insert("openhands".into(), Arc::new(adapter));
@@ -6315,6 +6492,8 @@ mod tests {
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
             agent_adapters: Arc::new(adapters),
+
+            execution_authority: None,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             api_token: Some("test-token".into()),
             operator_id: "test-operator".into(),
@@ -6533,6 +6712,8 @@ mod tests {
                 events,
                 execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
                 agent_adapters: Arc::new(HashMap::new()),
+
+                execution_authority: None,
                 cancellations: Arc::new(Mutex::new(HashMap::new())),
                 api_token,
                 operator_id: "test-operator".to_string(),
@@ -6575,33 +6756,145 @@ mod tests {
     }
 
     #[test]
-    fn agent_adapter_registry_requires_explicit_isolation_attestation() {
+    fn runtime_attestation_endpoint_normalizers_match_provider_descriptors() {
+        assert_eq!(
+            normalize_hermes_runtime_endpoint("http://127.0.0.1:8642/").unwrap(),
+            "http://127.0.0.1:8642"
+        );
+        assert_eq!(
+            normalize_hermes_runtime_endpoint("http://127.0.0.1:8642/api/").unwrap(),
+            "http://127.0.0.1:8642/api"
+        );
+
+        let deerflow_origin = normalize_origin_runtime_endpoint("http://127.0.0.1:2026/").unwrap();
+        assert_eq!(
+            format!("{deerflow_origin}/api"),
+            "http://127.0.0.1:2026/api"
+        );
+        assert_eq!(
+            format!("{deerflow_origin}/api/langgraph"),
+            "http://127.0.0.1:2026/api/langgraph"
+        );
+
+        assert_eq!(
+            normalize_origin_runtime_endpoint("http://127.0.0.1:8000").unwrap(),
+            "http://127.0.0.1:8000"
+        );
+        assert!(normalize_origin_runtime_endpoint("http://127.0.0.1:2026/nested").is_err());
+    }
+
+    fn test_runtime_attestation(
+        provider_id: &str,
+        adapter_id: &str,
+        endpoint: &str,
+        sandbox_backend: &str,
+    ) -> VerifiedRuntimeIsolationAttestation {
+        let key = Ed25519KeyPair::from_seed_unchecked(&[73_u8; 32]).unwrap();
+        let observed_at = i64::try_from(now_epoch()).unwrap();
+        let payload = dread_agents::runtime_attestation::RuntimeIsolationAttestationPayload {
+            schema_version: 1,
+            attestation_id: format!("runtime-isolation-{provider_id}-test"),
+            attestor_id: "dread-runtime-attestor-test".into(),
+            provider_id: provider_id.into(),
+            provider_registration_revision: 1,
+            adapter_id: adapter_id.into(),
+            adapter_version: env!("CARGO_PKG_VERSION").into(),
+            endpoint: endpoint.into(),
+            runtime_identity: format!("{provider_id}-runtime-test"),
+            sandbox_backend: sandbox_backend.into(),
+            source_observation_id: format!("runtime-observation-{provider_id}-test"),
+            evidence_bundle_sha256: "bc".repeat(32),
+            observed_at,
+            expires_at: observed_at + 180,
+            checks: dread_agents::runtime_attestation::RuntimeIsolationControl::ALL
+                .into_iter()
+                .map(
+                    |control| dread_agents::runtime_attestation::RuntimeIsolationCheck {
+                        control,
+                        verified: true,
+                        observation_id: format!("{}-{provider_id}-observation", control.as_str()),
+                        evidence_sha256: "de".repeat(32),
+                    },
+                )
+                .collect(),
+        };
+        let payload_bytes = serde_json::to_vec(&payload).unwrap();
+        let signature_hex = {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut output = String::with_capacity(128);
+            for byte in key.sign(&payload_bytes).as_ref() {
+                output.push(HEX[(byte >> 4) as usize] as char);
+                output.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+            output
+        };
+        let public_key_hex = {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut output = String::with_capacity(64);
+            for byte in key.public_key().as_ref() {
+                output.push(HEX[(byte >> 4) as usize] as char);
+                output.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+            output
+        };
+        let encoded = serde_json::to_vec(&json!({
+            "key_id": "runtime-attestor-test-key",
+            "payload": payload,
+            "signature_hex": signature_hex
+        }))
+        .unwrap();
+        VerifiedRuntimeIsolationAttestation::verify(
+            &encoded,
+            dread_agents::runtime_attestation::RuntimeAttestationTrustAnchor {
+                key_id: "runtime-attestor-test-key",
+                public_key_hex: &public_key_hex,
+            },
+            dread_agents::runtime_attestation::RuntimeAttestationAdapterBinding {
+                provider_id,
+                adapter_id,
+                adapter_version: env!("CARGO_PKG_VERSION"),
+                endpoint,
+            },
+            observed_at + 1,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn agent_adapter_registry_requires_signed_provider_runtime_attestation() {
         let empty = build_agent_adapters(AgentAdapterConfig::default()).unwrap();
         assert!(empty.is_empty());
 
+        let endpoint = "http://127.0.0.1:8642";
         let hermes = AgentAdapterConfig {
             hermes: Some(HermesAdapterConfig {
-                endpoint: "http://127.0.0.1:8642".into(),
+                endpoint: endpoint.into(),
                 api_key: "test-api-key".into(),
-                terminal_backend: "modal".into(),
-                sandbox_policy_verified: true,
-                isolated_workspace_per_task: false,
+                runtime_attestation: test_runtime_attestation(
+                    "hermes",
+                    "hermes.api_server",
+                    endpoint,
+                    "local",
+                ),
             }),
             deerflow: None,
             openhands: None,
         };
         assert!(build_agent_adapters(hermes).is_err());
 
+        let endpoint = "http://127.0.0.1:2026";
         let deerflow = AgentAdapterConfig {
             hermes: None,
             deerflow: Some(DeerFlowAdapterConfig {
-                endpoint: "http://127.0.0.1:2026".into(),
+                endpoint: endpoint.into(),
                 api_prefix: "/api/langgraph".into(),
                 pat: "dfp_test-token".into(),
-                provider_class: "AioSandboxProvider".into(),
-                sandbox_policy_verified: true,
-                isolated_workspace_per_task: true,
-                provisioner_url: Some("http://provisioner:8002".into()),
+                runtime_attestation: test_runtime_attestation(
+                    "deerflow",
+                    "deerflow.gateway",
+                    &format!("{endpoint}/api/langgraph"),
+                    "LocalSandboxProvider",
+                ),
             }),
             openhands: None,
         };
@@ -6609,43 +6902,52 @@ mod tests {
     }
 
     #[test]
-    fn agent_adapter_registry_only_exposes_explicitly_attested_providers() {
+    fn agent_adapter_registry_only_exposes_providers_with_signed_runtime_reports() {
+        let hermes_endpoint = "http://127.0.0.1:8642";
+        let deerflow_endpoint = "http://127.0.0.1:2026";
+        let openhands_endpoint = "http://127.0.0.1:8000";
         let config = AgentAdapterConfig {
             hermes: Some(HermesAdapterConfig {
-                endpoint: "http://127.0.0.1:8642".into(),
+                endpoint: hermes_endpoint.into(),
                 api_key: "test-api-key".into(),
-                terminal_backend: "modal".into(),
-                isolated_workspace_per_task: true,
-                sandbox_policy_verified: true,
+                runtime_attestation: test_runtime_attestation(
+                    "hermes",
+                    "hermes.api_server",
+                    hermes_endpoint,
+                    "modal",
+                ),
             }),
             deerflow: Some(DeerFlowAdapterConfig {
-                endpoint: "http://127.0.0.1:2026".into(),
+                endpoint: deerflow_endpoint.into(),
                 api_prefix: "/api/langgraph".into(),
                 pat: "dfp_test-token".into(),
-                provider_class: "deerflow.community.boxlite:BoxliteProvider".into(),
-                isolated_workspace_per_task: true,
-                sandbox_policy_verified: true,
-                provisioner_url: None,
+                runtime_attestation: test_runtime_attestation(
+                    "deerflow",
+                    "deerflow.gateway",
+                    &format!("{deerflow_endpoint}/api/langgraph"),
+                    "deerflow.community.boxlite:BoxliteProvider",
+                ),
             }),
             openhands: Some(OpenHandsAdapterConfig {
-                endpoint: "http://127.0.0.1:8000".into(),
+                endpoint: openhands_endpoint.into(),
                 session_api_key: "oh-session-test".into(),
                 llm_model: "llama.cpp/qwen-test".into(),
                 llm_api_key: "llm-test".into(),
                 llm_base_url: "http://host.docker.internal:11500/v1".into(),
-                docker_runtime_enabled: true,
-                secret_store_configured: true,
-                sandbox_policy_verified: true,
+                runtime_attestation: test_runtime_attestation(
+                    "openhands",
+                    "openhands",
+                    openhands_endpoint,
+                    "docker",
+                ),
             }),
         };
         let adapters = build_agent_adapters(config).unwrap();
         assert_eq!(adapters.len(), 3);
         assert!(adapters.contains_key("openhands"));
-        assert!(
-            adapters
-                .values()
-                .all(|adapter| adapter.descriptor().enabled)
-        );
+        assert!(adapters.values().all(|adapter| {
+            adapter.descriptor().enabled && adapter.runtime_isolation_attestation().is_some()
+        }));
     }
 
     #[tokio::test]
@@ -6832,7 +7134,16 @@ mod tests {
                 params![now],
             )
             .unwrap();
+            conn.execute(
+                "INSERT INTO tasks (id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, approval_reason, created_at, updated_at, agent_provider, provider_event_cursor)
+                 VALUES ('queued-agent-deferred', 'queued-agent-deferred', 'agent_task', 'hermes.capability', '{}', 'queued', 1, 'test-operator', 'approved in test', ?1, ?1, 'hermes', 0)",
+                params![now],
+            )
+            .unwrap();
         }
+        let adapter = Arc::new(MockAgentAdapter::new());
+        let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
+        adapters.insert("hermes".into(), adapter.clone());
         let (events, _) = broadcast::channel(256);
         let state = AppState {
             db,
@@ -6840,7 +7151,9 @@ mod tests {
             supervisor: None,
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
-            agent_adapters: Arc::new(HashMap::new()),
+            agent_adapters: Arc::new(adapters),
+
+            execution_authority: None,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             api_token: Some("test-token".to_string()),
             operator_id: "test-operator".to_string(),
@@ -6876,9 +7189,52 @@ mod tests {
             .unwrap();
         assert_eq!(status, "completed");
 
+        let running_agent_status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE id = 'running-agent-unavailable'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            running_agent_status, "running",
+            "provider-backed running work must remain unresolved until durable reconciliation"
+        );
+        let deferred_event_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_events WHERE task_id = 'running-agent-unavailable' AND event_type = 'task_recovery_deferred_durable_dispatch'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(deferred_event_count, 1);
+        assert!(
+            adapter.starts.lock().unwrap().is_empty(),
+            "startup recovery must never resubmit provider-backed work"
+        );
+
+        let queued_agent_status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE id = 'queued-agent-deferred'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            queued_agent_status, "queued",
+            "queued provider work must remain queued rather than enter the legacy worker"
+        );
+        let queued_deferred_event_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_events WHERE task_id = 'queued-agent-deferred' AND event_type = 'task_recovery_deferred_durable_dispatch'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued_deferred_event_count, 1);
+
         for id in [
             "running-interrupted",
-            "running-agent-unavailable",
             "queued-unsupported",
             "queued-gpu-chat",
             "queued-capability",
@@ -6929,6 +7285,8 @@ mod tests {
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
             agent_adapters: Arc::new(adapters),
+
+            execution_authority: None,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             api_token: Some("test-token".into()),
             operator_id: "test-operator".into(),
@@ -7451,6 +7809,8 @@ mod tests {
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
             agent_adapters: Arc::new(HashMap::new()),
+
+            execution_authority: None,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             api_token: Some("test-token".into()),
             operator_id: "test-operator".into(),
@@ -9310,6 +9670,8 @@ mod tests {
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
             agent_adapters: Arc::new(HashMap::new()),
+
+            execution_authority: None,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             api_token: Some("test-token".into()),
             operator_id: "test-operator".into(),
@@ -9336,6 +9698,182 @@ mod tests {
         assert_eq!(status, "completed");
         let event = receiver.try_recv().unwrap();
         assert_eq!(event.event_type, "task_succeeded");
+    }
+
+    #[tokio::test]
+    async fn durable_worker_does_not_start_provider_when_preparation_fails() {
+        let db = Arc::new(Mutex::new(open_database(":memory:").unwrap()));
+        let task_id = "durable-prestart-no-provider-call";
+        let now = now_epoch();
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO tasks (
+                    id, title, task_type, capability_id, payload_json, status,
+                    approval_required, approved_by, approval_reason, created_at, updated_at,
+                    agent_provider, provider_task_id
+                 ) VALUES (?1, 'Durable pre-start failure', 'agent_task', 'hermes.run', '{}',
+                           'queued', 1, 'test-operator', 'approved', ?2, ?2, 'hermes', NULL)",
+                params![task_id, now],
+            )
+            .unwrap();
+
+        let adapter = Arc::new(MockAgentAdapter::new());
+        let mut adapters: HashMap<String, Arc<dyn AgentAdapter>> = HashMap::new();
+        adapters.insert("hermes".into(), adapter.clone());
+        let (events, _) = broadcast::channel(8);
+        let state = AppState {
+            db: db.clone(),
+            gpu: GpuGatewayClient::new("http://127.0.0.1:1").unwrap(),
+            supervisor: None,
+            events,
+            execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
+            agent_adapters: Arc::new(adapters),
+            execution_authority: None,
+            cancellations: Arc::new(Mutex::new(HashMap::new())),
+            api_token: Some("test-token".into()),
+            operator_id: "test-operator".into(),
+            auth_required: true,
+        };
+        let (_cancel_sender, cancel_receiver) = watch::channel(false);
+
+        durable_agent::execute_durable_agent_task_inner(
+            state,
+            adapter.clone(),
+            AgentTaskExecution {
+                task_id: task_id.into(),
+                provider: "hermes".into(),
+                capability_id: "hermes.run".into(),
+                payload: json!({"objective": "must not run"}),
+                initial_event_cursor: 0,
+            },
+            cancel_receiver,
+        )
+        .await;
+
+        assert!(
+            adapter.starts.lock().unwrap().is_empty(),
+            "durable preparation failure must not reach provider start"
+        );
+        let connection = db.lock().unwrap();
+        let status: String = connection
+            .query_row("SELECT status FROM tasks WHERE id = ?1", [task_id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let error: String = connection
+            .query_row(
+                "SELECT error FROM task_results WHERE task_id = ?1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+        assert!(error.contains("failed before start"));
+    }
+
+    #[test]
+    fn legacy_agent_dispatch_is_blocked_while_durable_startup_barrier_is_closed() {
+        let connection = open_database(":memory:").unwrap();
+        let error = ensure_durable_agent_dispatch_ready(&connection).unwrap_err();
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert!(
+            error.message.contains("current-boot reconciliation")
+                && error.message.contains("signed provider activation"),
+            "unexpected fail-closed reason: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn api_database_installs_durable_execution_schema_on_canonical_tables() {
+        let connection = open_database(":memory:").unwrap();
+        let version: i64 = connection
+            .query_row(
+                "SELECT MAX(version) FROM dread_execution_schema_migrations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 7);
+        assert!(
+            !dread_orchestrator::persistence::startup_dispatch_barrier_is_open(&connection)
+                .unwrap(),
+            "dispatch must remain blocked until current-boot provider reconciliation and signed trust activation complete"
+        );
+        for table in [
+            "tasks",
+            "task_events",
+            "task_results",
+            "missions",
+            "mission_tasks",
+        ] {
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "canonical table {table} must remain present");
+        }
+    }
+
+    #[test]
+    fn durable_execution_startup_is_idempotent_and_preserves_existing_tasks() {
+        let path = std::env::temp_dir().join(format!("dread-api-reopen-{}.sqlite", Uuid::new_v4()));
+        let path_text = path.to_string_lossy().into_owned();
+
+        {
+            let connection = open_database(&path_text).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO tasks (
+                        id, title, task_type, payload_json, status, approval_required,
+                        created_at, updated_at
+                     ) VALUES ('preserved-task', 'Preserved task', 'agent_task', '{}', 'queued', 1, 10, 10)",
+                    [],
+                )
+                .unwrap();
+        }
+
+        {
+            let connection = open_database(&path_text).unwrap();
+            let task_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM tasks WHERE id = 'preserved-task'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let migration_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM dread_execution_schema_migrations",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let migration_version: i64 = connection
+                .query_row(
+                    "SELECT MAX(version) FROM dread_execution_schema_migrations",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+
+            assert_eq!(task_count, 1, "reopening must preserve canonical task rows");
+            assert_eq!(migration_count, 7, "reopening must not replay migrations");
+            assert_eq!(migration_version, 7);
+            assert!(
+                !dread_orchestrator::persistence::startup_dispatch_barrier_is_open(&connection)
+                    .unwrap(),
+                "reopening must never release the recovery barrier"
+            );
+        }
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(format!("{path_text}-wal"));
+        let _ = fs::remove_file(format!("{path_text}-shm"));
     }
 
     #[test]
