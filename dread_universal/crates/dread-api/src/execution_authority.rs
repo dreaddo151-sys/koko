@@ -13,7 +13,7 @@ use dread_orchestrator::persistence::{
     DispatchRequest, ExecutionAuthority, ProviderEvidence, VerificationFacts,
 };
 use ring::{digest, signature};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::HashMap, env, fs, path::Path, sync::Arc};
@@ -323,6 +323,7 @@ impl Phase6ExecutionAuthority {
         connection: &Connection,
         task_id: &str,
         requester_id: &str,
+        allow_active: bool,
     ) -> Result<(Option<String>, i64), String> {
         let (status, task_type, approved_by, capability_id): (
             String,
@@ -339,7 +340,7 @@ impl Phase6ExecutionAuthority {
             .optional()
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("task '{task_id}' does not exist"))?;
-        if status != "queued"
+        if !(status == "queued" || (allow_active && matches!(status.as_str(), "running" | "cancelling")))
             || task_type != "agent_task"
             || approved_by.as_deref() != Some(requester_id)
             || capability_id.is_none()
@@ -401,7 +402,7 @@ impl Phase6ExecutionAuthority {
             return Err("capability approval revision changed after admission".into());
         }
         let (mission_id, _) =
-            Self::approved_task(connection, &admission.task_id, &admission.requester_id)?;
+            Self::approved_task(connection, &admission.task_id, &admission.requester_id, true)?;
         if mission_id != admission.mission_id {
             return Err("canonical mission mapping changed after admission".into());
         }
@@ -468,10 +469,8 @@ impl ExecutionAuthority for Phase6ExecutionAuthority {
             .optional()
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "task not found".to_string())?;
-        let capability_revision =
-            Self::capability_revision(connection, &capability_id, "")?;
         let (mission_id, approval_sequence) =
-            Self::approved_task(connection, &request.task_id, &request.requester_id)?;
+            Self::approved_task(connection, &request.task_id, &request.requester_id, false)?;
 
         let capability_json: String = connection
             .query_row(
