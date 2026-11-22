@@ -404,7 +404,94 @@ pub trait ExecutionAuthority: Send + Sync {
 
 /// Validate that we are attached to the Phase 6 schema. The adapter does not
 /// create or rename any canonical task/mission tables.
-pub fn validate_canonical_schema(connection: &Connection) -> Result<(), PersistenceError> {
+pub fn require_primary_key(
+    connection: &Connection,
+    table: &str,
+    expected: &[&str],
+) -> Result<(), PersistenceError> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut keys = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(5)?, row.get::<_, String>(1)?))
+        })?
+        .filter_map(|row| match row {
+            Ok((position, name)) if position > 0 => Some(Ok((position, name))),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    keys.sort_by_key(|(position, _)| *position);
+    let actual = keys.into_iter().map(|(_, name)| name).collect::<Vec<_>>();
+    if actual.iter().map(String::as_str).collect::<Vec<_>>() != expected {
+        return Err(PersistenceError::Invalid(format!(
+            "canonical table {table} primary key does not match expected columns {expected:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn require_foreign_key(
+    connection: &Connection,
+    table: &str,
+    expected_table: &str,
+    expected_from: &str,
+    expected_to: &str,
+) -> Result<(), PersistenceError> {
+    let mut statement = connection.prepare(&format!("PRAGMA foreign_key_list({table})"))?;
+    let found = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .any(|(target, from, to)| {
+            target == expected_table && from == expected_from && to == expected_to
+        });
+    if !found {
+        return Err(PersistenceError::Invalid(format!(
+            "canonical table {table} is missing foreign key {expected_from} -> {expected_table}.{expected_to}"
+        )));
+    }
+    Ok(())
+}
+
+fn require_unique_index(
+    connection: &Connection,
+    table: &str,
+    expected: &[&str],
+) -> Result<(), PersistenceError> {
+    let mut statement = connection.prepare(&format!("PRAGMA index_list({table})"))?;
+    let indexes = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)? != 0))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (index, unique) in indexes {
+        if !unique {
+            continue;
+        }
+        let escaped = index.replace('\'', "''");
+        let mut info = connection.prepare(&format!("PRAGMA index_info('{escaped}')"))?;
+        let columns = info
+            .query_map([], |row| row.get::<_, Option<String>>(2))?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        if columns.iter().map(String::as_str).collect::<Vec<_>>() == expected {
+            return Ok(());
+        }
+    }
+    Err(PersistenceError::Invalid(format!(
+        "canonical table {table} is missing unique index on {expected:?}"
+    )))
+}
+
+fn validate_canonical_schema(connection: &Connection) -> Result<(), PersistenceError> {
     require_columns(
         connection,
         "tasks",
@@ -466,6 +553,25 @@ pub fn validate_canonical_schema(connection: &Connection) -> Result<(), Persiste
         "mission_tasks",
         &["mission_id", "node_id", "task_id", "depends_on_json"],
     )?;
+
+    let foreign_keys_enabled: i64 =
+        connection.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
+    if foreign_keys_enabled != 1 {
+        return Err(PersistenceError::Invalid(
+            "canonical SQLite connection must enable foreign-key enforcement".into(),
+        ));
+    }
+    require_primary_key(connection, "tasks", &["id"])?;
+    require_primary_key(connection, "task_events", &["id"])?;
+    require_primary_key(connection, "task_results", &["task_id"])?;
+    require_primary_key(connection, "missions", &["id"])?;
+    require_primary_key(connection, "mission_tasks", &["mission_id", "node_id"])?;
+    require_foreign_key(connection, "task_events", "tasks", "task_id", "id")?;
+    require_foreign_key(connection, "task_results", "tasks", "task_id", "id")?;
+    require_foreign_key(connection, "mission_tasks", "missions", "mission_id", "id")?;
+    require_foreign_key(connection, "mission_tasks", "tasks", "task_id", "id")?;
+    require_unique_index(connection, "task_events", &["task_id", "sequence"])?;
+    require_unique_index(connection, "mission_tasks", &["task_id"])?;
     Ok(())
 }
 
@@ -3646,6 +3752,21 @@ mod tests {
             expires_at: None,
             receipt: None,
         }
+    }
+
+    #[test]
+    fn canonical_schema_validation_requires_keys_foreign_keys_and_uniqueness() {
+        let db = canonical_db();
+        validate_canonical_schema(&db).unwrap();
+
+        db.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        assert!(validate_canonical_schema(&db).is_err());
+
+        let missing_unique = Connection::open_in_memory().unwrap();
+        missing_unique
+            .execute_batch("CREATE TABLE sample_events(task_id TEXT, sequence INTEGER);")
+            .unwrap();
+        assert!(require_unique_index(&missing_unique, "sample_events", &["task_id", "sequence"]).is_err());
     }
 
     #[test]
