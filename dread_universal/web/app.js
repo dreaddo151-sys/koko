@@ -48,12 +48,18 @@ async function refreshAll() {
   catch (e) { document.getElementById("gpu-list").innerHTML = `<div class="item">${esc(e.message.split(" ")[0])} — telemetry unavailable</div>`; }
 
   try {
-    const [tasks, registry, services, usage, providers, skills] = await Promise.all([
+    const [tasks, registry, services, usage, providers, skills, comfy] = await Promise.all([
       api("/api/tasks"), api("/api/registry"), api("/api/services"),
       api("/api/usage/tokens").catch(() => null),
       api("/api/providers").catch(() => null),
       api("/api/skills").catch(() => null),
+      api("/api/media/comfyui/instances").catch(() => null),
     ]);
+    document.getElementById("comfy-list").innerHTML = comfy
+      ? `ComfyUI (${esc(comfy.count ?? 0)}): ` +
+        items(comfy.instances).map((c) =>
+          `<span class="item-inline" title="nodes=${esc(String(c.node_type_count ?? "?"))} ckpts=${items(c.checkpoints).length} ${esc(String(c.probe_latency_ms ?? "?"))}ms">${esc(c.name)} @ ${esc(c.base_url)}</span>`).join(" ") || "none discovered"
+      : "";
     document.getElementById("skill-list").innerHTML = skills
       ? `Skills (${esc(skills.count ?? items(skills.skills).length)}): ` +
         items(skills.skills).slice(0, 16).map((s) =>
@@ -115,6 +121,8 @@ document.getElementById("btn-models-autoconfig").addEventListener("click",
   (ev) => hubAction(ev.target, () => api("/api/models/autoconfigure", { method: "POST" })));
 document.getElementById("btn-skills-sync").addEventListener("click",
   (ev) => hubAction(ev.target, () => api("/api/skills/sync", { method: "POST" })));
+document.getElementById("btn-comfy-scan").addEventListener("click",
+  (ev) => hubAction(ev.target, () => api("/api/media/comfyui/scan", { method: "POST" })));
 
 document.getElementById("task-form").addEventListener("submit", async (e) => {
   e.preventDefault();

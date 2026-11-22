@@ -4,6 +4,7 @@
 //! acquires GPU leases. Workflow execution belongs behind reviewed manifests
 //! and the Python GPU Supervisor's single-owner resource boundary.
 
+pub mod comfyui_discovery;
 pub mod workflows;
 pub use workflows::{WorkflowDescriptor, WorkflowInventory, discover_local_workflows};
 

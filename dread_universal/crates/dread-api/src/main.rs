@@ -5571,6 +5571,100 @@ async fn skills_sync(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
     Ok(Json(report))
 }
 
+/// Registry kind for ComfyUI instances found by active port probing.
+const COMFY_KIND: &str = "comfyui.instance";
+
+/// Candidate ComfyUI base URLs. Loopback-only by default (RFC safety rule:
+/// LAN scanning stays opt-in); override with DREAD_COMFY_CANDIDATES.
+fn comfy_candidates() -> Vec<String> {
+    if let Some(raw) = env::var_os("DREAD_COMFY_CANDIDATES") {
+        let list: Vec<String> = env::split_paths(&raw)
+            .map(|p| p.to_string_lossy().trim().to_string())
+            .filter(|s| !s.is_empty())
+            .take(64)
+            .collect();
+        if !list.is_empty() {
+            return list;
+        }
+    }
+    (8188..=8198)
+        .map(|port| format!("http://127.0.0.1:{port}"))
+        .collect()
+}
+
+async fn comfyui_scan(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let candidates = comfy_candidates();
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .build()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let facts = dread_media::comfyui_discovery::discover_endpoints(&client, &candidates).await;
+    let conn = db_lock(&state)?;
+    let now = i64::try_from(now_epoch()).unwrap_or(i64::MAX);
+    let mut instances = Vec::new();
+    for fact in &facts {
+        let mut metadata =
+            serde_json::to_value(fact).map_err(|e| ApiError::internal(e.to_string()))?;
+        metadata["scanned_at"] = json!(now);
+        conn.execute(
+            "INSERT INTO registry (id, name, kind, endpoint, metadata, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO UPDATE SET name=excluded.name, endpoint=excluded.endpoint, metadata=excluded.metadata",
+            rusqlite::params![
+                fact.identity,
+                format!("ComfyUI {}", fact.comfyui_version),
+                COMFY_KIND,
+                fact.base_url,
+                metadata.to_string(),
+                now
+            ],
+        )
+        .map_err(|error| ApiError::internal(format!("could not register ComfyUI instance: {error}")))?;
+        instances.push(metadata);
+    }
+    // Never prune: a ComfyUI that is briefly down keeps its registration
+    // (invariant learned from the B5 hostile review, applied from day one).
+    Ok(Json(json!({
+        "instances": instances,
+        "count": instances.len(),
+        "candidates": candidates.len(),
+    })))
+}
+
+async fn comfyui_instances(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let conn = db_lock(&state)?;
+    let mut stmt = conn
+        .prepare("SELECT id, name, endpoint, metadata FROM registry WHERE kind = ?1 ORDER BY name")
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let rows = stmt
+        .query_map(rusqlite::params![COMFY_KIND], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let mut instances = Vec::new();
+    for row in rows {
+        let (id, name, endpoint, metadata) = row.map_err(|e| ApiError::internal(e.to_string()))?;
+        let meta: Value = serde_json::from_str(&metadata).unwrap_or(Value::Null);
+        instances.push(json!({
+            "id": id,
+            "name": name,
+            "base_url": endpoint,
+            "comfyui_version": meta.get("comfyui_version").cloned().unwrap_or(Value::Null),
+            "devices": meta.get("devices").cloned().unwrap_or(json!([])),
+            "node_type_count": meta.get("node_type_count").cloned().unwrap_or(Value::Null),
+            "checkpoints": meta.get("checkpoints").cloned().unwrap_or(json!([])),
+            "probe_latency_ms": meta.get("probe_latency_ms").cloned().unwrap_or(Value::Null),
+            "scanned_at": meta.get("scanned_at").cloned().unwrap_or(Value::Null),
+        }));
+    }
+    Ok(Json(
+        json!({ "instances": instances, "count": instances.len() }),
+    ))
+}
+
 async fn probe_provider(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -5698,6 +5792,8 @@ fn app(state: AppState) -> Router {
         .route("/api/skills/sync", axum::routing::post(skills_sync))
         .route("/api/repair/plan", get(repair_plan))
         .route("/api/media/comfyui/monitor", get(comfyui_monitor))
+        .route("/api/media/comfyui/scan", axum::routing::post(comfyui_scan))
+        .route("/api/media/comfyui/instances", get(comfyui_instances))
         .route("/api/media/workflows/discover", get(workflow_discovery))
         .route("/api/extensions/discover", get(extension_discovery))
         .route("/api/missions", get(list_missions).post(create_mission))
