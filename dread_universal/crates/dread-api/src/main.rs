@@ -5780,7 +5780,7 @@ mod tests {
             supervisor: None,
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
-            agent_adapters: __MATCH__,
+            agent_adapters: Arc::new(adapters),
 
             execution_authority: None,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
@@ -5971,7 +5971,7 @@ mod tests {
             supervisor: None,
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
-            agent_adapters: __MATCH__,
+            agent_adapters: Arc::new(adapters),
 
             execution_authority: None,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
@@ -6065,7 +6065,7 @@ mod tests {
             supervisor: None,
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
-            agent_adapters: __MATCH__,
+            agent_adapters: Arc::new(adapters),
 
             execution_authority: None,
             cancellations,
@@ -6266,7 +6266,7 @@ mod tests {
             supervisor: None,
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
-            agent_adapters: __MATCH__,
+            agent_adapters: Arc::new(adapters),
 
             execution_authority: None,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
@@ -6486,7 +6486,7 @@ mod tests {
                 ),
                 events,
                 execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
-                agent_adapters: __MATCH__,
+                agent_adapters: Arc::new(HashMap::new()),
 
                 execution_authority: None,
                 cancellations: Arc::new(Mutex::new(HashMap::new())),
@@ -6805,7 +6805,7 @@ mod tests {
             supervisor: None,
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
-            agent_adapters: __MATCH__,
+            agent_adapters: Arc::new(adapters),
 
             execution_authority: None,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
@@ -6938,7 +6938,7 @@ mod tests {
             supervisor: None,
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
-            agent_adapters: __MATCH__,
+            agent_adapters: Arc::new(adapters),
 
             execution_authority: None,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
@@ -7462,7 +7462,7 @@ mod tests {
             supervisor: None,
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
-            agent_adapters: __MATCH__,
+            agent_adapters: Arc::new(HashMap::new()),
 
             execution_authority: None,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
@@ -9323,7 +9323,7 @@ mod tests {
             supervisor: None,
             events,
             execution: ExecutionGate::new(ExecutionConfig::default()).unwrap(),
-            agent_adapters: __MATCH__,
+            agent_adapters: Arc::new(HashMap::new()),
 
             execution_authority: None,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
