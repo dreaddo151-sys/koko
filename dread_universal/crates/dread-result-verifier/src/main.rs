@@ -1372,7 +1372,7 @@ mod tests {
     #[test]
     fn verifier_identity_must_differ_from_all_execution_actors() {
         let mut attempt = pending(Some(r#"{"result":"ok"}"#), None);
-        attempt.provider_verifier_id = "worker-1".into();
+        attempt.worker_id = "dread-independent-result-verifier".into();
         assert!(
             build_result_receipt(
                 &attempt,
