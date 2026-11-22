@@ -444,3 +444,44 @@ The test output includes the direct `durable_worker_does_not_start_provider_when
 ### Unchanged deployment and safety boundary
 
 This is repository-level source and CI verification only. No provider start was sent during these tests; no real provider, independent verifier service, runtime attestor, API shared-group/receipt ACL or canonical database/WAL/SHM permissions were deployed on the workstation. Live provider crash/race handling, separate-UID receipt read/write denial, real capability semantic evidence, physical Ubuntu install/reboot, and actual dual-GPU/ComfyUI contention acceptance remain outstanding. Dispatch remains fail-closed until those gates pass. PR #16 remains draft and unmerged.
+
+## 15. Standalone independent result verifier and current integrated head — 2026-11-22
+
+### Standalone producer implementation
+
+Added `crates/dread-result-verifier` as a separate workspace binary. It does not run inside the API process.
+
+- Opens only the canonical Phase 6 SQLite database with `SQLITE_OPEN_READ_ONLY`, `PRAGMA query_only=ON`, and `trusted_schema=OFF`; checks schema version 7 or newer and validates the expected attempt/admission/evidence schema.
+- Reads canonical `provider_succeeded` attempts only, joining the canonical requester and latest signed adapter-success attestor identity. It never writes to task, attempt, evidence, or migration tables.
+- Evaluates explicit per-capability rules with bounded result bytes, object shape, required and forbidden JSON Pointers and common failure markers. Unknown capability, provider error, missing/invalid result, oversized result, missing required paths or forbidden paths produce a signed negative decision.
+- Hashes the exact persisted result/error bytes and signs API-compatible result receipts and a short-lived heartbeat using a verifier-owned Ed25519 PKCS#8 key. Key generation refuses to overwrite an existing file.
+- Uses a single-instance lock, bounded policy/key/result input sizes, non-symlink path checks, atomic receipt publication and output identity/mode validation.
+- The producer makes structural JSON decisions only. It does not execute agent code, prove external side effects or semantically certify arbitrary prose. Capability owners must replace the example policy's placeholder JSON Pointers with real result schemas and add domain-specific evidence rules before enabling a capability.
+
+### Two-identity receipt boundary
+
+The producer and API agree on a separate Unix identity contract:
+
+- The receipt directory is owned by the verifier UID/shared API group, exact mode `2750` (setgid; verifier can write, shared group can read/traverse, others have no access).
+- Each heartbeat/result file is verifier-owned, exact mode `0640` (verifier read/write; API shared group read-only; others have no access).
+- API configuration requires `DREAD_INDEPENDENT_RESULT_VERIFIER_RECEIPT_UID` and `DREAD_INDEPENDENT_RESULT_VERIFIER_RECEIPT_GID`, and the API validates owner, group and mode before reading receipts.
+- The producer key and policy are verifier-owned mode `0600`. The API receives only the pinned verifier public key, identity and receipt location; it never receives the private key or policy.
+
+### Portable and Debian delivery
+
+Both packages include the `dread-result-verifier` executable and the example capability policy, environment file, hardened systemd service and tmpfiles rules. Portable installer preflight and upgrade tests validate that those files survive installation and upgrade.
+
+The installer deliberately does not create Unix users/groups, change API group membership, create verifier receipts, install the system service, or enable/start it. The systemd/env/tmpfiles files are manual operator templates with placeholder DB paths. The operator must verify actual DB/WAL/SHM traversal/read permissions, verifier write-only receipt ownership and API group read-only access before enabling the service.
+
+### Exact-head CI evidence
+
+- **Producer/package milestone:** run [#1757](https://github.com/dreaddo151-sys/koko/actions/runs/45038700204) passed all three jobs on source head `e390cc688bbf59108d1f8f58bb0037d20ab72f05`. This included Rust fmt, strict Clippy, workspace tests (including the producer's signed receipt, policy, query, identity and file-backed SQLite read-only tests), release build, installer/rollback checks, web build, Debian/portable packaging and packaged API/console smoke.
+- **Current integrated PR head:** run [#1880](https://github.com/dreaddo151-sys/koko/actions/runs/45044421024) passed all three jobs on exact source head `37d6332c082bc2b11cd253281b2106205499f076`. It includes the producer/package code plus later signed runtime-attestation adapter binding, durable pre-start failure handling, direct proof that preparation failure never calls provider `start_task`, and capability/task-approval audit cross-binding.
+
+Run #1880 job results: Rust / Ubuntu 24.04 = success; Web console / Ubuntu 24.04 = success; Ubuntu packages / smoke test = success.
+
+### Acceptance boundary — unchanged
+
+These are repository/source/build/package results only. No verifier process, account, signing key, policy, receipt directory, API group membership, database ACL or service unit has been deployed on the target workstation. The real canonical database/WAL/SHM paths, two-UID receipt access, live signed heartbeat, actual capability semantic result verification, real provider execution, crash/race recovery, physical Ubuntu install/reboot, dual-GPU/ComfyUI contention, and legacy Hub parity remain unaccepted.
+
+The trusted runtime isolation evidence issuer must still be independently operated and bound to actual live observations. Provider dispatch remains fail-closed. PR #16 remains draft and unmerged. No workstation service or user data was changed by these repository operations.
