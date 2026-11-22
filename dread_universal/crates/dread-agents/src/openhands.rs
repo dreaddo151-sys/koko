@@ -189,6 +189,30 @@ impl OpenHandsAgentServerAdapter {
         Ok(self)
     }
 
+    /// Enable OpenHands only from an independently signed Docker-runtime report.
+    pub fn attest_runtime(
+        mut self,
+        attestation: VerifiedRuntimeIsolationAttestation,
+    ) -> Result<Self, AgentAdapterError> {
+        if attestation.provider_id() != "openhands"
+            || attestation.adapter_id() != self.descriptor.adapter
+            || attestation.adapter_version() != self.descriptor.version.as_deref().unwrap_or_default()
+            || attestation.endpoint() != self.descriptor.endpoint.as_deref().unwrap_or_default()
+            || attestation.sandbox_backend() != "docker"
+        {
+            return Err(adapter_error(
+                "runtime_attestation_mismatch",
+                "OpenHands runtime attestation does not match the live Docker adapter identity".into(),
+                false,
+            ));
+        }
+        let secret_store =
+            attestation.control_verified(RuntimeIsolationControl::StableSecretHandling);
+        self = self.attest_docker_runtime(true, secret_store)?;
+        self.runtime_attestation = Some(attestation.summary());
+        Ok(self)
+    }
+
     fn endpoint(&self, path: &str) -> String {
         format!("{}{}", self.base_url.as_str().trim_end_matches('/'), path)
     }
