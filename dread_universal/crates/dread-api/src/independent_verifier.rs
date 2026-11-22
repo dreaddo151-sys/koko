@@ -436,7 +436,7 @@ mod tests {
     use super::*;
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use std::{
-        os::unix::fs::PermissionsExt,
+        os::unix::fs::{MetadataExt, PermissionsExt},
         time::{SystemTime, UNIX_EPOCH},
     };
 
