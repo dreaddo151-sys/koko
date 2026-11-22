@@ -925,13 +925,8 @@ fn run_cycle(
     let mut created_or_refreshed = 0usize;
     for attempt in &pending {
         let now = now_epoch_seconds()?;
-        let receipt = build_result_receipt(
-            attempt,
-            policy,
-            policy_digest,
-            output.verifier_id,
-            now,
-        )?;
+        let receipt =
+            build_result_receipt(attempt, policy, policy_digest, output.verifier_id, now)?;
         if publish_result_receipt(
             output.receipt_dir,
             attempt,
