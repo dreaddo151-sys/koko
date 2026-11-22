@@ -3311,13 +3311,13 @@ fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), 
     // granting execution. Dispatch additionally requires a signed provider
     // registration and matching capability revision.
     if let Some(provider) = agent_provider.as_deref() {
-        let capability_id = task.capability_id.as_deref().ok_or_else(|| {
-            ApiError::conflict("Agent task capability is missing")
+        let capability_id = task
+            .capability_id
+            .as_deref()
+            .ok_or_else(|| ApiError::conflict("Agent task capability is missing"))?;
+        let authority = state.execution_authority.as_ref().ok_or_else(|| {
+            ApiError::conflict("Signed provider trust manifest is not configured")
         })?;
-        let authority = state
-            .execution_authority
-            .as_ref()
-            .ok_or_else(|| ApiError::conflict("Signed provider trust manifest is not configured"))?;
         authority
             .validate_provider_capability(
                 &tx,
