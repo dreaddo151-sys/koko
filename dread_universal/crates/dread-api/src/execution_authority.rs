@@ -2199,6 +2199,44 @@ mod tests {
                 .unwrap(),
             1
         );
+
+        let mut mismatched_reason = enabled_test_capability();
+        mismatched_reason.manifest["approval"]["reason"] = json!("different review reason");
+        let mismatched_reason_json = serde_json::to_string(&mismatched_reason).unwrap();
+        connection
+            .execute(
+                "UPDATE capabilities SET record_json = ?1 WHERE id = 'hermes.run'",
+                [&mismatched_reason_json],
+            )
+            .unwrap();
+        assert!(
+            Phase6ExecutionAuthority::capability_revision(&connection, "hermes.run", "hermes", 200)
+                .is_err(),
+            "capability approval reason must match the latest audit event"
+        );
+
+        let mut mismatched_timestamp = enabled_test_capability();
+        mismatched_timestamp.manifest["approval"]["approved_at"] = json!(99);
+        let mismatched_timestamp_json = serde_json::to_string(&mismatched_timestamp).unwrap();
+        connection
+            .execute(
+                "UPDATE capabilities SET record_json = ?1 WHERE id = 'hermes.run'",
+                [&mismatched_timestamp_json],
+            )
+            .unwrap();
+        assert!(
+            Phase6ExecutionAuthority::capability_revision(&connection, "hermes.run", "hermes", 200)
+                .is_err(),
+            "capability approval time must match the latest audit event"
+        );
+        let restored = serde_json::to_string(&enabled_test_capability()).unwrap();
+        connection
+            .execute(
+                "UPDATE capabilities SET record_json = ?1 WHERE id = 'hermes.run'",
+                [&restored],
+            )
+            .unwrap();
+
         connection
             .execute(
                 "INSERT INTO capability_events(capability_id, event_type, actor, reason, created_at)
@@ -2272,6 +2310,23 @@ mod tests {
         assert!(
             Phase6ExecutionAuthority::approved_task(&connection, "task-1", "test-operator", true, 200)
                 .is_ok()
+        );
+        assert!(
+            Phase6ExecutionAuthority::approved_task(&connection, "task-1", "test-operator", true, 99)
+                .is_err(),
+            "future-dated task approval events must not authorize dispatch"
+        );
+
+        connection
+            .execute(
+                "UPDATE tasks SET approval_reason = 'changed row reason' WHERE id = 'task-1'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            Phase6ExecutionAuthority::approved_task(&connection, "task-1", "test-operator", true, 200)
+                .is_err(),
+            "current task approval reason must match the durable approval event"
         );
     }
 
