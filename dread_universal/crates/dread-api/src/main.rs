@@ -6799,19 +6799,19 @@ mod tests {
         }))
         .unwrap();
         VerifiedRuntimeIsolationAttestation::verify(
-        &encoded,
-        dread_agents::runtime_attestation::RuntimeAttestationTrustAnchor {
-            key_id: "runtime-attestor-test-key",
-            public_key_hex: &public_key_hex,
-        },
-        dread_agents::runtime_attestation::RuntimeAttestationAdapterBinding {
-            provider_id: provider_id,
-            adapter_id: provider_id,
-            adapter_version: env!("CARGO_PKG_VERSION"),
-            endpoint: endpoint,
-        },
-        observed_at + 1,
-    )
+            &encoded,
+            dread_agents::runtime_attestation::RuntimeAttestationTrustAnchor {
+                key_id: "runtime-attestor-test-key",
+                public_key_hex: &public_key_hex,
+            },
+            dread_agents::runtime_attestation::RuntimeAttestationAdapterBinding {
+                provider_id: provider_id,
+                adapter_id: provider_id,
+                adapter_version: env!("CARGO_PKG_VERSION"),
+                endpoint: endpoint,
+            },
+            observed_at + 1,
+        )
         .unwrap()
     }
 
