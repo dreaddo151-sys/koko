@@ -2064,18 +2064,6 @@ fn resolve_agent_provider(
             "Agent capability provider adapter is disabled or mismatched",
         ));
     }
-    let authority = state
-        .execution_authority
-        .as_ref()
-        .ok_or_else(|| ApiError::conflict("Signed provider trust manifest is not configured"))?;
-    authority
-        .validate_provider_capability(
-            conn,
-            capability_id,
-            provider,
-            i64::try_from(now_epoch()).unwrap_or(i64::MAX),
-        )
-        .map_err(ApiError::conflict)?;
     Ok(provider.to_string())
 }
 
@@ -3319,11 +3307,28 @@ fn queue_task(state: AppState, id: String) -> Result<(StatusCode, Json<Value>), 
         .map_err(|error| ApiError::internal(error.to_string()))?;
     }
 
-    // Agent providers must not use the legacy direct-start path while the
-    // durable admission/attempt lifecycle is not yet wired into this handler.
-    // The startup barrier is initialized closed on every API boot and may only
-    // be opened after reconciliation and worker reattachment are implemented.
-    if agent_provider.is_some() {
+    // Planning and instantiation may validate an enabled adapter without
+    // granting execution. Dispatch additionally requires a signed provider
+    // registration and matching capability revision.
+    if let Some(provider) = agent_provider.as_deref() {
+        let capability_id = task.capability_id.as_deref().ok_or_else(|| {
+            ApiError::conflict("Agent task capability is missing")
+        })?;
+        let authority = state
+            .execution_authority
+            .as_ref()
+            .ok_or_else(|| ApiError::conflict("Signed provider trust manifest is not configured"))?;
+        authority
+            .validate_provider_capability(
+                &tx,
+                capability_id,
+                provider,
+                i64::try_from(now_epoch()).unwrap_or(i64::MAX),
+            )
+            .map_err(ApiError::conflict)?;
+        // The startup barrier remains closed until durable admission/attempt
+        // preparation, recovery attachment and provider lifecycle persistence
+        // are integrated into this handler.
         ensure_durable_agent_dispatch_ready(&tx)?;
     }
 
