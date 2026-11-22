@@ -33,6 +33,7 @@ fn parse_args(args: &[String], env: &dyn Fn(&str) -> Option<String>) -> Result<C
         ("agents", "GET", "/api/agents"),
         ("skills", "GET", "/api/skills"),
         ("dspine", "GET", "/api/dspine/status"),
+        ("media", "GET", "/api/media/comfyui/monitor"),
         ("repair-plan", "GET", "/api/repair/plan"),
         ("sync-skills", "POST", "/api/skills/sync"),
     ];
@@ -88,6 +89,7 @@ commands:
   agents        configured + downloaded agent endpoints
   skills        skills visible to the hub
   dspine        D-Spine lab engine roots and draft trees
+  media         ComfyUI monitor (queue, history, progress)
   repair-plan   current findings and proposed actions (nothing is executed)
   sync-skills   rescan local skill roots (same as the dashboard button)
 
@@ -128,6 +130,10 @@ fn summarize(command: &str, value: &Value) -> String {
             let drafts = value.get("drafts").and_then(Value::as_array).map(Vec::len).unwrap_or(0);
             format!("{roots} engine root(s), {drafts} draft tree(s)")
         }
+        "media" => match value.get("status").and_then(Value::as_str) {
+            Some(s) => format!("comfyui monitor: {s}"),
+            None => "media monitor reported".to_string(),
+        },
         "repair-plan" => {
             let findings = value.get("findings").and_then(Value::as_array).map(Vec::len).unwrap_or(0);
             format!("{findings} finding(s) — proposals only; approval and execution stay manual")
