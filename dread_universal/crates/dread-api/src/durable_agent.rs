@@ -479,6 +479,29 @@ pub(super) async fn execute_durable_agent_task_inner(
 
 /// Reattach the persisted provider execution ID to an already-created local
 /// worker. This function is invoked only inside the shared ExecutionGate slot.
+/// Provider dispatch stays closed until the signed policy and a distinct
+/// independent-result verifier are both available and currently valid.
+fn durable_dispatch_activation_ready(state: &AppState, now: i64) -> bool {
+    let Some(authority) = state.execution_authority.as_ref() else {
+        return false;
+    };
+    let status = authority.status(now);
+    if status["execution_policy"]["status"] != "verified"
+        || status["independent_result_verification"] != "verified"
+    {
+        return false;
+    }
+    let Some(providers) = status["providers"].as_array() else {
+        return false;
+    };
+    !providers.is_empty()
+        && providers.iter().all(|provider| {
+            provider["enabled"] == true
+                && provider["isolation_verified"] == true
+                && provider["revoked"] != true
+        })
+}
+
 fn attach_recovered_worker(state: &AppState, request_id: &str) -> Result<bool, String> {
     let now = now_epoch_i64();
     let mut connection = state
@@ -487,6 +510,9 @@ fn attach_recovered_worker(state: &AppState, request_id: &str) -> Result<bool, S
         .map_err(|_| "database lock is unavailable during worker reattachment".to_string())?;
     persistence::mark_recovery_worker_attached(&mut connection, request_id, now)
         .map_err(|error| format!("durable recovery attachment failed: {error}"))?;
+    if !durable_dispatch_activation_ready(state, now) {
+        return Ok(false);
+    }
     persistence::release_startup_dispatch_barrier(&mut connection, now)
         .map_err(|error| format!("startup dispatch barrier evaluation failed: {error}"))
 }
@@ -941,12 +967,14 @@ pub(super) async fn recover_startup_durable_attempts(state: &AppState) -> Result
     // This succeeds only when every nonterminal attempt has been reconciled or
     // a worker has attached for this boot. Unknown submissions and unverified
     // provider successes remain blockers.
-    let opened = {
+    let opened = if durable_dispatch_activation_ready(state, now_epoch_i64()) {
         let mut connection = state.db.lock().map_err(|_| {
             "database lock is unavailable while evaluating startup dispatch barrier".to_string()
         })?;
         persistence::release_startup_dispatch_barrier(&mut connection, now_epoch_i64())
             .map_err(|error| format!("startup dispatch barrier evaluation failed: {error}"))?
+    } else {
+        false
     };
     info!(
         workers_scheduled,
