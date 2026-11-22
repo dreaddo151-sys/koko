@@ -196,3 +196,21 @@ The API still does **not** start providers through the new durable lifecycle. Th
 - independent result verification remains fail-closed.
 
 Next implementation must establish trusted policy-decision provenance and a request/attempt/idempotency-key-bound adapter evidence contract before replacing the guarded legacy provider worker. Keep the startup dispatch barrier closed until durable provider reattachment and independent verification satisfy the release invariants. PR #16 remains draft and unmerged.
+
+## 9. Autonomous continuation update — 2026-11-22
+
+### Source changes committed on the active PR #16 branch
+
+- Commit `6305e3ee5273a4b6a28bb200a0c4aa65848b0166` adds a focused regression test for the lost-provider-acknowledgement crash window. It creates a durable `dispatching` attempt, advances the startup recovery generation, confirms the attempt remains in `unresolved_attempts`, confirms it is not yet eligible for worker attachment because no provider execution ID is known, and asserts that the startup dispatch barrier cannot reopen.
+- Commit `6f82f79dc07fb72b37f9fb421c1ab1c5626c21d3` adds `provider_evidence_from_adapter_receipt`, a conversion boundary from the existing signed `AgentOperationReceipt<T>` into durable `ProviderEvidence`. It binds provider/adapter/version/registration revision, preserves the exact signed payload JSON/key/signature/response digest, rejects event receipts from the lifecycle-evidence path, and includes a focused mapping/scope regression test.
+- Commit `07aff333148106da2e18838aa26550be58e7d6f0` records the helper as an intentionally staged integration boundary until the API worker is wired to consume it. This does not activate provider dispatch.
+
+### Verification status
+
+- The two changed source files were read back from GitHub after their commits; both new tests and the receipt-conversion helper are present.
+- No GitHub Actions run was returned for the new commits at the time of this update. Do not mark these commits compiled, Clippy-clean, tested, packaged or green until a run for the exact final SHA completes.
+- Latest code change in this continuation: `07aff333148106da2e18838aa26550be58e7d6f0`.
+
+### Remaining implementation boundary
+
+The API does not yet call `authorize_and_persist`, `prepare_dispatch`, or the receipt conversion helper from the production provider worker. The existing direct-start worker remains behind the closed startup dispatch barrier. The new test strengthens the lost-ack crash invariant; it does not complete startup reconciliation. Keep the barrier closed and PR #16 draft. Continue with production policy binding, durable API admission/attempt preparation, receipt-backed provider lifecycle persistence, startup reattachment, and an independently trusted result verifier.
