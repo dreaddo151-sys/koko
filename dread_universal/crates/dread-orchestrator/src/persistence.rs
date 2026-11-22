@@ -1818,6 +1818,61 @@ pub fn mark_reconciliation_required(
 
 /// Return all attempts that startup must inspect. Acknowledged/running provider
 /// work is included, not just requests that were never acknowledged.
+/// Read a previously authorized admission by its immutable request ID.
+/// This is used by recovery/reattachment code; callers cannot create or alter
+/// authorization facts through this accessor.
+pub fn admission_for_request(
+    connection: &Connection,
+    request_id: &str,
+) -> Result<AdmissionRecord, PersistenceError> {
+    validate_text("request_id", request_id, 160)?;
+    connection
+        .query_row(
+            "SELECT admission_id, request_id, task_id, mission_id, attempt_number,
+                    requester_id, provider_id, capability_id, operation, permission_scope,
+                    idempotency_key, evidence_id, policy_decision_id, adapter_id,
+                    adapter_version, provider_registration_revision, capability_revision,
+                    expires_at, consumed_at
+             FROM dread_dispatch_admissions WHERE request_id = ?1",
+            [request_id],
+            |row| {
+                Ok(AdmissionRecord {
+                    admission_id: row.get(0)?,
+                    request_id: row.get(1)?,
+                    task_id: row.get(2)?,
+                    mission_id: row.get(3)?,
+                    attempt_number: row.get(4)?,
+                    requester_id: row.get(5)?,
+                    provider_id: row.get(6)?,
+                    capability_id: row.get(7)?,
+                    operation: row.get(8)?,
+                    permission_scope: row.get(9)?,
+                    idempotency_key: row.get(10)?,
+                    evidence_id: row.get(11)?,
+                    policy_decision_id: row.get(12)?,
+                    adapter_id: row.get(13)?,
+                    adapter_version: row.get(14)?,
+                    provider_registration_revision: row.get(15)?,
+                    capability_revision: row.get(16)?,
+                    expires_at: row.get(17)?,
+                    consumed_at: row.get(18)?,
+                })
+            },
+        )
+        .optional()?
+        .ok_or_else(|| PersistenceError::NotFound(format!("admission for {request_id}")))
+}
+
+/// Read the durable attempt bound to a request. The returned record is
+/// observational only; it does not authorize dispatch or worker attachment.
+pub fn attempt_for_request(
+    connection: &Connection,
+    request_id: &str,
+) -> Result<Option<AttemptRecord>, PersistenceError> {
+    validate_text("request_id", request_id, 160)?;
+    load_attempt_by_request(connection, request_id)
+}
+
 pub fn unresolved_attempts(
     connection: &Connection,
 ) -> Result<Vec<AttemptRecord>, PersistenceError> {
@@ -3710,10 +3765,13 @@ mod tests {
 
         let request = dispatch_request("request-1", 1);
         authorize_and_persist(&mut db, &request, &authority, 100).unwrap();
+        let admission = admission_for_request(&db, "request-1").unwrap();
+        assert_eq!(admission.request_id, "request-1");
         let attempt = match prepare_dispatch(&mut db, &request, &authority, 101).unwrap() {
             DispatchPreparation::Created(attempt) => attempt,
             DispatchPreparation::Existing(_) => panic!("first preparation must create the attempt"),
         };
+        assert_eq!(attempt_for_request(&db, "request-1").unwrap(), Some(attempt.clone()));
         assert_eq!(attempt.dispatch_state, "dispatching");
         assert_eq!(attempt.idempotency_key, "logical-key-1");
 
