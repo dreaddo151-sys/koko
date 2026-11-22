@@ -130,7 +130,7 @@ impl OpenHandsAgentServerAdapter {
             descriptor: AgentDescriptor {
                 id: "openhands.agent_server".into(),
                 display_name: display_name.into(),
-                adapter: "openhands.agent_server".into(),
+                adapter: "openhands".into(),
                 version: Some(env!("CARGO_PKG_VERSION").to_owned()),
                 endpoint: Some(endpoint),
                 enabled: false,
@@ -1281,6 +1281,11 @@ mod tests {
         .attest_docker_runtime(true, true)
         .unwrap();
 
+        assert_eq!(adapter.descriptor().adapter, "openhands");
+        assert_eq!(
+            adapter.descriptor().version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
         let task_id = "00000000-0000-4000-8000-000000000007";
         let identity = AgentExecutionIdentity {
             request_id: "request-lost-ack".into(),
