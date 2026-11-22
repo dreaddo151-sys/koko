@@ -250,7 +250,8 @@ pub fn signed_agent_operation_receipt<T: Serialize>(
         .as_secs();
     let expires_at = observed_at.saturating_add(300);
     let response_sha256 = response_sha256(&response)?;
-    let event_suffix = external_event_id
+    let event_suffix = details
+        .external_event_id
         .as_deref()
         .unwrap_or(evidence_kind_name(evidence_kind));
     let evidence_id = format!(
