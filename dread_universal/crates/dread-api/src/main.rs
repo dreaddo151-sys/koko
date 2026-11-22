@@ -5513,7 +5513,9 @@ async fn main() -> anyhow::Result<()> {
     )
     .map_err(|error| anyhow::anyhow!("Invalid DREAD execution trust configuration: {error}"))?;
     if execution_authority.is_none() {
-        warn!("Signed provider trust manifest is not configured; durable provider dispatch remains unavailable");
+        warn!(
+            "Signed provider trust manifest is not configured; durable provider dispatch remains unavailable"
+        );
     }
     let (events, _) = broadcast::channel(256);
     let (execution_config, resource_limits) = execution_settings_from_env()?;
