@@ -267,3 +267,65 @@ The Rust suite reported 87 API tests passing, with the orchestrator, agents, dis
 - Add direct API integration tests for durable start/replay/ack-lost/reattach/cancellation/terminal-verification and provider mock servers, including races between verifier expiry, provider completion and cancellation.
 - Verify real adapter API behavior and run physical Ubuntu acceptance without stopping or replacing ComfyUI, the legacy Hub, or the single Python GPU Supervisor.
 - Re-run full CI on every resulting code head and keep the startup barrier fail-closed until all required controls are actually deployed and validated.
+
+## 11. Standalone independent verifier producer and separate-user packaging — 2026-11-22
+
+### Exact verified source and CI
+
+- **PR:** #16 — open, draft, unmerged.
+- **Branch:** `work/kimi003-phase6-api-integration-2026-11-22`
+- **Exact verified HEAD:** `e390cc688bbf59108d1f8f58bb0037d20ab72f05`
+- **GitHub Actions run:** #1757, ID `45038700204`.
+- **Result:** all three jobs passed on that exact SHA:
+  1. Rust / Ubuntu 24.04 — fmt, strict Clippy, workspace tests, release build, installer/release checks, portable migration/rollback tests, Python bridge/importer tests, single-owner GPU boundary.
+  2. Web console / Ubuntu 24.04 — locked install and production build.
+  3. Ubuntu packages / smoke test — archive and Debian creation, checksums/content verification, packaged API and production-console smoke test.
+
+Run: https://github.com/dreaddo151-sys/koko/actions/runs/45038700204  
+Commit: https://github.com/dreaddo151-sys/koko/commit/e390cc688bbf59108d1f8f58bb0037d20ab72f05
+
+### New executable producer
+
+Workspace crate `crates/dread-result-verifier` builds the standalone `dread-result-verifier` binary. It is deliberately a separate process rather than an API thread.
+
+- Opens the canonical Phase 6 SQLite database using SQLite read-only open flags, sets `PRAGMA query_only=ON` and `trusted_schema=OFF`, checks schema version 7+, and validates the canonical attempt/admission/evidence tables.
+- Selects only `provider_succeeded` attempts and reads requester, worker, provider attestor and exact result/error bytes from the canonical records.
+- Evaluates explicit per-capability rules: max result bytes, required JSON Pointers, forbidden JSON Pointers, object shape and generic failure markers. Unknown capability, provider error, missing/invalid/non-object result, failure marker, missing required field, forbidden field or oversize result becomes a signed negative decision.
+- Hashes exact persisted result/error bytes; signs the API-compatible heartbeat/result payloads with Ed25519 using a verifier-owned PKCS#8 key. Key generation is create-once and refuses overwrites.
+- Publishes heartbeat and per-request receipts atomically; verifies safe filenames, symlink/file types, size, owner/group/mode, and uses a process lock to avoid concurrent producers.
+- Uses a distinct verifier identity and checks it differs from requester, worker and provider receipt verifier.
+- Added a file-backed test which opens a canonical schema-v7 SQLite file via the real read-only open path, confirms `PRAGMA query_only=1`, and proves both row writes and DDL are rejected.
+
+**Verification from run #1757:** the full workspace test suite passed, including 11 standalone producer tests, 87 API tests, 34 agent tests, 36 orchestrator tests and all other workspace crate tests. Strict Clippy and release build passed.
+
+### Separate Unix identity and receipt spool
+
+The original owner-only receipt-dir design was corrected because it would have prevented a separately privileged verifier account from publishing files that the API can read. The verified contract is:
+
+- Dedicated verifier UID owns the receipt directory/files.
+- Shared API receipt group is separate from the verifier's primary group.
+- Receipt directory exact mode `2750` (owner rwx, group r-x, setgid, no other access).
+- Heartbeat/result files exact mode `0640` (verifier owner read/write, API group read-only, no other access).
+- API checks configured receipt UID/GID plus exact ownership/mode on every read; API is not allowed to replace or create receipts.
+- Verifier private key and capability policy are verifier-owned, mode `0600`, and are never provided to the API account.
+- New API environment values include numeric `DREAD_INDEPENDENT_RESULT_VERIFIER_RECEIPT_UID` and `..._GID` in addition to receipt path, verifier ID, key ID and pinned public key.
+
+### Deployment examples now shipped, not activated
+
+The portable and Debian package builders now include:
+
+- `bin/dread-result-verifier`
+- `config/independent-result-verifier.policy.example.json`
+- `config/independent-result-verifier.env.example`
+- `systemd/dread-result-verifier.service.example`
+- `systemd/dread-result-verifier.tmpfiles.example`
+
+The portable installer preflights and preserves these examples during upgrades. CI asserts that the archive and Debian package contain them. The installer does **not** create verifier users/groups, create the receipt directory, copy the system unit into `/etc/systemd/system`, enable/start the verifier, or alter API group membership. The verifier service remains a manual operator action.
+
+### Important acceptance boundary
+
+The producer's current policy performs deterministic **structural JSON checks** and exact digest binding. It does not execute agent code, validate external side effects, establish that a real-world operation occurred, or semantically judge arbitrary prose. Owners must replace every placeholder JSON Pointer in the example policy with a real per-capability result schema and add domain-specific evidence requirements before enabling any rule.
+
+No verifier process, Unix service account, signing key, receipt directory, capability policy, heartbeat, API shared-group membership, SQLite ACL, or service unit has been deployed on the workstation. The service/env/tmpfiles files are examples only. The actual DREAD DB path must be discovered and mapped read-only, including its required WAL/SHM and parent-directory permissions. PR #16 remains draft/unmerged and provider dispatch remains blocked until this is installed and tested with two distinct Unix identities on the target system.
+
+The existing API integration, durable startup recovery, Python GPU Supervisor ownership boundary, ComfyUI, legacy DREAD Hub, prior Kimi deliveries, PRs #12–#15, canonical SQLite data and backups remain preserved. No workstation service was touched.
