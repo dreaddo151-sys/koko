@@ -325,7 +325,9 @@ fn validate_signed_time_window(
         || expires_at <= observed_at
         || expires_at > observed_at.saturating_add(max_lifetime_seconds)
     {
-        return Err(format!("{label} is future-dated, expired or outside its lifetime bound"));
+        return Err(format!(
+            "{label} is future-dated, expired or outside its lifetime bound"
+        ));
     }
     Ok(())
 }
