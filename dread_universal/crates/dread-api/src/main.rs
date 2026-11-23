@@ -830,18 +830,50 @@ fn read_static_asset(root: &FsPath, uri_path: &str) -> Result<(String, Vec<u8>),
     Ok((content_type.to_string(), bytes))
 }
 
-async fn static_asset(uri: Uri) -> Response {
+/// Unauthenticated static serving is the only externally reachable file
+/// surface, so its per-request cost is bounded twice over: at most eight
+/// concurrent file reads (memory ceiling = 8 x the 16 MiB per-file cap),
+/// and reads run on the blocking pool so a slow disk cannot tie up the
+/// async worker threads that also serve authenticated traffic. A fully
+/// saturated pool answers 429 (backpressure) instead of queueing without
+/// bound.
+fn static_asset_permits() -> std::sync::Arc<tokio::sync::Semaphore> {
+    static PERMITS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    PERMITS
+        .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(8)))
+        .clone()
+}
+
+async fn static_asset(method: axum::http::Method, uri: Uri) -> Response {
+    // Reading is the fallback's only legitimate verb; anything else gets a
+    // clean 405 rather than an unauthenticated body via POST/PUT/DELETE.
+    if !matches!(method, axum::http::Method::GET | axum::http::Method::HEAD) {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+    let Ok(permit) = static_asset_permits().try_acquire_owned() else {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    };
     let root = env::var_os("DREAD_WEB_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("web/dist"));
-    match read_static_asset(&root, uri.path()) {
-        Ok((content_type, bytes)) => Response::builder()
+    let path = uri.path().to_owned();
+    let outcome = tokio::task::spawn_blocking(move || {
+        // Held until the read finishes, bounding concurrent reads and the
+        // peak Vec allocation across concurrent unauthenticated requests.
+        let _permit = permit;
+        read_static_asset(&root, &path)
+    })
+    .await;
+    match outcome {
+        Ok(Ok((content_type, bytes))) => Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_TYPE, content_type)
             .header(CACHE_CONTROL, "no-store")
             .body(Body::from(bytes))
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-        Err(status) => status.into_response(),
+        Ok(Err(status)) => status.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -7648,6 +7680,36 @@ mod tests {
     async fn test_app() -> (Router, tokio::task::JoinHandle<()>) {
         let (router, _receiver, server) = test_app_with_events().await;
         (router, server)
+    }
+
+    #[tokio::test]
+    async fn static_fallback_rejects_non_read_methods() {
+        // The unauthenticated fallback must answer writes with 405 instead of
+        // serving file contents through POST/PUT/DELETE.
+        let (router, _receiver, server) = test_app_with_events().await;
+        for method in [
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::DELETE,
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri("/index.html")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{method} /index.html"
+            );
+        }
+        server.abort();
     }
 
     #[test]
