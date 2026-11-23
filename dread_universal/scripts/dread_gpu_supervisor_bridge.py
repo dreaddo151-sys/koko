@@ -224,7 +224,7 @@ def make_handler(bridge: SupervisorBridge, token: str):
         def do_GET(self):
             if self.path == "/health":
                 self._send(200, {"status": "ok", "supervisor": "configured"})
-            elif self.path == "/telemetry":
+            elif self.path in ("/v1/telemetry", "/telemetry"):
                 if not self._authorized():
                     self._send(401, {"error": "invalid bearer token"})
                     return
