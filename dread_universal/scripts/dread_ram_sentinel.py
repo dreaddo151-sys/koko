@@ -84,6 +84,31 @@ def kill(p, why):
         return False
 
 
+def guard_engine_oom_adj():
+    """Freeze insurance: if the Basalt/Qwen engine is up but its oom_score_adj
+    lost the 1000 setting (e.g. right after an engine restart), re-apply it.
+    Writes only to our own engine process — never kills anything."""
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmd = f.read().replace(b"\0", b" ").decode("utf-8", "replace")[:200]
+            if "adamant/bin/basalt --serve" in cmd:
+                with open(f"/proc/{pid}/oom_score_adj") as f:
+                    cur = f.read().strip()
+                if cur != "1000":
+                    with open(f"/proc/{pid}/oom_score_adj", "w") as f:
+                        f.write("1000")
+                    print(
+                        f"[{time.strftime('%H:%M:%S')}] engine oom_score_adj {cur}->1000 pid={pid}",
+                        flush=True,
+                    )
+                return
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+
+
 def main():
     print(
         f"RAM sentinel up: warn={WARN}M crit={CRIT}M (Basalt/Qwen PROTECTED)",
@@ -94,6 +119,8 @@ def main():
     while True:
         avail = mem_avail_mib()
         now = time.monotonic()
+        if int(now) % 20 < 3:
+            guard_engine_oom_adj()
         # rearm after sustained recovery
         if avail >= WARN:
             if ok_since is None:
