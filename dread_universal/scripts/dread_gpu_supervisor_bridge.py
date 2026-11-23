@@ -3,13 +3,16 @@
 
 from __future__ import annotations
 
+import fcntl
 import hmac
 import ipaddress
 import json
 import os
 import runpy
 import signal
+import subprocess
 import threading
+import time
 import urllib.error
 import urllib.request
 from contextlib import AbstractContextManager
@@ -19,6 +22,36 @@ from typing import Callable
 MAX_BODY_BYTES = 1_048_576
 TENSOR_UPSTREAM_URL = "http://127.0.0.1:11501/v1/chat/completions"
 INFERENCE_TIMEOUT = 1805
+TELEMETRY_CACHE_SECONDS = 2.0
+GPU_QUERY_FIELDS = "name,memory.total,memory.used,utilization.gpu,temperature.gpu"
+
+
+def collect_gpu_snapshot() -> tuple[list, str]:
+    try:
+        query = subprocess.run(
+            ["nvidia-smi", f"--query-gpu={GPU_QUERY_FIELDS}", "--format=csv,noheader,nounits"],
+            capture_output=True, check=True, text=True, timeout=5,
+        )
+    except Exception as error:
+        return [], f"nvidia-smi unavailable: {error}"
+    gpus = []
+    for line in query.stdout.strip().splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) != 5:
+            continue
+        try:
+            gpus.append(
+                {
+                    "name": parts[0],
+                    "memory_total_mb": float(parts[1]),
+                    "memory_used_mb": float(parts[2]),
+                    "utilization_percent": float(parts[3]),
+                    "temperature_c": float(parts[4]),
+                }
+            )
+        except ValueError:
+            continue
+    return gpus, ""
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -72,9 +105,40 @@ class SupervisorBridge:
         self,
         gpu_lease: Callable[[str], AbstractContextManager],
         upstream_open=UPSTREAM_OPENER.open,
+        lock_path: str = "",
     ):
         self.gpu_lease = gpu_lease
         self.upstream_open = upstream_open
+        self.lock_path = lock_path
+        self._telemetry = None
+
+    def lease_held(self) -> bool:
+        if not self.lock_path:
+            return False
+        try:
+            probe = open(self.lock_path, "a+")
+        except OSError:
+            return False
+        try:
+            fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
+        finally:
+            probe.close()
+        return False
+
+    def telemetry(self) -> dict:
+        now = time.monotonic()
+        if self._telemetry is not None and now - self._telemetry[0] < TELEMETRY_CACHE_SECONDS:
+            return self._telemetry[1]
+        gpus, error = collect_gpu_snapshot()
+        payload = {"gpus": gpus, "lease_held": self.lease_held(), "collected_at": int(time.time())}
+        if error:
+            payload["error"] = error
+        self._telemetry = (now, payload)
+        return payload
 
     def execute(self, payload: object) -> tuple[int, dict]:
         try:
@@ -120,7 +184,8 @@ def load_gpu_lease(source_path: str):
     lease = namespace.get("gpu_lease")
     if not callable(lease):
         raise RuntimeError("configured Supervisor source does not expose gpu_lease(mode)")
-    return lease
+    lock_path = namespace.get("LOCK")
+    return lease, str(lock_path) if lock_path is not None else ""
 
 
 def validate_bind(raw: str) -> tuple[str, int]:
@@ -159,6 +224,11 @@ def make_handler(bridge: SupervisorBridge, token: str):
         def do_GET(self):
             if self.path == "/health":
                 self._send(200, {"status": "ok", "supervisor": "configured"})
+            elif self.path == "/telemetry":
+                if not self._authorized():
+                    self._send(401, {"error": "invalid bearer token"})
+                    return
+                self._send(200, bridge.telemetry())
             else:
                 self._send(404, {"error": "not found"})
 
@@ -198,7 +268,8 @@ def main():
     bind = os.environ.get("DREAD_GPU_SUPERVISOR_BIND", "127.0.0.1:11502")
     host, port = validate_bind(bind)
     source = os.environ.get("DREAD_GPU_SUPERVISOR_SOURCE", "")
-    bridge = SupervisorBridge(load_gpu_lease(source))
+    lease, lock_path = load_gpu_lease(source)
+    bridge = SupervisorBridge(lease, lock_path=lock_path)
     server = ThreadingHTTPServer((host, port), make_handler(bridge, token))
 
     def request_shutdown(_signum, _frame):
