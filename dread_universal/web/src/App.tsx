@@ -9,6 +9,13 @@ import DspinePanel from "./DspinePanel";
 // token: cleared on disconnect/tab close) and stripped from the address bar.
 {const tokMatch=/^#tok=([^&]+)$/.exec(location.hash);if(tokMatch){try{sessionStorage.setItem("dread_token",decodeURIComponent(tokMatch[1]));}catch{}history.replaceState(null,"",location.pathname+location.search);}}
 
+function ramLevel(availMiB:number|null|undefined):{cls:string;text:string;label:string}|null{
+  if(availMiB===null||availMiB===undefined)return null;
+  const cls=availMiB<4096?"crit":availMiB<8192?"warn":"";
+  const label=availMiB<4096?"CRITICAL headroom — kernel will OOM-kill the model server before the desktop freezes":availMiB<8192?"Low headroom — close browser tabs or stop ComfyUI before starting new jobs":"Healthy headroom";
+  return{cls,text:`${(availMiB/1024).toFixed(1)} G FREE`,label};
+}
+
 type Model = { id: string; owned_by?: string };
 
 function chatAnswer(r:unknown):string|null{
@@ -35,7 +42,7 @@ type StorageDevice = { source: string; filesystem: string; mount_point: string; 
 type StoragePartition = { name: string; filesystem: string | null; mount_points: string[] };
 type PhysicalStorageDevice = { name: string; model: string | null; transport: string | null; size_mib: number | null; partitions: StoragePartition[] };
 type HostProfile = { os: string; architecture: string; distribution: string | null; distribution_version: string | null; kernel_release: string | null; cpu_model: string | null; cpu_physical_cores: number | null; cpu_logical_threads: number | null; cpu_sockets: number | null; cpu_cores_per_socket: number | null; cpu_threads_per_core: number | null; cpu_numa_nodes: number | null; cuda_version: string | null; cuda_toolkit_version: string | null; cuda_toolkits: {version: string; compiler_path: string}[]; cpu_threads: number; memory_total_mib: number | null; memory_available_mib: number | null; root_disk_total_mib: number | null; root_disk_available_mib: number | null; storage_devices: StorageDevice[]; physical_storage_devices: PhysicalStorageDevice[]; gpu_devices: GpuDevice[]; llama_server: string | null; nvidia_smi_available: boolean; rocm_smi_available: boolean; xpu_smi_available: boolean; inference_backend: string };
-type SupervisorTelemetry = { source: string; read_only: boolean; sampled_at_unix_ms: number; devices: { index: number | null; name: string; utilization_percent: number | null; memory_used_mib: number | null; memory_total_mib: number | null; temperature_c: number | null; power_w: number | null; pcie_generation: number | null; pcie_width: number | null }[] };
+type SupervisorTelemetry = { source: string; read_only: boolean; sampled_at_unix_ms: number; mem_total_mib?: number | null; mem_available_mib?: number | null; devices: { index: number | null; name: string; utilization_percent: number | null; memory_used_mib: number | null; memory_total_mib: number | null; temperature_c: number | null; power_w: number | null; pcie_generation: number | null; pcie_width: number | null }[] };
 class Boundary extends Component<{children:ReactNode},{err:string}>{constructor(p:{children:ReactNode}){super(p);this.state={err:""};}static getDerivedStateFromError(e:Error){return {err:e.message};}render(){return this.state.err?<section className="panel approval" style={{margin:"14px"}}><ShieldAlert size={14}/><span>RENDER FAULT IN THIS VIEW — {this.state.err}. The rest of the console remains available.</span><button className="link" onClick={()=>this.setState({err:""})}>DISMISS &amp; RETRY</button></section>:this.props.children;}}
 
 type GgufMetadata = { version: number; tensor_count: number; metadata_count: number; model_name: string | null; architecture: string | null; context_length: number | null; file_type_code: number | null; quantization_version: number | null };
@@ -129,7 +136,7 @@ function App() {
       const gpus=(Array.isArray(raw.gpus)?raw.gpus:[]) as Record<string,unknown>[];
       const devs=(Array.isArray(raw.devices)?raw.devices:gpus) as Record<string,unknown>[];
       const num=(v:unknown)=>typeof v==="number"?v:null;
-      setSupervisorTelemetry({source:typeof raw.source==="string"?raw.source:"PYTHON GPU SUPERVISOR BRIDGE · READ-ONLY nvidia-smi SAMPLE",read_only:true,sampled_at_unix_ms:num(raw.sampled_at_unix_ms)??(num(raw.collected_at)?(raw.collected_at as number)*1000:Date.now()),devices:devs.map((d,i)=>({index:num(d.index)??i,name:String(d.name??"GPU"),utilization_percent:num(d.utilization_percent),temperature_c:num(d.temperature_c),memory_used_mib:num(d.memory_used_mib)??(num(d.memory_used_mb)!==null?Math.round(num(d.memory_used_mb) as number):null),memory_total_mib:num(d.memory_total_mib)??(num(d.memory_total_mb)!==null?Math.round(num(d.memory_total_mb) as number):null),power_w:num(d.power_w),pcie_generation:num(d.pcie_generation),pcie_width:num(d.pcie_width)}))});
+      setSupervisorTelemetry({source:typeof raw.source==="string"?raw.source:"PYTHON GPU SUPERVISOR BRIDGE · READ-ONLY nvidia-smi SAMPLE",read_only:true,mem_total_mib:num(raw.mem_total_mib),mem_available_mib:num(raw.mem_available_mib),sampled_at_unix_ms:num(raw.sampled_at_unix_ms)??(num(raw.collected_at)?(raw.collected_at as number)*1000:Date.now()),devices:devs.map((d,i)=>({index:num(d.index)??i,name:String(d.name??"GPU"),utilization_percent:num(d.utilization_percent),temperature_c:num(d.temperature_c),memory_used_mib:num(d.memory_used_mib)??(num(d.memory_used_mb)!==null?Math.round(num(d.memory_used_mb) as number):null),memory_total_mib:num(d.memory_total_mib)??(num(d.memory_total_mb)!==null?Math.round(num(d.memory_total_mb) as number):null),power_w:num(d.power_w),pcie_generation:num(d.pcie_generation),pcie_width:num(d.pcie_width)}))});
       setSupervisorTelemetryError("");
     }catch(e){
       setSupervisorTelemetry(null);
@@ -137,9 +144,10 @@ function App() {
     }
   },[token]);
   useEffect(()=>{
-    if(page!=="gpu"||!token){return;}
+    if(!token){return;}
     void refreshSupervisorTelemetry();
-    const timer=window.setInterval(()=>void refreshSupervisorTelemetry(),30000);
+    // RAM pressure bar needs a fresh sample on every page; bridge caches its own snapshot.
+    const timer=window.setInterval(()=>void refreshSupervisorTelemetry(),page==="gpu"?30000:20000);
     return()=>window.clearInterval(timer);
   },[page,token,refreshSupervisorTelemetry]);
   useEffect(()=>{if(models.length&&!models.some(x=>x.id===model))setModel(models[0].id);},[models,model]);
@@ -361,7 +369,8 @@ function App() {
       <div className="sidebar-bottom"><div className="safety"><ShieldCheck size={17}/><div><b>SECURITY ENVELOPE</b><small>Loopback only · approval gated<br/>Supervisor owns GPU leases</small></div></div><div className="side-foot"><span className="pulse-dot"/>LOCAL-FIRST / NO REMOTE EXECUTION</div></div>
     </aside>
     <main><Boundary>
-      <header className="topbar"><div className="crumb">DREAD SYSTEM <ChevronRight size={13}/> <b>{page.replaceAll("_"," ").toUpperCase()}</b></div><div className="topright"><span className={connected?"online":"offline"}><i/>{connected?"CONTROL LINK ACTIVE":token?"API LINK LOST":"SYSTEM LOCKED"}</span><span className="refresh-time">{lastRefresh?new Date(lastRefresh).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"}):"NO TELEMETRY"}</span><button className="icon" onClick={()=>void refresh()} title="Refresh telemetry"><RefreshCw size={15}/></button>{token&&<button className="icon" title="Disconnect and clear token" onClick={disconnect}><LogOut size={15}/></button>}</div></header>
+      <header className="topbar"><div className="crumb">DREAD SYSTEM <ChevronRight size={13}/> <b>{page.replaceAll("_"," ").toUpperCase()}</b></div><div className="topright"><span className={connected?"online":"offline"}><i/>{connected?"CONTROL LINK ACTIVE":token?"API LINK LOST":"SYSTEM LOCKED"}</span>{(()=>{const r=ramLevel(supervisorTelemetry?.mem_available_mib);return r?<span className={`ram-pill ${r.cls}`} title={r.label}><Wind size={13}/>{r.text}</span>:null;})()}<span className="refresh-time">{lastRefresh?new Date(lastRefresh).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"}):"NO TELEMETRY"}</span><button className="icon" onClick={()=>void refresh()} title="Refresh telemetry"><RefreshCw size={15}/></button>{token&&<button className="icon" title="Disconnect and clear token" onClick={disconnect}><LogOut size={15}/></button>}</div></header>
+      {ramLevel(supervisorTelemetry?.mem_available_mib)?.cls==="crit"&&<div className="ram-banner" role="alert">RAM PRESSURE CRITICAL — {ramLevel(supervisorTelemetry?.mem_available_mib)?.label}. Freeze guard active: Basalt holds the highest kernel OOM score, so the model server is sacrificed instead of the desktop.</div>}
       <div className="content">
         <div className="eyebrow"><span className="pulse-dot"/> LOCAL AI OPERATIONS / {hostProfile?.gpu_devices.length??0} GPU DEVICE(S) <span className="eyebrow-line"/></div>
         <div className="heading"><div><h1>{page==="overview"?"Command deck":page==="missions"?"Mission orchestrator":page==="tasks"?"Task queue":page==="agents"?"Agent network":page==="capabilities"?"Pstack capability registry":page==="models"?"Model arsenal":page==="repair"?"Self-repair control":page==="dspine"?"D-Spine lab":page==="inventory"?"Local inventory":page==="gpu"?"GPU telemetry":"Command deck"}</h1><p>Observe, coordinate and operate your local AI stack without crossing its safety boundaries.</p></div><div className="workstation"><span className="workstation-mark"><Cpu size={15}/></span><div><b>{hostProfile?`${hostProfile.gpu_devices.length} GPU DEVICE(S) / ${(hostProfile.distribution??hostProfile.os).toUpperCase()}`:"HOST DISCOVERY PENDING"}</b><small>{hostProfile?`${hostProfile.architecture.toUpperCase()} · ${hostProfile.cpu_physical_cores??"?"} CORES / ${hostProfile.cpu_logical_threads??"?"} LOGICAL THREADS / ${hostProfile.cpu_threads} AVAILABLE`:"LOCAL NODE / LOOPBACK"}</small></div><Pill value={connected?"LINKED":"LOCKED"}/></div></div>

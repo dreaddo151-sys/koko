@@ -29,6 +29,26 @@ RESIDENT_MODELS_URL = os.environ.get(
 )
 INFERENCE_TIMEOUT = 1805
 TELEMETRY_CACHE_SECONDS = 2.0
+
+
+def read_memory_snapshot() -> dict:
+    """Read-only /proc/meminfo sample so the hub can show RAM pressure (freeze guard)."""
+    try:
+        wanted = {
+            "MemTotal:": "mem_total_mib",
+            "MemAvailable:": "mem_available_mib",
+            "SwapTotal:": "swap_total_mib",
+            "SwapFree:": "swap_free_mib",
+        }
+        out = {}
+        with open("/proc/meminfo", encoding="ascii") as handle:
+            for line in handle:
+                field = line.split(":", 1)[0] + ":"
+                if field in wanted:
+                    out[wanted[field]] = int(line.split()[1]) // 1024
+        return out
+    except OSError as error:
+        return {"memory_error": str(error)}
 GPU_QUERY_FIELDS = "name,memory.total,memory.used,utilization.gpu,temperature.gpu"
 
 
@@ -155,7 +175,7 @@ class SupervisorBridge:
         if self._telemetry is not None and now - self._telemetry[0] < TELEMETRY_CACHE_SECONDS:
             return self._telemetry[1]
         gpus, error = collect_gpu_snapshot()
-        payload = {"gpus": gpus, "lease_held": self.lease_held(), "collected_at": int(time.time())}
+        payload = {"gpus": gpus, "lease_held": self.lease_held(), "collected_at": int(time.time()), **read_memory_snapshot()}
         if error:
             payload["error"] = error
         self._telemetry = (now, payload)
