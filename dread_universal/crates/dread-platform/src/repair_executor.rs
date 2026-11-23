@@ -595,6 +595,38 @@ pub fn create_run_from_plan(
         }
     }
 
+    // Single open run policy: one run awaiting human attention already
+    // holds the operator's queue; a second open plan only duplicates
+    // findings and actions. A plan whose every action is denied lands
+    // terminal ('rejected') straight away, stays audit-only and is still
+    // allowed. The prediction is exact, not heuristic: policy.decide is a
+    // pure function, and the first non-Deny finding always counts as
+    // executable (duplicate-component skipping can only affect findings
+    // after the first one for a component), so `lands_open` here matches
+    // the run status the loop below will commit to. This is the
+    // application-level half of the invariant; the scheduler keeps its
+    // cheap pre-tick COUNT as a fast path.
+    let lands_open = plan
+        .findings
+        .iter()
+        .any(|finding| policy.decide(finding) != Permission::Deny);
+    if lands_open {
+        let existing = conn
+            .query_row(
+                "SELECT id, status FROM repair_runs
+                 WHERE status IN ('planned','awaiting_approval','approved','applying')
+                 ORDER BY id LIMIT 1",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        if let Some((id, status)) = existing {
+            return Err(RepairExecutorError::Conflict(format!(
+                "repair run {id} is still open (status={status}); approve, execute or reject it before creating a new one"
+            )));
+        }
+    }
+
     let tx = Tx::begin(conn)?;
     conn.execute(
         "INSERT INTO repair_runs (status, summary, safety_boundary, created_at, updated_at) VALUES ('planned', ?1, ?2, ?3, ?3)",
@@ -1520,6 +1552,63 @@ mod tests {
     }
 
     #[test]
+    fn second_open_run_is_a_conflict() {
+        let conn = setup();
+        let first = create_run_from_plan(
+            &conn,
+            &plan_with(vec![finding("hub", "medium", "restart.hub")]),
+            &PermissionPolicy::default(),
+            100,
+            "operator",
+        )
+        .unwrap();
+        assert_eq!(first.status, RepairRunStatus::AwaitingApproval);
+
+        // A second plan while the first is open would put two runs in the
+        // operator's queue at once: rejected as a conflict, naming the
+        // blocker so the UI can point at it.
+        let blocked = create_run_from_plan(
+            &conn,
+            &plan_with(vec![finding("hub", "medium", "restart.hub")]),
+            &PermissionPolicy::default(),
+            101,
+            "operator",
+        )
+        .unwrap_err();
+        match &blocked {
+            RepairExecutorError::Conflict(message) => {
+                assert!(message.contains("still open"), "{message}");
+                assert!(message.contains(&first.id.to_string()), "{message}");
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        // The API maps Conflict to 409 for humans; keep that contract.
+        // An all-denied audit run is still allowed while the first run is
+        // open, because it lands terminal and never joins the queue.
+        let audit_only = create_run_from_plan(
+            &conn,
+            &plan_with(vec![finding("gpu", "high", "reboot.host")]),
+            &PermissionPolicy::default(),
+            102,
+            "operator",
+        )
+        .unwrap();
+        assert_eq!(audit_only.status, RepairRunStatus::Rejected);
+
+        // Closing the first run frees the slot.
+        reject_run(&conn, first.id, 103, "operator").unwrap();
+        let third = create_run_from_plan(
+            &conn,
+            &plan_with(vec![finding("hub", "medium", "restart.hub")]),
+            &PermissionPolicy::default(),
+            104,
+            "operator",
+        )
+        .unwrap();
+        assert_eq!(third.status, RepairRunStatus::AwaitingApproval);
+    }
+
+    #[test]
     fn executing_requires_approval_then_verifies() {
         let conn = setup();
         let run = create_run_from_plan(
@@ -1984,13 +2073,29 @@ mod tests {
         let conn = setup();
         let mut ids = Vec::new();
         for i in 0..3 {
-            let run = approved_run(&conn, &["hub", "gpu", "comfyui"][..=i], 100 + i as i64 * 10);
-            conn.execute(
-                "UPDATE repair_runs SET status = 'applying' WHERE id = ?1",
-                params![run.id],
-            )
-            .unwrap();
-            ids.push(run.id);
+            if i == 0 {
+                let run = approved_run(&conn, &["hub"][..], 100);
+                conn.execute(
+                    "UPDATE repair_runs SET status = 'applying' WHERE id = ?1",
+                    params![run.id],
+                )
+                .unwrap();
+                ids.push(run.id);
+            } else {
+                // The single-open-run policy blocks a second open run via
+                // create_run_from_plan, so the multi-run stale database
+                // this recovery test needs is seeded with direct writes —
+                // the same shape a crash can leave behind (e.g. a second
+                // process that predated the policy). Recovery must repair
+                // every stale row, not just the newest one.
+                conn.execute(
+                    "INSERT INTO repair_runs (status, summary, created_at, updated_at)
+                     VALUES ('applying', ?1, ?2, ?2)",
+                    params![format!("stale run {i}"), 100 + i as i64 * 10],
+                )
+                .unwrap();
+                ids.push(conn.last_insert_rowid());
+            }
         }
         assert_eq!(recover_interrupted_runs(&conn, 200).unwrap(), 3);
         assert_eq!(recover_interrupted_runs(&conn, 201).unwrap(), 0);

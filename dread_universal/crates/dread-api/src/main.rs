@@ -760,10 +760,19 @@ fn open_database(path: &str) -> anyhow::Result<Connection> {
 }
 
 fn db_lock(state: &AppState) -> Result<std::sync::MutexGuard<'_, Connection>, ApiError> {
-    state
-        .db
-        .lock()
-        .map_err(|_| ApiError::internal("Database lock is unavailable"))
+    // Poisoned only means some caller panicked while holding the
+    // connection; the SQLite handle itself is still sound. Recovering the
+    // guard (and rolling back any transaction the panic left open) beats
+    // failing every future caller forever, which would also permanently
+    // stall the scheduler loops on their next tick.
+    let guard = match state.db.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if !guard.is_autocommit() {
+        let _ = guard.execute_batch("ROLLBACK");
+    }
+    Ok(guard)
 }
 
 fn read_static_asset(root: &FsPath, uri_path: &str) -> Result<(String, Vec<u8>), StatusCode> {
