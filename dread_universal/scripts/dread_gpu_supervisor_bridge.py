@@ -29,6 +29,10 @@ RESIDENT_MODELS_URL = os.environ.get(
 )
 INFERENCE_TIMEOUT = 1805
 TELEMETRY_CACHE_SECONDS = 2.0
+# RAM gate: never start a second (non-resident) model unless this much RAM is
+# free. On 2026-11-23 this machine froze 7 times when Basalt + another model
+# exceeded RAM; the kernel died before the OOM killer could act.
+LAUNCH_MIN_FREE_MIB = int(os.environ.get("DREAD_LAUNCH_MIN_FREE_MIB", "24576"))
 
 
 def read_memory_snapshot() -> dict:
@@ -192,6 +196,19 @@ class SupervisorBridge:
             return self._relay(RESIDENT_UPSTREAM_URL, normalized, leased=False)
         # Otherwise the lease starts the managed tensor service. Call its
         # upstream directly: port 11500 would acquire this same lease again.
+        # RAM gate first: starting a second model while RAM is already claimed
+        # (Basalt/Qwen resident) is exactly what froze this machine 7 times.
+        available = read_memory_snapshot().get("mem_available_mib", 0)
+        if available < LAUNCH_MIN_FREE_MIB:
+            return 429, {
+                "error": (
+                    f"RAM gate: refusing to launch '{normalized['model']}' — it needs at "
+                    f"least {LAUNCH_MIN_FREE_MIB} MiB free but only {available} MiB are "
+                    "available (a resident model likely holds the rest). This guard "
+                    "prevents the kernel-freeze condition; close other models or lower "
+                    "resident context before launching."
+                )
+            }
         return self._relay(TENSOR_UPSTREAM_URL, normalized, leased=True)
 
     def _relay(self, url: str, normalized: dict, leased: bool) -> tuple[int, dict]:
