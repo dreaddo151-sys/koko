@@ -21,9 +21,30 @@ from typing import Callable
 
 MAX_BODY_BYTES = 1_048_576
 TENSOR_UPSTREAM_URL = "http://127.0.0.1:11501/v1/chat/completions"
+RESIDENT_UPSTREAM_URL = os.environ.get(
+    "DREAD_RESIDENT_UPSTREAM_URL", "http://127.0.0.1:8088/v1/chat/completions"
+)
+RESIDENT_MODELS_URL = os.environ.get(
+    "DREAD_RESIDENT_MODELS_URL", "http://127.0.0.1:8088/v1/models"
+)
 INFERENCE_TIMEOUT = 1805
 TELEMETRY_CACHE_SECONDS = 2.0
 GPU_QUERY_FIELDS = "name,memory.total,memory.used,utilization.gpu,temperature.gpu"
+
+
+def resident_model_ids() -> list:
+    # A resident server (Basalt) already owns its GPU memory; its models can
+    # be proxied without acquiring the exclusive tensor lease.
+    try:
+        with urllib.request.urlopen(RESIDENT_MODELS_URL, timeout=2) as response:
+            data = json.loads(response.read().decode())
+        return [
+            item.get("id")
+            for item in data.get("data", [])
+            if isinstance(item, dict) and item.get("id")
+        ]
+    except Exception:
+        return []
 
 
 def collect_gpu_snapshot() -> tuple[list, str]:
@@ -145,35 +166,48 @@ class SupervisorBridge:
             normalized = validate_payload(payload)
         except ValueError as error:
             return 400, {"error": str(error)}
+        if normalized["model"] in resident_model_ids():
+            # Resident model already loaded; forward without the lease so chat
+            # works while the managed tensor service is not running.
+            return self._relay(RESIDENT_UPSTREAM_URL, normalized, leased=False)
+        # Otherwise the lease starts the managed tensor service. Call its
+        # upstream directly: port 11500 would acquire this same lease again.
+        return self._relay(TENSOR_UPSTREAM_URL, normalized, leased=True)
+
+    def _relay(self, url: str, normalized: dict, leased: bool) -> tuple[int, dict]:
         request = urllib.request.Request(
-            TENSOR_UPSTREAM_URL,
+            url,
             data=json.dumps(normalized).encode(),
             method="POST",
             headers={"Content-Type": "application/json", "Accept": "application/json"},
         )
         try:
-            # The lease starts the managed tensor service. Call its upstream
-            # directly: port 11500 would acquire this same lease a second time.
-            with self.gpu_lease("tensor"):
-                try:
-                    with self.upstream_open(request, timeout=INFERENCE_TIMEOUT) as response:
-                        status = response.status
-                        body = response.read(MAX_BODY_BYTES + 1)
-                except urllib.error.HTTPError as error:
-                    status = error.code
-                    body = error.read(MAX_BODY_BYTES + 1)
+            if leased:
+                with self.gpu_lease("tensor"):
+                    return self._open(request)
+            return self._open(request)
         except Exception as error:
-            return 503, {"error": f"GPU Supervisor lease or inference failed: {error}"}
+            state = "lease or inference" if leased else "resident inference"
+            return 503, {"error": f"GPU Supervisor {state} failed: {error}"}
+
+    def _open(self, request) -> tuple[int, dict]:
+        try:
+            with self.upstream_open(request, timeout=INFERENCE_TIMEOUT) as response:
+                status = response.status
+                body = response.read(MAX_BODY_BYTES + 1)
+        except urllib.error.HTTPError as error:
+            status = error.code
+            body = error.read(MAX_BODY_BYTES + 1)
         if len(body) > MAX_BODY_BYTES:
-            return 502, {"error": "tensor upstream response exceeds the 1 MiB result limit"}
+            return 502, {"error": "upstream response exceeds the 1 MiB result limit"}
         try:
             decoded = json.loads(body.decode())
         except (UnicodeDecodeError, json.JSONDecodeError):
-            return 502, {"error": "tensor upstream returned invalid JSON"}
+            return 502, {"error": "upstream returned invalid JSON"}
         if not 200 <= status < 300:
-            return status, decoded if isinstance(decoded, dict) else {"error": "tensor upstream request failed"}
+            return status, decoded if isinstance(decoded, dict) else {"error": "upstream request failed"}
         if not isinstance(decoded, dict):
-            return 502, {"error": "tensor upstream response must be a JSON object"}
+            return 502, {"error": "upstream response must be a JSON object"}
         return status, decoded
 
 
