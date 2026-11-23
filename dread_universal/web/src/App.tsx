@@ -4,6 +4,11 @@ import { Activity, AlertCircle, Bot, Check, ChevronRight, Cpu, FolderSearch, Gau
 import RepairPanel from "./RepairPanel";
 import DspinePanel from "./DspinePanel";
 
+// Installed-app bootstrap: a launcher can pass the operator token once via URL
+// fragment (#tok=…). It is moved into sessionStorage (same lifetime as a typed
+// token: cleared on disconnect/tab close) and stripped from the address bar.
+{const tokMatch=/^#tok=([^&]+)$/.exec(location.hash);if(tokMatch){try{sessionStorage.setItem("dread_token",decodeURIComponent(tokMatch[1]));}catch{}history.replaceState(null,"",location.pathname+location.search);}}
+
 type Model = { id: string; owned_by?: string };
 
 function chatAnswer(r:unknown):string|null{
