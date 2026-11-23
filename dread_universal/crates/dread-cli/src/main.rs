@@ -34,6 +34,7 @@ fn parse_args(args: &[String], env: &dyn Fn(&str) -> Option<String>) -> Result<C
         ("skills", "GET", "/api/skills"),
         ("dspine", "GET", "/api/dspine/status"),
         ("media", "GET", "/api/media/comfyui/monitor"),
+        ("tokens", "GET", "/api/usage/tokens"),
         ("repair-plan", "GET", "/api/repair/plan"),
         ("sync-skills", "POST", "/api/skills/sync"),
     ];
@@ -90,6 +91,7 @@ commands:
   skills        skills visible to the hub
   dspine        D-Spine lab engine roots and draft trees
   media         ComfyUI monitor (queue, history, progress)
+  tokens        token booster usage totals (provider-reported only)
   repair-plan   current findings and proposed actions (nothing is executed)
   sync-skills   rescan local skill roots (same as the dashboard button)
 
@@ -134,6 +136,11 @@ fn summarize(command: &str, value: &Value) -> String {
             Some(s) => format!("comfyui monitor: {s}"),
             None => "media monitor reported".to_string(),
         },
+        "tokens" => {
+            let total = value.get("total_tokens").and_then(Value::as_u64).unwrap_or(0);
+            let n = value.get("measured_responses").and_then(Value::as_u64).unwrap_or(0);
+            format!("{total} token(s) across {n} measured response(s) (provider-reported only)")
+        }
         "repair-plan" => {
             let findings = value.get("findings").and_then(Value::as_array).map(Vec::len).unwrap_or(0);
             format!("{findings} finding(s) — proposals only; approval and execution stay manual")
