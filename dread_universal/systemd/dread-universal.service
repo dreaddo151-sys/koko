@@ -1,0 +1,30 @@
+[Unit]
+Description=PROJECT DREAD Universal Master Hub
+Documentation=https://github.com/dreaddo151-sys/koko
+After=default.target
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.config/dread-universal/dread.env
+Environment=DREAD_BIND=127.0.0.1:8765
+Environment=DREAD_DB_PATH=%h/.local/share/dread-universal/data/dread_registry.sqlite3
+Environment=DREAD_WEB_ROOT=/usr/share/dread-universal/web/dist
+Environment=DREAD_SERVICES_CONFIG=%h/.config/dread-universal/services.toml
+Environment=DREAD_AGENTS_CONFIG=%h/.config/dread-universal/agents.toml
+WorkingDirectory=%h/.local/share/dread-universal
+ExecStart=/usr/bin/dread-universal
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target

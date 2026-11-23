@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "policy_id": "replace-with-approved-result-policy-v1",
+  "rules": [
+    {
+      "capability_id": "hermes.run",
+      "rule_id": "configure-hermes-result-shape",
+      "max_result_bytes": 1048576,
+      "required_json_pointers": [
+        "/__REPLACE_WITH_REQUIRED_VERIFIED_RESULT_FIELD__"
+      ],
+      "forbidden_json_pointers": [
+        "/debug/secret"
+      ]
+    },
+    {
+      "capability_id": "deerflow.run",
+      "rule_id": "configure-deerflow-result-shape",
+      "max_result_bytes": 1048576,
+      "required_json_pointers": [
+        "/__REPLACE_WITH_REQUIRED_VERIFIED_RESULT_FIELD__"
+      ],
+      "forbidden_json_pointers": [
+        "/debug/secret"
+      ]
+    },
+    {
+      "capability_id": "openhands.run",
+      "rule_id": "configure-openhands-result-shape",
+      "max_result_bytes": 1048576,
+      "required_json_pointers": [
+        "/__REPLACE_WITH_REQUIRED_VERIFIED_RESULT_FIELD__"
+      ],
+      "forbidden_json_pointers": [
+        "/debug/secret"
+      ]
+    }
+  ]
+}

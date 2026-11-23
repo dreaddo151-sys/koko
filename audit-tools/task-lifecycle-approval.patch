@@ -1,0 +1,349 @@
+--- a/crates/dread-api/src/main.rs
++++ b/crates/dread-api/src/main.rs
+@@ -10,7 +10,7 @@
+ use dread_discovery::{discover, load_services};
+ use dread_gpu::GpuGatewayClient;
+ use futures::StreamExt;
+-use rusqlite::{Connection, OptionalExtension, params};
++use rusqlite::{Connection, OptionalExtension, Transaction, params};
+ use serde::{Deserialize, Serialize};
+ use serde_json::{Value, json};
+ use std::{
+@@ -77,6 +77,45 @@
+     "review_required".to_string()
+ }
+ 
++#[derive(Debug, Serialize, Deserialize)]
++struct TaskRecord {
++    id: String,
++    title: String,
++    task_type: String,
++    capability_id: Option<String>,
++    payload: Value,
++    status: String,
++    approval_required: bool,
++    approved_by: Option<String>,
++    approval_reason: Option<String>,
++    created_at: u64,
++    updated_at: u64,
++}
++
++#[derive(Debug, Deserialize)]
++struct CreateTask {
++    title: String,
++    task_type: String,
++    capability_id: Option<String>,
++    payload: Value,
++}
++
++#[derive(Debug, Deserialize)]
++struct ApproveTask {
++    approved_by: String,
++    reason: String,
++}
++
++#[derive(Debug, Serialize)]
++struct TaskEvent {
++    task_id: String,
++    sequence: u64,
++    event_type: String,
++    payload: Value,
++    actor: String,
++    created_at: u64,
++}
++
+ #[derive(Debug)]
+ struct ApiError {
+     status: StatusCode,
+@@ -138,6 +177,31 @@
+              metadata TEXT NOT NULL DEFAULT '{}',
+              created_at INTEGER NOT NULL
+          );
++         CREATE TABLE IF NOT EXISTS tasks (
++             id TEXT PRIMARY KEY NOT NULL,
++             title TEXT NOT NULL,
++             task_type TEXT NOT NULL,
++             capability_id TEXT,
++             payload_json TEXT NOT NULL,
++             status TEXT NOT NULL,
++             approval_required INTEGER NOT NULL DEFAULT 1,
++             approved_by TEXT,
++             approval_reason TEXT,
++             created_at INTEGER NOT NULL,
++             updated_at INTEGER NOT NULL
++         );
++         CREATE TABLE IF NOT EXISTS task_events (
++             id INTEGER PRIMARY KEY AUTOINCREMENT,
++             task_id TEXT NOT NULL REFERENCES tasks(id),
++             sequence INTEGER NOT NULL,
++             event_type TEXT NOT NULL,
++             payload_json TEXT NOT NULL,
++             actor TEXT NOT NULL,
++             created_at INTEGER NOT NULL,
++             UNIQUE(task_id, sequence)
++         );
++         CREATE INDEX IF NOT EXISTS idx_tasks_status_created ON tasks(status, created_at);
++         CREATE INDEX IF NOT EXISTS idx_task_events_task_sequence ON task_events(task_id, sequence);
+          CREATE TABLE IF NOT EXISTS capabilities (
+              id TEXT PRIMARY KEY NOT NULL,
+              record_json TEXT NOT NULL,
+@@ -377,6 +441,174 @@
+     Ok(Json(json!({ "item": item })))
+ }
+ 
++fn append_task_event(
++    tx: &Transaction<'_>,
++    task_id: &str,
++    event_type: &str,
++    payload: &Value,
++    actor: &str,
++    created_at: u64,
++) -> Result<(), ApiError> {
++    let payload_json = serde_json::to_string(payload)
++        .map_err(|e| ApiError::internal(format!("Could not encode task event: {e}")))?;
++    tx.execute(
++        "INSERT INTO task_events (task_id, sequence, event_type, payload_json, actor, created_at)
++         SELECT ?1, COALESCE(MAX(sequence), 0) + 1, ?2, ?3, ?4, ?5
++         FROM task_events WHERE task_id = ?1",
++        params![task_id, event_type, payload_json, actor, created_at],
++    )
++    .map_err(|e| ApiError::internal(e.to_string()))?;
++    Ok(())
++}
++
++fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
++    let payload: String = row.get(4)?;
++    let status: String = row.get(5)?;
++    Ok(TaskRecord {
++        id: row.get(0)?,
++        title: row.get(1)?,
++        task_type: row.get(2)?,
++        capability_id: row.get(3)?,
++        payload: serde_json::from_str(&payload).unwrap_or(Value::Null),
++        status,
++        approval_required: row.get::<_, i64>(6)? != 0,
++        approved_by: row.get(7)?,
++        approval_reason: row.get(8)?,
++        created_at: row.get(9)?,
++        updated_at: row.get(10)?,
++    })
++}
++
++async fn create_task(
++    State(state): State<AppState>,
++    Json(input): Json<CreateTask>,
++) -> Result<(StatusCode, Json<Value>), ApiError> {
++    let title = input.title.trim();
++    let task_type = input.task_type.trim();
++    if title.is_empty() || task_type.is_empty() {
++        return Err(ApiError::bad_request("title and task_type are required"));
++    }
++    if title.len() > 240 || task_type.len() > 100 {
++        return Err(ApiError::bad_request("title or task_type exceeds its maximum length"));
++    }
++    if input.capability_id.as_ref().is_some_and(|id| id.trim().is_empty() || id.len() > 160) {
++        return Err(ApiError::bad_request("capability_id must be non-empty and at most 160 characters"));
++    }
++
++    let id = Uuid::new_v4().to_string();
++    let now = now_epoch();
++    let payload_json = serde_json::to_string(&input.payload)
++        .map_err(|e| ApiError::bad_request(format!("Invalid task payload: {e}")))?;
++    let mut conn = db_lock(&state)?;
++    let tx = conn.transaction().map_err(|e| ApiError::internal(e.to_string()))?;
++    tx.execute(
++        "INSERT INTO tasks (id, title, task_type, capability_id, payload_json, status, approval_required, created_at, updated_at)
++         VALUES (?1, ?2, ?3, ?4, ?5, 'pending_approval', 1, ?6, ?6)",
++        params![id, title, task_type, input.capability_id, payload_json, now],
++    )
++    .map_err(|e| ApiError::internal(e.to_string()))?;
++    append_task_event(&tx, &id, "task_created", &json!({"status": "pending_approval"}), "system", now)?;
++    tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
++
++    Ok((StatusCode::CREATED, Json(json!({"item": TaskRecord {
++        id, title: title.to_string(), task_type: task_type.to_string(), capability_id: input.capability_id,
++        payload: input.payload, status: "pending_approval".to_string(), approval_required: true,
++        approved_by: None, approval_reason: None, created_at: now, updated_at: now
++    }}))))
++}
++
++async fn list_tasks(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
++    let conn = db_lock(&state)?;
++    let mut stmt = conn.prepare(
++        "SELECT id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, approval_reason, created_at, updated_at
++         FROM tasks ORDER BY created_at DESC"
++    ).map_err(|e| ApiError::internal(e.to_string()))?;
++    let rows = stmt.query_map([], task_from_row).map_err(|e| ApiError::internal(e.to_string()))?;
++    let mut items = Vec::new();
++    for row in rows { items.push(row.map_err(|e| ApiError::internal(e.to_string()))?); }
++    Ok(Json(json!({"items": items, "count": items.len()})))
++}
++
++async fn get_task(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
++    let conn = db_lock(&state)?;
++    let task = conn.query_row(
++        "SELECT id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, approval_reason, created_at, updated_at
++         FROM tasks WHERE id = ?1", params![id], task_from_row
++    ).optional().map_err(|e| ApiError::internal(e.to_string()))?;
++    task.map(|item| Json(json!({"item": item}))).ok_or_else(|| ApiError::not_found("Task not found"))
++}
++
++async fn task_events(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
++    let conn = db_lock(&state)?;
++    let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1)", params![id], |row| row.get(0))
++        .map_err(|e| ApiError::internal(e.to_string()))?;
++    if !exists { return Err(ApiError::not_found("Task not found")); }
++    let mut stmt = conn.prepare(
++        "SELECT sequence, event_type, payload_json, actor, created_at FROM task_events WHERE task_id = ?1 ORDER BY sequence"
++    ).map_err(|e| ApiError::internal(e.to_string()))?;
++    let rows = stmt.query_map(params![id], |row| {
++        let encoded: String = row.get(2)?;
++        Ok(TaskEvent { task_id: id.clone(), sequence: row.get(0)?, event_type: row.get(1)?,
++            payload: serde_json::from_str(&encoded).unwrap_or(Value::Null), actor: row.get(3)?, created_at: row.get(4)? })
++    }).map_err(|e| ApiError::internal(e.to_string()))?;
++    let mut items = Vec::new();
++    for row in rows { items.push(row.map_err(|e| ApiError::internal(e.to_string()))?); }
++    Ok(Json(json!({"items": items, "count": items.len()})))
++}
++
++async fn approve_task(
++    State(state): State<AppState>, Path(id): Path<String>, Json(input): Json<ApproveTask>
++) -> Result<Json<Value>, ApiError> {
++    let approved_by = input.approved_by.trim();
++    let reason = input.reason.trim();
++    if approved_by.is_empty() || reason.is_empty() { return Err(ApiError::bad_request("approved_by and reason are required")); }
++    if approved_by.len() > 160 || reason.len() > 2000 { return Err(ApiError::bad_request("approval fields exceed their maximum length")); }
++    let now = now_epoch();
++    let mut conn = db_lock(&state)?;
++    let tx = conn.transaction().map_err(|e| ApiError::internal(e.to_string()))?;
++    let changed = tx.execute(
++        "UPDATE tasks SET status = 'approved', approved_by = ?2, approval_reason = ?3, updated_at = ?4
++         WHERE id = ?1 AND status = 'pending_approval' AND approval_required = 1",
++        params![id, approved_by, reason, now],
++    ).map_err(|e| ApiError::internal(e.to_string()))?;
++    if changed == 0 {
++        let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1)", params![id], |row| row.get(0))
++            .map_err(|e| ApiError::internal(e.to_string()))?;
++        if !exists { return Err(ApiError::not_found("Task not found")); }
++        return Err(ApiError { status: StatusCode::CONFLICT, message: "Task is not awaiting approval".into() });
++    }
++    append_task_event(&tx, &id, "task_approved", &json!({"approved_by": approved_by, "reason": reason}), approved_by, now)?;
++    let task = tx.query_row(
++        "SELECT id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, approval_reason, created_at, updated_at
++         FROM tasks WHERE id = ?1", params![id], task_from_row
++    ).map_err(|e| ApiError::internal(e.to_string()))?;
++    tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
++    Ok(Json(json!({"item": task, "execution_started": false})))
++}
++
++async fn cancel_task(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
++    let now = now_epoch();
++    let mut conn = db_lock(&state)?;
++    let tx = conn.transaction().map_err(|e| ApiError::internal(e.to_string()))?;
++    let changed = tx.execute(
++        "UPDATE tasks SET status = 'cancelled', updated_at = ?2 WHERE id = ?1 AND status IN ('pending_approval', 'approved', 'queued')",
++        params![id, now],
++    ).map_err(|e| ApiError::internal(e.to_string()))?;
++    if changed == 0 {
++        let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1)", params![id], |row| row.get(0))
++            .map_err(|e| ApiError::internal(e.to_string()))?;
++        if !exists { return Err(ApiError::not_found("Task not found")); }
++        return Err(ApiError { status: StatusCode::CONFLICT, message: "Task cannot be cancelled in its current state".into() });
++    }
++    append_task_event(&tx, &id, "task_cancelled", &json!({"status": "cancelled"}), "operator", now)?;
++    let task = tx.query_row(
++        "SELECT id, title, task_type, capability_id, payload_json, status, approval_required, approved_by, approval_reason, created_at, updated_at
++         FROM tasks WHERE id = ?1", params![id], task_from_row
++    ).map_err(|e| ApiError::internal(e.to_string()))?;
++    tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
++    Ok(Json(json!({"item": task, "execution_started": false})))
++}
++
+ async fn gpu_health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+     let health = state.gpu.health().await.map_err(|e| ApiError {
+         status: StatusCode::SERVICE_UNAVAILABLE,
+@@ -471,1 +703,6 @@
+         .route("/api/services", get(services))
++        .route("/api/tasks", get(list_tasks).post(create_task))
++        .route("/api/tasks/{id}", get(get_task))
++        .route("/api/tasks/{id}/events", get(task_events))
++        .route("/api/tasks/{id}/approve", axum::routing::post(approve_task))
++        .route("/api/tasks/{id}/cancel", axum::routing::post(cancel_task))
+@@ -670,6 +907,77 @@
+         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+         server.abort();
+     }
++
++    #[tokio::test]
++    async fn task_creation_requires_approval_and_persists_event_history() {
++        let (router, server) = test_app().await;
++        let payload = json!({"title": "Audit workflow", "task_type": "security_audit", "payload": {"target": "local-project"}});
++        let response = router.clone().oneshot(Request::builder().method("POST").uri("/api/tasks")
++            .header("content-type", "application/json").body(Body::from(payload.to_string())).unwrap()).await.unwrap();
++        assert_eq!(response.status(), StatusCode::CREATED);
++        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
++        let created: Value = serde_json::from_slice(&body).unwrap();
++        assert_eq!(created["item"]["status"], "pending_approval");
++        assert_eq!(created["item"]["approval_required"], true);
++        let id = created["item"]["id"].as_str().unwrap();
++
++        let response = router.clone().oneshot(Request::builder().method("POST").uri(format!("/api/tasks/{id}/approve"))
++            .header("content-type", "application/json")
++            .body(Body::from(json!({"approved_by":"operator", "reason":"Reviewed scope"}).to_string())).unwrap()).await.unwrap();
++        assert_eq!(response.status(), StatusCode::OK);
++        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
++        let approved: Value = serde_json::from_slice(&body).unwrap();
++        assert_eq!(approved["item"]["status"], "approved");
++        assert_eq!(approved["execution_started"], false);
++
++        let response = router.clone().oneshot(Request::builder().uri(format!("/api/tasks/{id}/events"))
++            .body(Body::empty()).unwrap()).await.unwrap();
++        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
++        let events: Value = serde_json::from_slice(&body).unwrap();
++        assert_eq!(events["count"], 2);
++        assert_eq!(events["items"][0]["event_type"], "task_created");
++        assert_eq!(events["items"][1]["event_type"], "task_approved");
++        server.abort();
++    }
++
++    #[tokio::test]
++    async fn task_approval_is_single_use_and_cancellation_is_audited() {
++        let (router, server) = test_app().await;
++        let response = router.clone().oneshot(Request::builder().method("POST").uri("/api/tasks")
++            .header("content-type", "application/json")
++            .body(Body::from(json!({"title":"Cancel me", "task_type":"manual", "payload":{}}).to_string())).unwrap()).await.unwrap();
++        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
++        let created: Value = serde_json::from_slice(&body).unwrap();
++        let id = created["item"]["id"].as_str().unwrap();
++
++        let response = router.clone().oneshot(Request::builder().method("POST").uri(format!("/api/tasks/{id}/approve"))
++            .header("content-type", "application/json")
++            .body(Body::from(json!({"approved_by":"operator", "reason":"Reviewed"}).to_string())).unwrap()).await.unwrap();
++        assert_eq!(response.status(), StatusCode::OK);
++        let response = router.clone().oneshot(Request::builder().method("POST").uri(format!("/api/tasks/{id}/approve"))
++            .header("content-type", "application/json")
++            .body(Body::from(json!({"approved_by":"operator", "reason":"Again"}).to_string())).unwrap()).await.unwrap();
++        assert_eq!(response.status(), StatusCode::CONFLICT);
++
++        let response = router.clone().oneshot(Request::builder().method("POST").uri(format!("/api/tasks/{id}/cancel"))
++            .body(Body::empty()).unwrap()).await.unwrap();
++        assert_eq!(response.status(), StatusCode::OK);
++        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
++        let cancelled: Value = serde_json::from_slice(&body).unwrap();
++        assert_eq!(cancelled["item"]["status"], "cancelled");
++        assert_eq!(cancelled["execution_started"], false);
++        server.abort();
++    }
++
++    #[tokio::test]
++    async fn task_creation_rejects_missing_title_or_type() {
++        let (router, server) = test_app().await;
++        let response = router.oneshot(Request::builder().method("POST").uri("/api/tasks")
++            .header("content-type", "application/json")
++            .body(Body::from(json!({"title":" ", "task_type":"", "payload":{}}).to_string())).unwrap()).await.unwrap();
++        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
++        server.abort();
++    }
+ 
+     #[tokio::test]
+     async fn gpu_health_route_uses_gateway() {

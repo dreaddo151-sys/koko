@@ -1,0 +1,203 @@
+name: DREAD agent and capability foundation
+
+on:
+  push:
+    branches:
+      - feature/agent-capability-foundation-2026-11-17
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dread-agent-readonly-discovery
+  cancel-in-progress: true
+
+jobs:
+  rust-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout isolated feature branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Download and verify the exact uploaded archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            "https://github.com/dreaddo151-sys/koko/releases/download/dread-universal-v0.4.0-test/DREAD_UNIVERSAL_COMPLETE_TRUE.zip" \
+            --output /tmp/dread-upload.zip
+          echo "8a53dc9afb80b01bdf88b24b46df7d3bd58d98b67437efb2d9fdee9fb80394c0  /tmp/dread-upload.zip" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/dread-source"
+          unzip -q /tmp/dread-upload.zip -d "$RUNNER_TEMP/dread-source"
+          test -f "$RUNNER_TEMP/dread-source/tmp/dread_zip_check/DREAD-UNIVERSAL/dread_universal/Cargo.toml"
+          echo "WORKSPACE=$RUNNER_TEMP/dread-source/tmp/dread_zip_check/DREAD-UNIVERSAL/dread_universal" >> "$GITHUB_ENV"
+
+      - name: Apply the previously verified hardening patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          patch --batch --forward -p0 < "$GITHUB_WORKSPACE/audit-tools/discovery-hardening.patch"
+          patch --batch --forward -p0 < "$GITHUB_WORKSPACE/audit-tools/gpu-api-hardening.patch"
+          cd "$WORKSPACE/.."
+          awk '
+            index($0, "--- dread_universal/integrations/pstack/README.md") == 1 { skip=1 }
+            index($0, "--- dread_universal/scripts/import-pstack.sh") == 1 { skip=0 }
+            !skip { print }
+          ' "$GITHUB_WORKSPACE/audit-tools/docs.patch" | patch --batch --forward -p0
+          cp "$GITHUB_WORKSPACE/audit-tools/PSTACK_README.md" "$WORKSPACE/integrations/pstack/README.md"
+          patch --batch --forward -p0 < "$GITHUB_WORKSPACE/audit-tools/pstack-pin-correction.patch"
+          cp "$GITHUB_WORKSPACE/audit-tools/PROJECT_STATUS.md" "$WORKSPACE/docs/PROJECT_STATUS.md"
+          cp "$GITHUB_WORKSPACE/audit-tools/VERIFICATION.md" "$WORKSPACE/docs/VERIFICATION.md"
+          cp "$GITHUB_WORKSPACE/audit-tools/README.md" "$WORKSPACE/README.md"
+
+      - name: Apply provider-neutral agent and capability foundation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/agent-capability-foundation.patch"
+          grep -q 'name = "dread-agents"' Cargo.lock
+          test -f crates/dread-agents/src/lib.rs
+          grep -q 'api/capabilities' crates/dread-api/src/main.rs
+          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/agent-capability-clippy-fix.patch"
+          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/task-lifecycle-approval.patch"
+          grep -q 'api/tasks' crates/dread-api/src/main.rs
+          grep -q 'task_events' crates/dread-api/src/main.rs
+          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/agent-readonly-discovery.patch"
+          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/pstack-capability-import.patch"
+          python3 - "$WORKSPACE/crates/dread-api/src/main.rs" <<'PY'
+          from pathlib import Path
+          import sys
+          path = Path(sys.argv[1])
+          source = path.read_text()
+          handler_marker = "async fn list_registry(State(state): State<AppState>)"
+          if "async fn agents()" not in source:
+              position = source.index(handler_marker)
+              handler = '''async fn agents() -> Result<Json<Value>, ApiError> {
+              let config_path = env::var("DREAD_AGENTS_CONFIG")
+                  .unwrap_or_else(|_| "config/agents.toml".to_string());
+              let configured = match load_agents(&config_path) {
+                  Ok(items) => items,
+                  Err(_) if !FsPath::new(&config_path).exists() => Vec::new(),
+                  Err(error) => return Err(ApiError::bad_request(error)),
+              };
+              let results = discover_agents(configured).await;
+              serde_json::to_value(results).map(Json).map_err(|error| {
+                  ApiError::internal(format!("Could not serialize agent discovery results: {error}"))
+              })
+          }
+
+          '''
+              source = source[:position] + handler + source[position:]
+          marker = "fn app(state: AppState) -> Router {"
+          start = source.index(marker)
+          route = '        .route("/api/services", get(services))'
+          insertion = '        .route("/api/agents", get(agents))'
+          if insertion in source[start:]:
+              raise SystemExit("Agent route already exists in production router")
+          position = source.index(route, start)
+          source = source[:position] + route + "\n" + insertion + source[position + len(route):]
+          path.write_text(source)
+          PY
+          grep -q 'api/agents' crates/dread-api/src/main.rs
+          test -f config/agents.toml
+          grep -q "Read-only local agent health discovery" "$WORKSPACE/docs/PROJECT_STATUS.md"
+          grep -q "REDIRECTED" "$WORKSPACE/docs/VERIFICATION.md"
+          bash -n scripts/import-pstack.sh
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p "test_import_pstack_capabilities.py" -v
+          bash scripts/import-pstack.sh
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/import_pstack_capabilities.py
+
+      - name: Install stable Rust, rustfmt and Clippy
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Format workspace
+        run: cargo fmt --all
+        working-directory: ${{ env.WORKSPACE }}
+
+      - name: Apply reconnectable WebSocket task-event stream
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/task-websocket-stream.patch"
+          grep -q '/api/tasks/{id}/stream' crates/dread-api/src/main.rs
+          cargo fmt --all
+          cargo check --workspace
+
+      - name: Apply bounded orchestration kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          patch --batch --forward -p1 < "$GITHUB_WORKSPACE/audit-tools/bounded-orchestrator.patch"
+          grep -q 'name = "dread-orchestrator"' crates/dread-orchestrator/Cargo.toml
+          grep -q 'max_admitted' crates/dread-orchestrator/src/lib.rs
+          cargo fmt --all
+          cargo check --workspace
+
+      - name: Verify formatting
+        run: cargo fmt --all -- --check
+        working-directory: ${{ env.WORKSPACE }}
+
+      - name: Clippy with warnings denied
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        working-directory: ${{ env.WORKSPACE }}
+
+      - name: Workspace tests
+        run: cargo test --workspace --locked
+        working-directory: ${{ env.WORKSPACE }}
+
+      - name: Optimized release build
+        run: cargo build --workspace --release --locked
+        working-directory: ${{ env.WORKSPACE }}
+
+      - name: Package verified source candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dread-final"
+          cp -a "$RUNNER_TEMP/dread-source/tmp/dread_zip_check/DREAD-UNIVERSAL" "$RUNNER_TEMP/dread-final/"
+          cp -a "$RUNNER_TEMP/dread-source/tmp/dread_zip_check/legacy-reference" "$RUNNER_TEMP/dread-final/"
+          ROOT="$RUNNER_TEMP/dread-final/DREAD-UNIVERSAL"
+          rm -rf "$ROOT/dread_universal/target"
+          # Exclude nested historical bundles from the distributable; source and backup files remain intact.
+          rm -f "$ROOT/DREAD-UNIVERSAL.zip" "$ROOT/dread_universal_source.zip" "$ROOT/dread_universal/dread_universal_source.zip"
+          FILE_COUNT=$(find "$ROOT" "$RUNNER_TEMP/dread-final/legacy-reference" -type f | wc -l)
+          cat > "$ROOT/BUNDLE_MANIFEST.txt" <<EOF
+          PROJECT DREAD UNIVERSAL SOURCE BUNDLE
+          Package: DREAD_UNIVERSAL_AGENT_DISCOVERY_FOUNDATION
+          Project version: 0.4.0
+          Repository: dreaddo151-sys/koko
+          Branch: feature/agent-capability-foundation-2026-11-17
+          GitHub Actions run: $GITHUB_RUN_ID
+          Baseline archive SHA-256: 87a9f53911599a06d1501ed1c4ae5751f523be95184932fe3a446f7cd8927305
+          Files packaged: $FILE_COUNT
+
+          Includes the Rust workspace, configuration, documentation, legacy reference
+          sources and historical source backups. Nested old ZIP bundles and Rust target
+          directories are excluded to avoid shipping stale duplicate snapshots.
+
+          This package is a verified Rust foundation, not a complete Universal Hub.
+          Live workstation integration and remaining blueprint milestones are documented
+          in dread_universal/docs/PROJECT_STATUS.md.
+          EOF
+          test -z "$(find "$ROOT" -type f -name '*.zip' -print -quit)"
+          cd "$RUNNER_TEMP/dread-final"
+          zip -qr "$RUNNER_TEMP/DREAD_UNIVERSAL_AGENT_DISCOVERY_FOUNDATION.zip" DREAD-UNIVERSAL legacy-reference
+          unzip -tq "$RUNNER_TEMP/DREAD_UNIVERSAL_AGENT_DISCOVERY_FOUNDATION.zip"
+          sha256sum "$RUNNER_TEMP/DREAD_UNIVERSAL_AGENT_DISCOVERY_FOUNDATION.zip"
+
+      - name: Upload verified candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: DREAD_UNIVERSAL_AGENT_DISCOVERY_FOUNDATION
+          path: ${{ runner.temp }}/DREAD_UNIVERSAL_AGENT_DISCOVERY_FOUNDATION.zip
+          if-no-files-found: error
+          retention-days: 7

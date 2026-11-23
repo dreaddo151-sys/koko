@@ -1,0 +1,309 @@
+#!/usr/bin/env python3
+"""Import pinned Pstack metadata into DREAD's disabled-by-default capability registry.
+
+This tool never executes imported skills, agents, hooks, scripts, or automations.
+It defaults to a local validation/dry-run; POST requests require --apply.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import ipaddress
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+PINNED_REPOSITORY = "https://github.com/cursor/plugins"
+PINNED_COMMIT = "2f87c854fe3e2fcda44ca86b46ede35aad3c46b7"
+PINNED_TREE = "71d8e1d1d718e2149dc43b2535618064f29cba6b"
+PINNED_VERSION = "0.15.43"
+PINNED_LICENSE = "MIT"
+PINNED_CATALOG_SHA256 = "8e016f2e0d641d0e2aa8e8b042d8ea3b2a60b818c7621322fecff72cb8bfcc6f"
+PINNED_MARKER_SHA256 = "7995b0a25a19baff7307322a3e3bb2ddfffcac53b99d1fe2714bb346a005df7c"
+PINNED_MANIFEST_SHA256 = "656bb69215a4277e4ea67dcd2f7786bbad9d17d08e4717bb32c44ba5e404fcd7"
+PINNED_LICENSE_SHA256 = "bc957ca6bee02792566a1a028d105e02e247c6e77cf057061674273da77b200e"
+
+
+class ImportErrorSafe(RuntimeError):
+    pass
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def validate_loopback_api_url(raw: str) -> str:
+    parsed = urllib.parse.urlsplit(raw)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ImportErrorSafe("API URL contains an invalid port") from exc
+    if parsed.scheme != "http" or not parsed.hostname or port is None:
+        raise ImportErrorSafe("API URL must be explicit-port loopback HTTP")
+    if parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
+        raise ImportErrorSafe("API URL cannot contain credentials, query strings or fragments")
+    host = parsed.hostname.lower()
+    if host != "localhost":
+        try:
+            if not ipaddress.ip_address(host).is_loopback:
+                raise ImportErrorSafe("API URL host must be loopback")
+        except ValueError as exc:
+            raise ImportErrorSafe("API URL host must be localhost or a loopback IP") from exc
+    if parsed.path not in ("", "/"):
+        raise ImportErrorSafe("API base URL must not include a path")
+    return raw.rstrip("/")
+
+
+def _safe_source_file(source_root: Path, relative: str) -> Path:
+    rel = Path(relative)
+    if rel.is_absolute() or ".." in rel.parts:
+        raise ImportErrorSafe(f"Unsafe catalog path: {relative}")
+    candidate = (source_root / rel).resolve()
+    if not _is_within(candidate, source_root.resolve()) or not candidate.is_file():
+        raise ImportErrorSafe(f"Catalog source file is missing or escapes the pinned tree: {relative}")
+    return candidate
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_import_records(project_root: Path) -> list[dict[str, Any]]:
+    project_root = project_root.resolve()
+    integration_root = project_root / "integrations" / "pstack"
+    source_root = integration_root / "upstream"
+    catalog_path = integration_root / "catalog.json"
+    marker_path = source_root / ".dread-import.json"
+    manifest_path = source_root / "plugin.json"
+    license_path = source_root / "LICENSE"
+
+    resolved_integration = integration_root.resolve()
+    resolved_source = source_root.resolve()
+    if not _is_within(resolved_integration, project_root) or not _is_within(resolved_source, resolved_integration):
+        raise ImportErrorSafe("Pstack integration or upstream source directory escapes the project root")
+    for path in (catalog_path, marker_path, manifest_path, license_path):
+        if path.is_symlink() or not path.is_file():
+            raise ImportErrorSafe(f"Required pinned Pstack file is missing or unsafe: {path}")
+
+    if _sha256(catalog_path) != PINNED_CATALOG_SHA256:
+        raise ImportErrorSafe("Pstack catalog hash does not match the pinned inventory")
+    if _sha256(marker_path) != PINNED_MARKER_SHA256:
+        raise ImportErrorSafe("Pstack import marker hash does not match the pinned source snapshot")
+    if _sha256(manifest_path) != PINNED_MANIFEST_SHA256:
+        raise ImportErrorSafe("Pstack upstream manifest hash does not match the pinned source snapshot")
+    if _sha256(license_path) != PINNED_LICENSE_SHA256:
+        raise ImportErrorSafe("Pstack license file hash does not match the pinned source snapshot")
+
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    upstream = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if catalog.get("schema_version") != 1 or catalog.get("name") != "pstack":
+        raise ImportErrorSafe("Unsupported Pstack catalog schema or name")
+
+    if marker.get("schema_version") != 1 or marker.get("verified_by") != "scripts/import-pstack.sh":
+        raise ImportErrorSafe("Pstack source is missing the expected pinned-import verification marker")
+
+    expected = {
+        "repository": PINNED_REPOSITORY,
+        "commit_sha": PINNED_COMMIT,
+        "tree_sha": PINNED_TREE,
+        "manifest_version": PINNED_VERSION,
+        "license": PINNED_LICENSE,
+    }
+    catalog_pins = {
+        "repository": catalog.get("repository"),
+        "commit_sha": catalog.get("upstream_commit_sha"),
+        "tree_sha": catalog.get("upstream_tree_sha"),
+        "manifest_version": catalog.get("upstream_manifest_version"),
+        "license": catalog.get("license"),
+    }
+    expected_catalog_pins = {
+        "repository": PINNED_REPOSITORY,
+        "commit_sha": PINNED_COMMIT,
+        "tree_sha": PINNED_TREE,
+        "manifest_version": PINNED_VERSION,
+        "license": PINNED_LICENSE,
+    }
+    if catalog_pins != expected_catalog_pins:
+        raise ImportErrorSafe("Pstack catalog metadata differs from the hard-pinned upstream revision")
+    for key, value in expected.items():
+        if not value or marker.get(key) != value:
+            raise ImportErrorSafe(f"Pinned Pstack import metadata mismatch for {key}")
+
+    if upstream.get("name") != "pstack":
+        raise ImportErrorSafe("Imported upstream manifest is not pstack")
+    if upstream.get("version") != expected["manifest_version"]:
+        raise ImportErrorSafe("Imported Pstack version does not match pinned catalog")
+    if upstream.get("license") != expected["license"]:
+        raise ImportErrorSafe("Imported Pstack license does not match pinned catalog")
+
+    skills = catalog.get("skills")
+    agents = catalog.get("agents", [])
+    if not isinstance(skills, list) or len(skills) != catalog.get("inventory_count"):
+        raise ImportErrorSafe("Pstack skill inventory count does not match catalog")
+    if not isinstance(agents, list):
+        raise ImportErrorSafe("Pstack agents inventory must be an array")
+
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    imported_at = int(time.time())
+    for kind, entries, prefix in (("skill", skills, "pstack.skill"), ("agent", agents, "pstack.agent")):
+        for entry in entries:
+            item_id = entry.get("id")
+            relative = entry.get("path")
+            compatibility = entry.get("initial_compatibility", "requires_review")
+            if not isinstance(item_id, str) or not item_id or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for c in item_id):
+                raise ImportErrorSafe(f"Invalid Pstack {kind} identifier: {item_id!r}")
+            capability_id = f"{prefix}.{item_id}"
+            if capability_id in seen:
+                raise ImportErrorSafe(f"Duplicate Pstack capability ID: {capability_id}")
+            seen.add(capability_id)
+            if not isinstance(relative, str) or not relative.startswith(("skills/" if kind == "skill" else "agents/")):
+                raise ImportErrorSafe(f"Invalid Pstack {kind} source path: {relative!r}")
+            source_file = _safe_source_file(source_root, relative)
+            content_hash = _sha256(source_file)
+            pinned_hash = marker.get("files_sha256", {}).get(relative)
+            if not pinned_hash or pinned_hash != content_hash:
+                raise ImportErrorSafe(f"Pinned Pstack file hash mismatch: {relative}")
+            content = source_file.read_text(encoding="utf-8", errors="replace")
+            heading = next((line.lstrip("# ").strip() for line in content.splitlines() if line.startswith("# ")), item_id)
+            source_uri = f"{expected['repository'].rstrip('/')}/tree/{expected['commit_sha']}/pstack/{relative}"
+            records.append({
+                "id": capability_id,
+                "name": heading[:200] or item_id,
+                "kind": kind,
+                "description": f"Imported Pstack {kind} metadata for review. Source content is not executed.",
+                "version": expected["manifest_version"],
+                "license": expected["license"],
+                "provenance": {
+                    "source_name": "Pstack",
+                    "source_uri": source_uri,
+                    "source_version": expected["manifest_version"],
+                    "source_revision": expected["commit_sha"],
+                    "imported_at": imported_at,
+                },
+                "compatibility": compatibility,
+                "dependencies": [],
+                "adapter": None,
+                "manifest": {
+                    "source_path": relative,
+                    "source_sha256": content_hash,
+                    "source_tree_sha": expected["tree_sha"],
+                    "initial_compatibility": compatibility,
+                    "review_state": "disabled_until_reviewed",
+                    "execution_performed": False,
+                },
+            })
+    return records
+
+
+def api_headers(token: str, has_payload: bool = False) -> dict[str, str]:
+    if len(token) < 32 or token.strip() != token or any(character.isspace() for character in token):
+        raise ImportErrorSafe("DREAD_API_TOKEN must be configured, contain at least 32 characters and contain no whitespace")
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
+    if has_payload:
+        headers["Content-Type"] = "application/json"
+    return headers
+
+
+def _request(
+    opener: urllib.request.OpenerDirector,
+    url: str,
+    method: str,
+    token: str,
+    payload: dict | None = None,
+) -> tuple[int, dict | None]:
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        method=method,
+        headers=api_headers(token, data is not None),
+    )
+    try:
+        with opener.open(request, timeout=3) as response:
+            body = response.read(1024 * 1024)
+            return response.status, json.loads(body) if body else None
+    except urllib.error.HTTPError as exc:
+        body = exc.read(1024 * 1024)
+        parsed = None
+        if body:
+            try:
+                parsed = json.loads(body)
+            except json.JSONDecodeError:
+                parsed = None
+        return exc.code, parsed
+
+
+def apply_records(records: list[dict[str, Any]], api_base: str, token: str) -> tuple[int, int]:
+    base = validate_loopback_api_url(api_base)
+    api_headers(token)
+    if not records or len(records) > 128:
+        raise ImportErrorSafe("Capability batch must contain between 1 and 128 records")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    status, body = _request(
+        opener,
+        f"{base}/api/capabilities/import-batch",
+        "POST",
+        token,
+        {"records": records},
+    )
+    if status != 201 or not isinstance(body, dict):
+        raise ImportErrorSafe(f"Atomic capability import failed: HTTP {status} {body}")
+    created = body.get("created")
+    skipped = body.get("already_present")
+    if (
+        type(created) is not int
+        or type(skipped) is not int
+        or created < 0
+        or skipped < 0
+        or created + skipped != len(records)
+        or body.get("execution_started") is not False
+    ):
+        raise ImportErrorSafe("Capability import API returned an invalid or incomplete batch result")
+    return created, skipped
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--api-base", default="http://127.0.0.1:8765")
+    parser.add_argument("--apply", action="store_true", help="POST disabled capability metadata using DREAD_API_TOKEN")
+    args = parser.parse_args(argv)
+    try:
+        records = load_import_records(args.root.resolve())
+        skills = sum(item["kind"] == "skill" for item in records)
+        agents = len(records) - skills
+        print(f"Validated pinned Pstack inventory: {skills} skills, {agents} agents; all start disabled.")
+        if not args.apply:
+            print("Dry run only. Re-run with --apply to register metadata; no imported content will execute.")
+            return 0
+        token = os.environ.get("DREAD_API_TOKEN", "")
+        created, skipped = apply_records(records, args.api_base, token)
+        print(f"Capability metadata import complete: created={created}, already_present={skipped}; execution=none.")
+        return 0
+    except (ImportErrorSafe, OSError, json.JSONDecodeError, urllib.error.URLError) as exc:
+        print(f"Pstack capability import refused: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

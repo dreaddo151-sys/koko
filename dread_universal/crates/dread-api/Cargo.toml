@@ -1,0 +1,36 @@
+[package]
+name = "dread-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "dread-universal"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+dread-discovery = { path = "../dread-discovery" }
+dread-agents = { path = "../dread-agents" }
+dread-skills = { path = "../dread-skills" }
+dread-platform = { path = "../dread-platform" }
+dread-gpu = { path = "../dread-gpu" }
+dread-orchestrator = { path = "../dread-orchestrator" }
+dread-media = { path = "../dread-media" }
+futures.workspace = true
+libc.workspace = true
+reqwest.workspace = true
+ring.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }
+tokio-tungstenite.workspace = true

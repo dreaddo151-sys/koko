@@ -1,0 +1,276 @@
+name: DREAD canonical source consolidation
+
+on:
+  push:
+    branches:
+      - feature/agent-capability-foundation-2026-11-17
+      - integration/dread-canonical-source-run81
+      - work/capability-registry-console-2026-11-17
+      - work/futuristic-command-center-2026-11-17
+    paths:
+      - .github/workflows/dread-canonical-source.yml
+      - dread_universal/Cargo.toml
+      - dread_universal/Cargo.lock
+      - dread_universal/crates/**
+      - dread_universal/config/**
+      - dread_universal/scripts/**
+      - dread_universal/web/**
+      - dread_universal/README.md
+      - dread_universal/docs/**
+      - legacy-reference/**
+      - SOURCE_PROVENANCE_RUN81.md
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: dread-canonical-source-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  canonical-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TARGET_BRANCH: ${{ github.ref_name }}
+      SOURCE_RUN_ID: "44017474488"
+      OUTER_SHA256: dfeaffa4fcac30f2a6d7353e9c2b4b138cf88573f9244b443ca00075429419e6
+      INNER_SHA256: 004bfb598fed41c1024467ff3a354e4bceb09dbbc14f113d5b1998cc2ff9fe50
+    steps:
+      - name: Checkout triggering branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Import exact run 81 artifact into a dedicated source branch
+        if: github.ref == 'refs/heads/feature/agent-capability-foundation-2026-11-17'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cp .github/workflows/dread-canonical-source.yml "$RUNNER_TEMP/dread-canonical-source.yml"
+          if git ls-remote --exit-code --heads origin "$TARGET_BRANCH" >/dev/null 2>&1; then
+            git fetch origin "$TARGET_BRANCH"
+            git checkout -B "$TARGET_BRANCH" FETCH_HEAD
+            mkdir -p .github/workflows
+            cp "$RUNNER_TEMP/dread-canonical-source.yml" .github/workflows/dread-canonical-source.yml
+            git add .github/workflows/dread-canonical-source.yml
+            if ! git diff --cached --quiet; then
+              git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "Fix canonical source verification workflow"
+              git push origin "HEAD:refs/heads/$TARGET_BRANCH"
+            fi
+            exit 0
+          fi
+
+          curl --fail --location --retry 3 \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/14298824294/zip" \
+            --output "$RUNNER_TEMP/run81-artifact.zip"
+
+          echo "$OUTER_SHA256  $RUNNER_TEMP/run81-artifact.zip" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/run81-outer" "$RUNNER_TEMP/run81-source"
+          unzip -q "$RUNNER_TEMP/run81-artifact.zip" -d "$RUNNER_TEMP/run81-outer"
+          INNER="$RUNNER_TEMP/run81-outer/DREAD_UNIVERSAL_AGENT_DISCOVERY_FOUNDATION.zip"
+          test -s "$INNER"
+          echo "$INNER_SHA256  $INNER" | sha256sum --check
+          unzip -q "$INNER" -d "$RUNNER_TEMP/run81-source"
+
+          SOURCE="$RUNNER_TEMP/run81-source/DREAD-UNIVERSAL/dread_universal"
+          LEGACY="$RUNNER_TEMP/run81-source/legacy-reference"
+          test -f "$SOURCE/Cargo.toml"
+          test -f "$SOURCE/Cargo.lock"
+          test -f "$SOURCE/integrations/pstack/catalog.json"
+          test -f "$SOURCE/integrations/pstack/upstream/.dread-import.json"
+          test -d "$LEGACY"
+
+          mkdir -p dread_universal
+          cp -a "$SOURCE/." dread_universal/
+          cp -a "$LEGACY" ./legacy-reference
+          cat > SOURCE_PROVENANCE_RUN81.md <<EOF
+          # Canonical source provenance
+
+          - Repository: $GITHUB_REPOSITORY
+          - Source workflow run: $SOURCE_RUN_ID
+          - Source artifact ID: 14298824294
+          - Outer artifact SHA-256: $OUTER_SHA256
+          - Inner source ZIP SHA-256: $INNER_SHA256
+          - Imported from the verified run #81 source bundle, without patch reapplication.
+          - Rust workspace: dread_universal/
+          - Historical workstation reference files: legacy-reference/
+          - Pstack catalog pin: 0.15.43
+          - Pstack commit: 2f87c854fe3e2fcda44ca86b46ede35aad3c46b7
+          - Pstack subtree: 71d8e1d1d718e2149dc43b2535618064f29cba6b
+
+          The older integrations/pstack-upstream snapshot is retained unchanged as historical/reference content. The active importer source is integrations/pstack/upstream. Imported capabilities remain disabled by default; no imported code is executed by this workflow.
+          EOF
+          cat > .gitignore <<'EOF'
+          /dread_universal/target/
+          **/target/
+          .env
+          .env.*
+          *.sqlite
+          *.sqlite3
+          *.db
+          /outputs/
+          EOF
+
+          FILES=$(find dread_universal legacy-reference -type f | wc -l)
+          test "$FILES" -gt 3000
+          git add dread_universal legacy-reference SOURCE_PROVENANCE_RUN81.md .gitignore
+          cp .github/workflows/dread-canonical-source.yml /tmp/dread-canonical-source.yml
+          mkdir -p .github/workflows
+          cp /tmp/dread-canonical-source.yml .github/workflows/dread-canonical-source.yml
+          git add .github/workflows/dread-canonical-source.yml
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "Import verified DREAD Rust workspace from run 81"
+          git push origin "HEAD:refs/heads/$TARGET_BRANCH"
+
+      - name: Checkout canonical source branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "$TARGET_BRANCH"
+          git checkout --detach FETCH_HEAD
+          test -f dread_universal/Cargo.toml
+          test -f dread_universal/Cargo.lock
+          git status --short
+
+      - name: Verify imported Pstack metadata and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dread_universal
+          python3 -m unittest discover -s scripts -p "test_import_pstack_capabilities.py" -v
+          python3 scripts/import_pstack_capabilities.py --root "$PWD"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path("integrations/pstack")
+          catalog = json.loads((root / "catalog.json").read_text())
+          marker = json.loads((root / "upstream/.dread-import.json").read_text())
+          assert catalog["upstream_manifest_version"] == "0.15.43"
+          assert marker["manifest_version"] == "0.15.43"
+          assert marker["commit_sha"] == "2f87c854fe3e2fcda44ca86b46ede35aad3c46b7"
+          assert marker["tree_sha"] == "71d8e1d1d718e2149dc43b2535618064f29cba6b"
+          assert len(marker["files_sha256"]) == 60
+          print("Pstack pin, tree, inventory provenance: PASS")
+          PY
+
+      - name: Install stable Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
+        working-directory: dread_universal
+
+      - name: Clippy with warnings denied
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        working-directory: dread_universal
+
+      - name: Workspace tests
+        run: cargo test --workspace --locked
+        working-directory: dread_universal
+
+      - name: Optimized release build
+        run: cargo build --workspace --release --locked
+        working-directory: dread_universal
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build React operator console
+        run: |
+          npm install --no-audit --no-fund --package-lock=false
+          npm run build
+        working-directory: dread_universal/web
+
+      - name: Test Python GPU Supervisor bridge
+        run: python3 -m unittest discover -s scripts -p 'test_gpu_supervisor_bridge.py'
+        working-directory: dread_universal
+
+      - name: Check single-owner GPU lease boundary
+        run: python3 scripts/check_gpu_ownership_boundary.py
+        working-directory: dread_universal
+
+      - name: Exercise authenticated Pstack API apply and idempotent re-import
+        shell: bash
+        working-directory: dread_universal
+        run: |
+          set -euo pipefail
+          temp_dir="$(mktemp -d)"
+          api_base="http://127.0.0.1:18765"
+          export DREAD_API_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+          export DREAD_OPERATOR_ID="ci-pstack-import"
+          export DREAD_DB_PATH="$temp_dir/registry.sqlite3"
+          export DREAD_BIND="127.0.0.1:18765"
+
+          target/release/dread-universal > "$temp_dir/api.log" 2>&1 &
+          api_pid=$!
+          cleanup() {
+            kill "$api_pid" 2>/dev/null || true
+            wait "$api_pid" 2>/dev/null || true
+            rm -rf "$temp_dir"
+          }
+          trap cleanup EXIT
+
+          ready=0
+          for _ in $(seq 1 40); do
+            if curl -fsS "$api_base/health" >/dev/null; then
+              ready=1
+              break
+            fi
+            if ! kill -0 "$api_pid" 2>/dev/null; then
+              cat "$temp_dir/api.log"
+              exit 1
+            fi
+            sleep 0.25
+          done
+          if [ "$ready" -ne 1 ]; then
+            cat "$temp_dir/api.log"
+            echo "DREAD API did not become ready" >&2
+            exit 1
+          fi
+
+          unauthenticated_status="$(curl -sS -o /dev/null -w '%{http_code}' "$api_base/api/capabilities")"
+          test "$unauthenticated_status" = "401"
+
+          python3 scripts/import_pstack_capabilities.py --root "$PWD" --api-base "$api_base" --apply
+          curl -fsS -H "Authorization: Bearer $DREAD_API_TOKEN" "$api_base/api/capabilities" > "$temp_dir/capabilities.json"
+          python3 - "$temp_dir/capabilities.json" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              body = json.load(handle)
+          items = body.get("items", [])
+          assert body.get("count") == 60, f"expected 60 imported records, got {body.get('count')}"
+          assert len(items) == 60, f"expected 60 records, got {len(items)}"
+          assert sum(item.get("kind") == "skill" for item in items) == 58
+          assert sum(item.get("kind") == "agent" for item in items) == 2
+          assert all(item.get("status") == "disabled" for item in items)
+          print("Authenticated Pstack API apply: 58 skills + 2 agents, all disabled: PASS")
+          PY
+
+          second_apply="$(python3 scripts/import_pstack_capabilities.py --root "$PWD" --api-base "$api_base" --apply)"
+          printf '%s\n' "$second_apply"
+          grep -q 'created=0, already_present=60' <<<"$second_apply"
+          echo "Pstack importer idempotency and provenance reconciliation: PASS"
+
+      - name: Record source inventory and hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          find dread_universal legacy-reference -type f -print0 | sort -z | xargs -0 sha256sum > "$RUNNER_TEMP/dread-source-files.sha256"
+          echo "Tracked source files: $(wc -l < "$RUNNER_TEMP/dread-source-files.sha256")"
+          echo "Canonical branch: $TARGET_BRANCH"

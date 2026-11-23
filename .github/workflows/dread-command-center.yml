@@ -1,0 +1,40 @@
+name: DREAD command center frontend validation
+
+on:
+  push:
+    branches:
+      - work/futuristic-command-center-2026-11-17
+    paths:
+      - .github/workflows/dread-command-center.yml
+      - dread_universal/web/**
+  pull_request:
+    branches:
+      - work/capability-registry-console-2026-11-17
+    paths:
+      - .github/workflows/dread-command-center.yml
+      - dread_universal/web/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dread-command-center-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+      - name: Install dependencies
+        working-directory: dread_universal/web
+        run: npm install --no-audit --no-fund --package-lock=false
+      - name: TypeScript and production build
+        working-directory: dread_universal/web
+        run: npm run build

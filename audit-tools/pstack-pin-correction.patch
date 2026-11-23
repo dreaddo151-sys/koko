@@ -1,0 +1,58 @@
+--- dread_universal/integrations/pstack/catalog.json
++++ dread_universal/integrations/pstack/catalog.json
+@@ -4,7 +4,8 @@
+   "upstream": "https://github.com/cursor/plugins/tree/main/pstack",
+   "repository": "https://github.com/cursor/plugins",
+   "upstream_manifest_version": "0.15.43",
+-  "upstream_tree_sha": "2f87c854fe3e2fcda44ca86b46ede35aad3c46b7",
++  "upstream_commit_sha": "2f87c854fe3e2fcda44ca86b46ede35aad3c46b7",
++  "upstream_tree_sha": "71d8e1d1d718e2149dc43b2535618064f29cba6b",
+   "license": "MIT",
+   "copyright": "Copyright (c) 2026 Lauren Tan",
+   "inventory_count": 58,
+--- dread_universal/scripts/import-pstack.sh
++++ dread_universal/scripts/import-pstack.sh
+@@ -3,7 +3,8 @@
+ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+ DEST="$ROOT/integrations/pstack/upstream"
+ REPO="https://github.com/cursor/plugins.git"
+-EXPECTED_TREE="2f87c854fe3e2fcda44ca86b46ede35aad3c46b7"
++EXPECTED_COMMIT="2f87c854fe3e2fcda44ca86b46ede35aad3c46b7"
++EXPECTED_TREE="71d8e1d1d718e2149dc43b2535618064f29cba6b"
+ EXPECTED_VERSION="0.15.43"
+ TMP="$(mktemp -d "${TMPDIR:-/tmp}/dread-pstack.XXXXXX")"
+ trap 'rm -rf "$TMP"' EXIT
+@@ -11,21 +12,26 @@
+   echo "Refusing to overwrite existing pstack import: $DEST" >&2
+   exit 2
+ fi
+-git clone --depth 1 --filter=blob:none --sparse "$REPO" "$TMP/plugins"
++git init "$TMP/plugins"
++git -C "$TMP/plugins" remote add origin "$REPO"
++git -C "$TMP/plugins" fetch --depth 1 --filter=blob:none origin "$EXPECTED_COMMIT"
++git -C "$TMP/plugins" sparse-checkout init --cone
++git -C "$TMP/plugins" sparse-checkout set pstack
++git -C "$TMP/plugins" checkout --detach FETCH_HEAD
++ACTUAL_COMMIT="$(git -C "$TMP/plugins" rev-parse HEAD)"
+ ACTUAL_TREE="$(git -C "$TMP/plugins" rev-parse 'HEAD:pstack')"
+-if [[ "$ACTUAL_TREE" != "$EXPECTED_TREE" ]]; then
+-  echo "Upstream pstack tree changed: expected $EXPECTED_TREE, got $ACTUAL_TREE" >&2
++if [[ "$ACTUAL_COMMIT" != "$EXPECTED_COMMIT" || "$ACTUAL_TREE" != "$EXPECTED_TREE" ]]; then
++  echo "Upstream pstack revision mismatch: commit=$ACTUAL_COMMIT tree=$ACTUAL_TREE" >&2
+   exit 3
+ fi
+-git -C "$TMP/plugins" sparse-checkout set pstack
+ test -f "$TMP/plugins/pstack/plugin.json"
+ test -f "$TMP/plugins/pstack/LICENSE"
+-python3 - "$TMP/plugins/pstack/plugin.json" <<'PY'
+-import json,sys
++EXPECTED_VERSION="$EXPECTED_VERSION" python3 - "$TMP/plugins/pstack/plugin.json" <<'PY'
++import json,os,sys
+ m=json.load(open(sys.argv[1]))
+ assert m.get("name")=="pstack"
+ assert m.get("license")=="MIT"
+-assert m.get("version")=="0.15.43", m.get("version")
++assert m.get("version")==os.environ["EXPECTED_VERSION"], m.get("version")
+ print("Validated pstack",m.get("version"),"license",m.get("license"))
+ PY
+ mkdir -p "$(dirname "$DEST")"

@@ -1,0 +1,104 @@
+name: DREAD uploaded archive audit
+
+on:
+  push:
+    branches:
+      - audit/dread-universal-uploaded-2026-11-17
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dread-uploaded-archive-audit
+  cancel-in-progress: true
+
+jobs:
+  rust-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout audit harness
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Download and verify the exact uploaded archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            "https://github.com/dreaddo151-sys/koko/releases/download/dread-universal-v0.4.0-test/DREAD_UNIVERSAL_COMPLETE_TRUE.zip" \
+            --output /tmp/dread-upload.zip
+          echo "8a53dc9afb80b01bdf88b24b46df7d3bd58d98b67437efb2d9fdee9fb80394c0  /tmp/dread-upload.zip" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/dread-source"
+          unzip -q /tmp/dread-upload.zip -d "$RUNNER_TEMP/dread-source"
+          test -f "$RUNNER_TEMP/dread-source/tmp/dread_zip_check/DREAD-UNIVERSAL/dread_universal/Cargo.toml"
+          echo "WORKSPACE=$RUNNER_TEMP/dread-source/tmp/dread_zip_check/DREAD-UNIVERSAL/dread_universal" >> "$GITHUB_ENV"
+
+      - name: Apply hardening patches to isolated archive copy
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          patch --batch --forward -p0 < "$GITHUB_WORKSPACE/audit-tools/discovery-hardening.patch"
+          patch --batch --forward -p0 < "$GITHUB_WORKSPACE/audit-tools/gpu-api-hardening.patch"
+          cd "$WORKSPACE/.."
+          awk '
+            index($0, "--- dread_universal/integrations/pstack/README.md") == 1 { skip=1 }
+            index($0, "--- dread_universal/scripts/import-pstack.sh") == 1 { skip=0 }
+            !skip { print }
+          ' "$GITHUB_WORKSPACE/audit-tools/docs.patch" | patch --batch --forward -p0
+          cp "$GITHUB_WORKSPACE/audit-tools/PSTACK_README.md" "$WORKSPACE/integrations/pstack/README.md"
+          patch --batch --forward -p0 < "$GITHUB_WORKSPACE/audit-tools/pstack-pin-correction.patch"
+          cp "$GITHUB_WORKSPACE/audit-tools/PROJECT_STATUS.md" "$WORKSPACE/docs/PROJECT_STATUS.md"
+          bash -n "$WORKSPACE/scripts/import-pstack.sh"
+          python3 -m json.tool "$WORKSPACE/integrations/pstack/catalog.json" > /dev/null
+
+      - name: Install stable Rust, rustfmt and Clippy
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Format patched workspace
+        run: cargo fmt --all
+        working-directory: ${{ env.WORKSPACE }}
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+        working-directory: ${{ env.WORKSPACE }}
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        working-directory: ${{ env.WORKSPACE }}
+
+      - name: Unit and integration tests
+        run: cargo test --workspace --locked
+        working-directory: ${{ env.WORKSPACE }}
+
+      - name: Optimized release build
+        run: cargo build --workspace --release --locked
+        working-directory: ${{ env.WORKSPACE }}
+
+      - name: Package complete source bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dread-final"
+          cp -a "$RUNNER_TEMP/dread-source/tmp/dread_zip_check/DREAD-UNIVERSAL" "$RUNNER_TEMP/dread-final/"
+          cp -a "$RUNNER_TEMP/dread-source/tmp/dread_zip_check/legacy-reference" "$RUNNER_TEMP/dread-final/"
+          rm -rf "$RUNNER_TEMP/dread-final/DREAD-UNIVERSAL/dread_universal/target"
+          if find "$RUNNER_TEMP/dread-final" -type d -name target -print -quit | grep -q .; then
+            echo "Refusing to package a build target directory" >&2
+            exit 1
+          fi
+          cd "$RUNNER_TEMP/dread-final"
+          zip -qr "$RUNNER_TEMP/DREAD_UNIVERSAL_HARDENED.zip" DREAD-UNIVERSAL legacy-reference
+          sha256sum "$RUNNER_TEMP/DREAD_UNIVERSAL_HARDENED.zip"
+
+      - name: Upload verified source package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: DREAD_UNIVERSAL_HARDENED
+          path: ${{ runner.temp }}/DREAD_UNIVERSAL_HARDENED.zip
+          if-no-files-found: error
+          retention-days: 7

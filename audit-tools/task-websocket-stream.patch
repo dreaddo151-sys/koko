@@ -1,0 +1,353 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -10,13 +10,13 @@
+ 
+ [workspace.dependencies]
+ anyhow = "1"
+-axum = { version = "0.8", features = ["json"] }
++axum = { version = "0.8", features = ["json", "ws"] }
+ futures = "0.3"
+ reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+ rusqlite = { version = "0.32", features = ["bundled"] }
+ serde = { version = "1", features = ["derive"] }
+ serde_json = "1"
+-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
++tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+ toml = "0.8"
+ tower = "0.5"
+ tracing = "0.1"
+--- a/crates/dread-api/src/main.rs
++++ b/crates/dread-api/src/main.rs
+@@ -1,7 +1,7 @@
+ use axum::body::Body;
+ use axum::{
+     Json, Router,
+-    extract::{DefaultBodyLimit, Path, State},
++    extract::{DefaultBodyLimit, Path, Query, State, WebSocketUpgrade, ws::{Message, WebSocket}},
+     http::StatusCode,
+     response::{IntoResponse, Response},
+     routing::get,
+@@ -20,6 +20,7 @@
+     sync::{Arc, Mutex},
+     time::{SystemTime, UNIX_EPOCH},
+ };
++use tokio::sync::broadcast;
+ use tracing::{error, info};
+ use uuid::Uuid;
+ 
+@@ -29,6 +30,7 @@
+ struct AppState {
+     db: Arc<Mutex<Connection>>,
+     gpu: GpuGatewayClient,
++    events: broadcast::Sender<TaskEvent>,
+ }
+ 
+ #[derive(Debug, Serialize, Deserialize)]
+@@ -106,7 +108,7 @@
+     reason: String,
+ }
+ 
+-#[derive(Debug, Serialize)]
++#[derive(Debug, Clone, Serialize)]
+ struct TaskEvent {
+     task_id: String,
+     sequence: u64,
+@@ -464,7 +466,7 @@
+     payload: &Value,
+     actor: &str,
+     created_at: u64,
+-) -> Result<(), ApiError> {
++) -> Result<TaskEvent, ApiError> {
+     let payload_json = serde_json::to_string(payload)
+         .map_err(|e| ApiError::internal(format!("Could not encode task event: {e}")))?;
+     tx.execute(
+@@ -474,7 +476,19 @@
+         params![task_id, event_type, payload_json, actor, created_at],
+     )
+     .map_err(|e| ApiError::internal(e.to_string()))?;
+-    Ok(())
++    let sequence = tx.query_row(
++        "SELECT MAX(sequence) FROM task_events WHERE task_id = ?1",
++        params![task_id],
++        |row| row.get::<_, u64>(0),
++    ).map_err(|e| ApiError::internal(e.to_string()))?;
++    Ok(TaskEvent {
++        task_id: task_id.to_string(),
++        sequence,
++        event_type: event_type.to_string(),
++        payload: payload.clone(),
++        actor: actor.to_string(),
++        created_at,
++    })
+ }
+ 
+ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
+@@ -533,7 +547,7 @@
+         params![id, title, task_type, input.capability_id, payload_json, now],
+     )
+     .map_err(|e| ApiError::internal(e.to_string()))?;
+-    append_task_event(
++    let event = append_task_event(
+         &tx,
+         &id,
+         "task_created",
+@@ -542,6 +556,7 @@
+         now,
+     )?;
+     tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
++    let _ = state.events.send(event);
+ 
+     Ok((
+         StatusCode::CREATED,
+@@ -620,6 +635,142 @@
+     Ok(Json(json!({"items": items, "count": items.len()})))
+ }
+ 
++#[derive(Debug, Deserialize, Default)]
++struct EventStreamQuery {
++    after_sequence: Option<u64>,
++}
++
++fn load_task_events_after(
++    state: &AppState,
++    task_id: &str,
++    after_sequence: u64,
++) -> Result<Vec<TaskEvent>, ApiError> {
++    let conn = db_lock(state)?;
++    let exists: bool = conn
++        .query_row(
++            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1)",
++            params![task_id],
++            |row| row.get(0),
++        )
++        .map_err(|e| ApiError::internal(e.to_string()))?;
++    if !exists {
++        return Err(ApiError::not_found("Task not found"));
++    }
++    let mut stmt = conn.prepare(
++        "SELECT sequence, event_type, payload_json, actor, created_at
++         FROM task_events WHERE task_id = ?1 AND sequence > ?2 ORDER BY sequence LIMIT 1000",
++    ).map_err(|e| ApiError::internal(e.to_string()))?;
++    let rows = stmt.query_map(params![task_id, after_sequence], |row| {
++        let encoded: String = row.get(2)?;
++        Ok(TaskEvent {
++            task_id: task_id.to_string(),
++            sequence: row.get(0)?,
++            event_type: row.get(1)?,
++            payload: serde_json::from_str(&encoded).unwrap_or(Value::Null),
++            actor: row.get(3)?,
++            created_at: row.get(4)?,
++        })
++    }).map_err(|e| ApiError::internal(e.to_string()))?;
++    let mut events = Vec::new();
++    for row in rows {
++        events.push(row.map_err(|e| ApiError::internal(e.to_string()))?);
++    }
++    Ok(events)
++}
++
++async fn send_event_pages(
++    socket: &mut WebSocket,
++    state: &AppState,
++    task_id: &str,
++    last_sequence: &mut u64,
++) -> Result<(), String> {
++    loop {
++        let events = load_task_events_after(state, task_id, *last_sequence)
++            .map_err(|error| error.message)?;
++        let page_len = events.len();
++        for event in events {
++            *last_sequence = (*last_sequence).max(event.sequence);
++            let text = serde_json::to_string(&event).map_err(|error| error.to_string())?;
++            socket
++                .send(Message::Text(text.into()))
++                .await
++                .map_err(|error| error.to_string())?;
++        }
++        if page_len < 1000 {
++            return Ok(());
++        }
++    }
++}
++
++async fn task_event_stream(
++    ws: WebSocketUpgrade,
++    State(state): State<AppState>,
++    Path(task_id): Path<String>,
++    Query(query): Query<EventStreamQuery>,
++) -> Result<Response, ApiError> {
++    // Subscribe before loading persisted history so events committed during replay cannot be lost.
++    let receiver = state.events.subscribe();
++    let after_sequence = query.after_sequence.unwrap_or(0);
++    let replay = load_task_events_after(&state, &task_id, after_sequence)?;
++    Ok(ws.on_upgrade(move |socket| {
++        stream_task_events(socket, state, task_id, after_sequence, replay, receiver)
++    }))
++}
++
++async fn stream_task_events(
++    mut socket: WebSocket,
++    state: AppState,
++    task_id: String,
++    mut last_sequence: u64,
++    replay: Vec<TaskEvent>,
++    mut receiver: broadcast::Receiver<TaskEvent>,
++) {
++    for event in replay {
++        last_sequence = last_sequence.max(event.sequence);
++        let Ok(text) = serde_json::to_string(&event) else { continue };
++        if socket.send(Message::Text(text.into())).await.is_err() {
++            return;
++        }
++    }
++    if let Err(message) = send_event_pages(&mut socket, &state, &task_id, &mut last_sequence).await {
++        let text = json!({"error": message}).to_string();
++        let _ = socket.send(Message::Text(text.into())).await;
++        return;
++    }
++
++    loop {
++        tokio::select! {
++            incoming = socket.recv() => {
++                match incoming {
++                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
++                    Some(Ok(Message::Ping(payload))) => {
++                        if socket.send(Message::Pong(payload)).await.is_err() { break; }
++                    }
++                    Some(Ok(_)) => {}
++                }
++            }
++            received = receiver.recv() => {
++                match received {
++                    Ok(event) if event.task_id == task_id && event.sequence > last_sequence => {
++                        last_sequence = event.sequence;
++                        let Ok(text) = serde_json::to_string(&event) else { continue };
++                        if socket.send(Message::Text(text.into())).await.is_err() { break; }
++                    }
++                    Ok(_) => {}
++                    Err(broadcast::error::RecvError::Lagged(_)) => {
++                        if let Err(message) = send_event_pages(&mut socket, &state, &task_id, &mut last_sequence).await {
++                            let text = json!({"error": message}).to_string();
++                            let _ = socket.send(Message::Text(text.into())).await;
++                            break;
++                        }
++                    }
++                    Err(broadcast::error::RecvError::Closed) => break,
++                }
++            }
++        }
++    }
++}
++
+ async fn approve_task(
+     State(state): State<AppState>,
+     Path(id): Path<String>,
+@@ -661,7 +812,7 @@
+             message: "Task is not awaiting approval".into(),
+         });
+     }
+-    append_task_event(
++    let event = append_task_event(
+         &tx,
+         &id,
+         "task_approved",
+@@ -674,6 +825,7 @@
+          FROM tasks WHERE id = ?1", params![id], task_from_row
+     ).map_err(|e| ApiError::internal(e.to_string()))?;
+     tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
++    let _ = state.events.send(event);
+     Ok(Json(json!({"item": task, "execution_started": false})))
+ }
+ 
+@@ -706,7 +858,7 @@
+             message: "Task cannot be cancelled in its current state".into(),
+         });
+     }
+-    append_task_event(
++    let event = append_task_event(
+         &tx,
+         &id,
+         "task_cancelled",
+@@ -719,6 +871,7 @@
+          FROM tasks WHERE id = ?1", params![id], task_from_row
+     ).map_err(|e| ApiError::internal(e.to_string()))?;
+     tx.commit().map_err(|e| ApiError::internal(e.to_string()))?;
++    let _ = state.events.send(event);
+     Ok(Json(json!({"item": task, "execution_started": false})))
+ }
+ 
+@@ -817,6 +970,7 @@
+         .route("/api/tasks", get(list_tasks).post(create_task))
+         .route("/api/tasks/{id}", get(get_task))
+         .route("/api/tasks/{id}/events", get(task_events))
++        .route("/api/tasks/{id}/stream", get(task_event_stream))
+         .route("/api/tasks/{id}/approve", axum::routing::post(approve_task))
+         .route("/api/tasks/{id}/cancel", axum::routing::post(cancel_task))
+         .route("/api/gpu/{*path}", axum::routing::post(gpu_inference))
+@@ -859,9 +1013,11 @@
+     let db_path =
+         env::var("DREAD_DB_PATH").unwrap_or_else(|_| "data/dread_registry.sqlite3".to_string());
+     let db = open_database(&db_path)?;
++    let (events, _) = broadcast::channel(256);
+     let state = AppState {
+         db: Arc::new(Mutex::new(db)),
+         gpu: GpuGatewayClient::local()?,
++        events,
+     };
+ 
+     let listener = tokio::net::TcpListener::bind(addr).await?;
+@@ -920,7 +1076,11 @@
+             .unwrap()
+     }
+ 
+-    async fn test_app() -> (Router, tokio::task::JoinHandle<()>) {
++    async fn test_app_with_events() -> (
++        Router,
++        broadcast::Receiver<TaskEvent>,
++        tokio::task::JoinHandle<()>,
++    ) {
+         let mock = Router::new()
+             .route("/health", get(mock_health))
+             .route("/v1/models", get(mock_models))
+@@ -936,13 +1096,41 @@
+         let gpu = GpuGatewayClient::new(format!("http://{address}")).unwrap();
+         let db = open_database(":memory:").unwrap();
+ 
++        let (events, _) = broadcast::channel(256);
++        let receiver = events.subscribe();
+         (
+             app(AppState {
+                 db: Arc::new(Mutex::new(db)),
+                 gpu,
++                events,
+             }),
++            receiver,
+             server,
+         )
++    }
++
++    async fn test_app() -> (Router, tokio::task::JoinHandle<()>) {
++        let (router, _receiver, server) = test_app_with_events().await;
++        (router, server)
++    }
++
++    #[tokio::test]
++    async fn task_creation_publishes_committed_event_to_stream_subscribers() {
++        let (router, mut receiver, server) = test_app_with_events().await;
++        let payload = json!({"title":"Stream event", "task_type":"test", "payload":{}});
++        let response = router.oneshot(
++            Request::builder()
++                .method("POST")
++                .uri("/api/tasks")
++                .header("content-type", "application/json")
++                .body(Body::from(payload.to_string()))
++                .unwrap(),
++        ).await.unwrap();
++        assert_eq!(response.status(), StatusCode::CREATED);
++        let event = receiver.recv().await.unwrap();
++        assert_eq!(event.event_type, "task_created");
++        assert_eq!(event.sequence, 1);
++        server.abort();
+     }
+ 
+     #[tokio::test]

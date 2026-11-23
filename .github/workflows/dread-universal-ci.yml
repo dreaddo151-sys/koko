@@ -1,0 +1,181 @@
+name: DREAD Universal CI
+
+on:
+  push:
+    branches: ["main", "foundation/**", "work/**", "feature/**"]
+    paths:
+      - "dread_universal/**"
+      - ".github/workflows/dread-universal-ci.yml"
+  pull_request:
+    paths:
+      - "dread_universal/**"
+      - ".github/workflows/dread-universal-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dread-universal-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust / Ubuntu 24.04
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: dread_universal
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: dread_universal -> target
+      - name: Verify formatting
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: Release build
+        run: cargo build --workspace --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dread-universal-api-ubuntu
+          path: |
+            dread_universal/target/release/dread-universal
+            dread_universal/target/release/dread-result-verifier
+          if-no-files-found: error
+      - name: Validate Ubuntu installer and release verification scripts
+        run: bash -n scripts/install-user.sh scripts/configure-user.sh scripts/package-ubuntu.sh scripts/test_install_user.sh scripts/capture-workstation-baseline.sh scripts/verify-release.sh scripts/test_verify_release.sh
+      - name: Test signed release verifier failure paths
+        run: bash scripts/test_verify_release.sh
+      - name: Test portable install migration and rollback
+        working-directory: dread_universal
+        run: bash scripts/test_install_user.sh
+      - name: Python bridge and importer regression tests
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
+      - name: Enforce single-owner GPU boundary
+        run: python3 scripts/check_gpu_ownership_boundary.py
+
+  web:
+    name: Web console / Ubuntu 24.04
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: dread_universal/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify committed npm lockfile
+        run: test -s package-lock.json
+      - name: Install locked web dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build console
+        run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dread-universal-web-ubuntu
+          path: dread_universal/web/dist/
+          if-no-files-found: error
+
+  package:
+    name: Ubuntu packages / smoke test
+    runs-on: ubuntu-24.04
+    needs: [rust, web]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dread-universal-api-ubuntu
+          path: dread_universal/target/release
+      - uses: actions/download-artifact@v4
+        with:
+          name: dread-universal-web-ubuntu
+          path: dread_universal/web/dist
+      - name: Validate installer and release verification scripts
+        working-directory: dread_universal
+        run: bash -n scripts/install-user.sh scripts/configure-user.sh scripts/package-ubuntu.sh scripts/capture-workstation-baseline.sh scripts/verify-release.sh scripts/test_verify_release.sh
+      - name: Test signed release verifier failure paths
+        working-directory: dread_universal
+        run: bash scripts/test_verify_release.sh
+      - name: Assemble Ubuntu deb and portable bundle
+        working-directory: dread_universal
+        run: bash scripts/package-ubuntu.sh
+      - name: Verify package checksums and contents
+        working-directory: dread_universal
+        run: |
+          set -euo pipefail
+          (cd dist/release && sha256sum --check SHA256SUMS)
+          dpkg-deb --info dist/release/dread-universal_*.deb
+          archive_listing="$(mktemp)"
+          trap 'rm -f "$archive_listing"' EXIT
+          tar -tzf dist/release/dread-universal-ubuntu-*.tar.gz > "$archive_listing"
+          grep -Fqx 'bundle/bin/dread-universal' "$archive_listing"
+          grep -Fqx 'bundle/bin/dread-result-verifier' "$archive_listing"
+          grep -Fqx 'bundle/config/independent-result-verifier.env.example' "$archive_listing"
+          grep -Fqx 'bundle/systemd/dread-result-verifier.service.example' "$archive_listing"
+          grep -Fqx 'bundle/systemd/dread-result-verifier.tmpfiles.example' "$archive_listing"
+          grep -Fqx 'bundle/web/dist/index.html' "$archive_listing"
+          grep -Fqx 'bundle/scripts/capture-workstation-baseline.sh' "$archive_listing"
+          grep -Fqx 'bundle/scripts/verify-release.sh' "$archive_listing"
+          grep -Fq 'verify-release.sh' dist/release/SHA256SUMS
+      - name: Install and smoke-test packaged API and production console
+        working-directory: dread_universal
+        run: |
+          set -euo pipefail
+          sudo dpkg -i dist/release/dread-universal_*.deb
+          test -x /usr/bin/dread-universal
+          test -x /usr/bin/dread-result-verifier
+          test -f /usr/share/dread-universal/config/independent-result-verifier.env.example
+          test -f /usr/share/dread-universal/systemd/dread-result-verifier.service.example
+          test -f /usr/share/dread-universal/systemd/dread-result-verifier.tmpfiles.example
+          test -x /usr/share/dread-universal/configure-user.sh
+          test -f /usr/lib/systemd/user/dread-universal.service
+          test -x /usr/share/dread-universal/scripts/capture-workstation-baseline.sh
+          test -x /usr/share/dread-universal/scripts/verify-release.sh
+          db_dir="$(mktemp -d)"
+          api_log="$(mktemp)"
+          token="$(openssl rand -hex 32)"
+          DREAD_BIND=127.0.0.1:18765 \
+            DREAD_DB_PATH="$db_dir/test.sqlite3" \
+            DREAD_WEB_ROOT=/usr/share/dread-universal/web/dist \
+            DREAD_API_TOKEN="$token" \
+            DREAD_GPU_GATEWAY_URL=http://127.0.0.1:11500 \
+            /usr/bin/dread-universal >"$api_log" 2>&1 &
+          api_pid=$!
+          cleanup() {
+            kill "$api_pid" 2>/dev/null || true
+            wait "$api_pid" 2>/dev/null || true
+            sudo dpkg -r dread-universal >/dev/null 2>&1 || true
+            rm -rf "$db_dir" "$api_log"
+          }
+          trap cleanup EXIT
+          healthy=false
+          for _ in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18765/health | grep -q 'dread-universal'; then
+              healthy=true
+              break
+            fi
+            sleep 1
+          done
+          test "$healthy" = true
+          curl --fail --silent http://127.0.0.1:18765/ | grep -q 'assets/'
+          unauthenticated="$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:18765/api/system/profile)"
+          test "$unauthenticated" = 401
+          curl --fail --silent -H "Authorization: Bearer $token" \
+            http://127.0.0.1:18765/api/system/profile | grep -q 'cpu_threads'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dread-universal-ubuntu-packages
+          path: |
+            dread_universal/dist/release/*.deb
+            dread_universal/dist/release/*.tar.gz
+            dread_universal/dist/release/SHA256SUMS
+            dread_universal/dist/release/verify-release.sh
+          if-no-files-found: error

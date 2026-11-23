@@ -1,0 +1,68 @@
+# PROJECT DREAD Universal — Master-plan implementation matrix
+
+**Review date:** 2026-11-21  
+**Branch:** work/offline-continuation-reconcile-2026-11-21  
+**Stack:** PR #14 is a draft stacked continuation on PR #13, which is stacked on PR #12. No PR in this stack is merged by this work.  
+**Decision rule:** A row is not complete because a UI panel or API route exists. It needs implementation, automated tests, current CI and the required live acceptance evidence.
+
+## Product invariant
+
+“Universal” means that one DREAD setup adapts to different dual-/multi-GPU PC hardware, accelerator counts/vendors supported by the selected runtime, model layouts, agent ecosystems, Pstack/plugin sources and locally available services. It must not assume the original RTX 3090 machine, /mnt/sabrent, a particular home directory, a fixed number of GPUs or one static ComfyUI/model directory.
+
+Ubuntu 24.04 x86_64 is the current CI/package baseline. Other OS and accelerator adapters remain unaccepted until their own builds, installation, service, update and recovery paths are tested. A platform is never advertised as supported merely because portable Rust code compiles.
+
+## Requirement-by-requirement review
+
+| Master-plan area | Current source implementation | Tests / evidence | Remaining acceptance |
+|---|---|---|---|
+| One coherent Master Hub | Rust API + React console; historical Python Hub preservation is stated and packages are separate | Ubuntu API/web/package CI in prior runs | Exact installed Python Hub route/auth/stream/cancel/upload/output parity, side-by-side migration and rollback. Do not replace the Python Hub without parity |
+| Portable host setup | Existing host profile discovers CPU/RAM/storage and NVIDIA/AMD/Apple telemetry where available. New scanners use environment, current/install-relative and per-user roots rather than the original workstation path | Unit tests exist for host parsing and new path-root scanners | Complete OS-specific host, service/process, filesystem and packaging adapters. Windows/macOS/additional Linux targets are not accepted |
+| Multi-GPU / accelerator awareness | Host profile uses NVIDIA UUID/PCI, AMD SMI list/static/metric JSON (CUID/UUID alias + BDF + unit-bearing runtime telemetry), [Intel XPU query/discovery plus identity-only CSV fallback](MASTER-PLAN.md#intel-xpu-inventory-adapter), and Apple system_profiler; legacy rocm-smi is identity-only. Raw AMD ASIC serials are never exported | Parser tests cover multiple AMD devices joined across three JSON reports, units/unknown fields, raw-serial exclusion, multiple Intel devices and query/discovery/CSV fallback; run #1216 (`44844349840`) passed all Ubuntu 24.04 CI jobs including fmt, strict Clippy, workspace tests, release build, Web build, installer/Python/security checks and `.deb`/portable install smoke | Physical AMD/Intel CLI/driver acceptance and cross-version behavior, AMD CUID auxiliary/persistence semantics, Apple stable identity, persistence across device reordering, heterogeneous scheduling, real multi-GPU contention and live Supervisor telemetry against the user's bridge remain open |
+| Model discovery | Gateway-advertised model list is separate from new bounded local weight-file inventory. Local candidates are explicitly marked discovered_not_loaded | Model inventory tests cover format classification, root scan limits, external-link refusal, in-root Hugging Face snapshot symlinks and GGUF header parsing; authenticated API route test | Complete GGUF/projector metadata and dependency checks, format-specific metadata for safetensors/ONNX, compatibility, residency, resource fit and safe catalog refresh. No model may be loaded by discovery |
+| Agent discovery | Configured/known loopback health probes remain separate from new local agent.toml / *.agent.toml manifest discovery | New tests cover valid, malformed, remote URL and symlink manifests. Candidate records are disabled and unprobed | Manifest signing/trust policy, provider adapter compatibility review, enable/disable UI and real installed-agent health/identity proof. Never port-sweep, auto-start or execute an unknown agent |
+| Pstack and plugins | Existing Pstack pinned importer/preview/approval controls. New Cursor/Claude/generic plugin manifest inventory labels all results untrusted and disabled | Prior importer/provenance/idempotency tests; new bounded scanner tests for malformed manifests, symlinks and safe defaults | Signed publisher/catalog verification, remote source acquisition, permissions, tool/MCP contracts, staged install/update/remove, atomic activation and rollback |
+| Live agent execution | Existing provider adapters/task registry and shared execution gate on the later Phase 6 stack | Mock provider lifecycle, approval, idempotency, event/recovery and cancellation tests are recorded in the existing work log | Live container/network/mount/secret/tool isolation evidence for Hermes, DeerFlow and OpenHands. Attestation flags alone do not prove sandbox enforcement |
+| ComfyUI/media monitoring | New bounded read-only ComfyUI /system_stats, /queue, /history?max_items=10 monitor | Unit tests for endpoint URL restrictions, queue/history parsing, response limits. API route is protected | WebSocket node progress, cancellation and result delivery; live ComfyUI/dual-GPU concurrency; valid image, MiniMax H3 playable MP4 and FlashVSR artifact acceptance |
+| ComfyUI workflow catalog | New bounded metadata-only graph/API-prompt JSON scanner; output omits widget values and workflow payloads; symlink paths rejected | New graph/API-prompt, path and scan-budget tests | Reviewed workflow compatibility/requirements, approved run submission through Supervisor resource policy, result/progress and artifact validation. Discovery never executes workflows |
+| Token observability / prompt assistance | Restored from earlier PR #9 semantics on Phase 6: bounded exact provider-token aggregation and Supervisor-routed prompt preview; UI offers explicit Apply/Discard and never submits the suggestion | New aggregation tests for complete/missing usage, API response contract, model/prompt validation, review-only response and no-task-creation assertion; bearer-auth route regression | Green current-head Rust/Clippy/test/release/Web CI and live gateway/Supervisor acceptance on an installed host; verify provider usage shape for target llama.cpp versions |
+| Self-monitoring | Existing service/host discovery plus read-only ComfyUI monitor, proposal-only repair diagnostics and a bounded opt-in watchdog for the Rust API service only | Watchdog unit tests cover strict loopback URL, health response, dry-run, allowlisted restart, rate ceiling, cooldown and private state/journal; installer tests verify timer is installed disabled and customized units survive upgrade | Persisted cross-component health history, event correlation, alerting, uptime/resource trends, monitoring during active tasks and real systemd timer acceptance on a clean host |
+| Self-repair | New deterministic diagnostic planner classifies observations and returns recommendations marked proposed_not_applied; no command is run | Tests for healthy, offline/degraded, unknown-state and evidence bounds | Full policy state machine: plan, simulate, backup, precondition verification, approval, allowlisted apply, postcondition verification, monitoring and rollback. No arbitrary shell or automatic driver/firmware/credential changes |
+| Orchestration/resource control | Mission DAG planning/approval/dependency advancement; shared global admission plus independently configurable CPU/GPU/model/media/agent semaphores; trusted runner-to-resource mapping | Orchestrator tests prove GPU+model ceilings block a second GPU task while CPU work proceeds, cancellation while waiting releases admission, and env limits are bounded/validated; exact-head run #1320 passed | Mission-level retry policy and cancellation aggregation, resource-aware mission scheduling/fairness, durable interruption recovery for all runner classes, and real multi-GPU contention remain open |
+| Security/audit | Bearer auth, loopback checks, disabled-by-default imports, idempotency/approval records and single Supervisor GPU ownership | Current workspace security and static boundary tests; new API route auth tests | Full PASS/DENY/ASK policy, signed extension/release provenance, stronger process/container attestation, secrets review and live provider sandbox checks |
+| Upgrade/install | Ubuntu package and portable bundle workflows now include the watchdog files/templates; install paths leave its timer disabled, preserve operator unit overrides, and preserve/merge host-specific gateway and discovery settings; tagged release workflow requests GitHub OIDC and signs SHA256SUMS with Cosign | Prior Ubuntu 24.04 disposable package smoke-test evidence | Current CI installer/Python tests; fresh release-workflow execution proving Cosign OIDC signing; clean-machine package install, opt-in watchdog timer, reboot persistence, failed-upgrade rollback and preservation of ComfyUI/Supervisor/Hub on a real host |
+| Release quality | Rust format, strict Clippy, workspace tests, release build, Web build and Ubuntu package checks are configured | Exact-head commit `864b9d0a56da6d75f0396ccaf142bd662e42b176` passed push run #1320 (`44854056271`) and PR run (`44854061796`): Rust fmt, strict Clippy, workspace tests, optimized release build, Web production build, installer/release-verifier checks, portable install migration/rollback, Python bridge/importer/watchdog regressions, single-owner GPU guard, Ubuntu `.deb`/tar assembly, checksums/content and packaged API/Web smoke test | Tagged release publication/signature verification, physical workstation install/upgrade/reboot/rollback, and real AMD/Intel/Apple GPU plus media/provider task acceptance remain separate gates |
+
+## New additive work in this continuation
+
+1. dread-media: bounded read-only ComfyUI status/queue/history monitor and local ComfyUI workflow metadata catalog.
+2. dread-gpu::models: bounded model file inventory that distinguishes files found from gateway-advertised and loaded models.
+3. dread-agents::extensions: read-only Cursor/Claude/generic plugin manifest discovery; disabled/untrusted by default.
+4. dread-discovery: local agent adapter manifest discovery; does not probe or start providers.
+5. dread-platform::repair: proposal-only diagnostic plan; no repair is applied.
+6. Authenticated Rust routes and an operator inventory workspace for the above capabilities.
+7. New regression coverage for scan limits, symlink refusal, disabled defaults, endpoint restrictions, API authentication and managed-runner cancellation.
+8. Master architecture and README updated so the original 3090 machine/path is a reference fixture, not the product boundary.
+
+## Non-negotiable preservation
+
+- No workstation was accessed or modified by this branch.
+- No package was installed and no service was started, stopped or restarted.
+- No ComfyUI workflow or agent task was submitted.
+- No model was loaded/unloaded and no GPU lease was acquired.
+- The legacy Python Master Hub, ComfyUI and Python GPU Supervisor remain outside this repository write scope.
+- PR #12, PR #13 and main are not modified by the PR #14 feature commits.
+
+## Review rule for every next change
+
+Before a source change, name the master-plan row it advances and identify its safety boundary. After the change, add or update tests, inspect the diff, run fmt/Clippy/tests/release build and web build, record the exact CI run/head, then update this matrix. Do not change a row to complete without the corresponding acceptance evidence.
+
+
+## Provider cancellation reconciliation — 2026-11-21
+
+| Requirement | State | Evidence / remaining boundary |
+|---|---|---|
+| Remote agent cancellation truthfulness | Implemented; exact-head CI passed (run #1320) | Active provider-backed tasks enter `cancelling`; the worker submits cancellation once and waits for a provider terminal state. A refusal, non-terminal acknowledgement or temporary provider outage is recorded as unconfirmed and status polling continues. |
+| Cancellation race with task start | Implemented; exact-head CI passed (run #1320) | Provider start requests are not dropped when cancellation races with submission; DREAD waits for the idempotent start response, persists the provider ID, then issues cancellation. |
+| Console cancellation visibility | Implemented; exact-head web CI passed (run #1320) | `cancelling` is counted as active and shown as awaiting provider confirmation; no duplicate cancel control is offered. |
+| GPU inference cancellation | Partially hardened; upstream contract still blocked (CI passed) | A running `gpu_chat` task uses managed execution so local cancellation does not drop an in-flight Supervisor request. It remains `cancelling` until the request returns; ambiguous bridge failures emit `task_cancellation_unconfirmed`. The current Supervisor bridge cannot interrupt or independently query upstream generation, so operator reconciliation is still required. |
+| Restart recovery of in-flight cancellation | Implemented; exact-head CI passed (run #1320) | Startup recovery reissues cancellation for persisted agent tasks only when a provider ID and enabled adapter are available, then polls terminal provider status without resubmitting the task. Missing provider IDs/adapters remain visibly unresolved. GPU chat remains manual because the Supervisor bridge has no durable request ID/status contract. Exact-head Rust, Web and Ubuntu package CI passed in runs #1320 (`44854056271`) and PR run `44854061796` on `864b9d0a56da6d75f0396ccaf142bd662e42b176`. |

@@ -1,0 +1,21 @@
+--- a/crates/dread-agents/src/lib.rs
++++ b/crates/dread-agents/src/lib.rs
+@@ -137,16 +137,11 @@
+-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "snake_case")]
+ pub enum CapabilityStatus {
+     Discovered,
+     ReviewRequired,
++    #[default]
+     Disabled,
+     Approved,
+     Enabled,
+     Rejected,
+ }
+-
+-impl Default for CapabilityStatus {
+-    fn default() -> Self {
+-        Self::Disabled
+-    }
+-}
