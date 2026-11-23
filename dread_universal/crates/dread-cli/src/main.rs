@@ -190,6 +190,14 @@ async fn run(args: &[String], env: &dyn Fn(&str) -> Option<String>) -> Result<()
         .await
         .with_context(|| format!("{url} returned non-JSON (HTTP {status})"))?;
     if !status.is_success() {
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            let hint = if config.token.is_empty() {
+                "no credentials were sent; pass --token or set DREAD_API_TOKEN"
+            } else {
+                "the token sent was rejected; check --token / DREAD_API_TOKEN"
+            };
+            bail!("hub rejected credentials (HTTP {status}): {hint}");
+        }
         bail!("hub returned HTTP {status}: {body}");
     }
     let summary = summarize(config.command, &body);
